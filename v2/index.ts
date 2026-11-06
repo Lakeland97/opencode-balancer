@@ -4,6 +4,7 @@ import { storePath } from "./core/path";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
 import { registerHooks } from "./server/hooks";
+import { registerBalancerRpc } from "./server/rpc";
 
 const COMMAND_INPUT = {
 	additionalProperties: false,
@@ -38,6 +39,7 @@ export default Plugin.define({
 		migrate(db);
 
 		await registerHooks({ ctx, db });
+		await registerBalancerRpc({ ctx, db });
 
 		await ctx.command.transform((editor) => {
 			editor.add({

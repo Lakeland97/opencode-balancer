@@ -5,7 +5,8 @@
 		"@types/bun": "latest"
 	},
 	"exports": {
-		".": "./index.ts"
+		".": "./index.ts",
+		"./rpc": "./rpc.ts"
 	},
 	"license": "MIT",
 	"name": "opencode-balancer-v2",
