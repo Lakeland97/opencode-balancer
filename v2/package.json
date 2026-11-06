@@ -1,0 +1,19 @@
+{
+	"name": "opencode-balancer-v2",
+	"version": "0.1.0",
+	"private": true,
+	"type": "module",
+	"description": "OpenCode 2 port of @thelioo/opencode-balancer: multi-account failover with a command-driven interface.",
+	"exports": {
+		".": "./index.ts"
+	},
+	"scripts": {
+		"test": "bun test",
+		"audit": "~/.config/opencode/rules/audit.sh"
+	},
+	"devDependencies": {
+		"@opencode/plugin": "2.0.26",
+		"@types/bun": "latest"
+	},
+	"license": "MIT"
+}
