@@ -6,15 +6,15 @@ import { runCommand } from "./server/commands";
 import { registerHooks } from "./server/hooks";
 
 const COMMAND_INPUT = {
-	type: "object",
+	additionalProperties: false,
 	properties: {
 		command: {
-			type: "string",
 			description: "Command arguments for /balancer.",
+			type: "string",
 		},
 	},
 	required: ["command"],
-	additionalProperties: false,
+	type: "object",
 } as const;
 
 /**
@@ -41,7 +41,6 @@ export default Plugin.define({
 
 		await ctx.command.transform((editor) => {
 			editor.add({
-				name: "balancer",
 				description:
 					"Manage balancer accounts, provider priority, and automatic failover.",
 				execute: async ({ prompt }) => {
@@ -52,14 +51,13 @@ export default Plugin.define({
 					// prompt. Same approach as the upstream V1 plugin.
 					throw new Error(`[balancer]\n${text}`);
 				},
+				name: "balancer",
 			});
 		});
 
 		await ctx.tool.transform((editor) => {
 			editor.add({
-				name: "balancer_command",
 				description: "Run balancer account and failover commands.",
-				input: COMMAND_INPUT,
 				execute: async (input) => ({
 					content: await runCommand({
 						ctx,
@@ -67,6 +65,8 @@ export default Plugin.define({
 						raw: String((input as { command?: unknown }).command ?? ""),
 					}),
 				}),
+				input: COMMAND_INPUT,
+				name: "balancer_command",
 			});
 		});
 	},

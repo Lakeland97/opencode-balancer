@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import type { Context } from "@opencode/plugin";
+import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	getActiveAccount,
 	listAccounts,
@@ -56,9 +56,7 @@ function statusSummary(db: Database) {
 }
 
 function accountList(db: Database, providerID?: string) {
-	const accounts = providerID
-		? listAccounts(db, providerID)
-		: listAccounts(db);
+	const accounts = providerID ? listAccounts(db, providerID) : listAccounts(db);
 	if (accounts.length === 0) return "No accounts saved.";
 	return accounts.map((account) => accountLine(db, account)).join("\n");
 }
@@ -140,7 +138,8 @@ export async function runCommand({
 
 	if (action === "remove") {
 		const [providerID, alias] = args;
-		if (!providerID || !alias) return "Usage: /balancer remove <provider> <alias>";
+		if (!providerID || !alias)
+			return "Usage: /balancer remove <provider> <alias>";
 		const removed = removeAccount(db, providerID, alias);
 		return removed
 			? `Removed ${providerID}/${alias}.`

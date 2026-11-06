@@ -1,10 +1,14 @@
 import type { Database } from "bun:sqlite";
-import type { Context } from "@opencode/plugin";
+import type { Context } from "@opencode/plugin/promise/plugin";
 import { getActiveAccount } from "../core/accounts";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
-import { markRateLimited, RETRYABLE_STATUS, retryAfterMs } from "./request-state";
+import {
+	markRateLimited,
+	RETRYABLE_STATUS,
+	retryAfterMs,
+} from "./request-state";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
 
 type Tracked = { providerID: string; alias: string; at: number };
@@ -57,7 +61,7 @@ export async function registerHooks({
 			preserveExistingOAuth: !isFailover,
 		});
 
-		const tracked = { providerID, alias: account.alias, at: now() };
+		const tracked = { alias: account.alias, at: now(), providerID };
 		byRequest.set(event.request, tracked);
 		track(event.sessionID, tracked);
 	});
@@ -88,6 +92,6 @@ export async function registerHooks({
 		if (!getBalancingEnabled(db)) return;
 		if (!hasAlternativeAccount(db, tracked.providerID, tracked.alias)) return;
 
-		event.decision = { retry: true, delay: 0 };
+		event.decision = { delay: 0, retry: true };
 	});
 }

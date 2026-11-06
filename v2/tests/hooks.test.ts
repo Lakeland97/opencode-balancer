@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
-import type { Context } from "@opencode/plugin";
+import type { Context } from "@opencode/plugin/promise/plugin";
 
 import { getAccount, saveAccount, setActiveAccount } from "../core/accounts";
 import { setBalancingEnabled } from "../core/priority";
@@ -10,7 +10,7 @@ import { registerHooks } from "../server/hooks";
 import { markRateLimited } from "../server/request-state";
 
 const PROVIDER = "anthropic";
-const MODEL = { providerID: PROVIDER, id: "claude-test" };
+const MODEL = { id: "claude-test", providerID: PROVIDER };
 
 type HookCallback = (event: Record<string, unknown>) => unknown;
 
@@ -20,7 +20,7 @@ function freshDb() {
 	return db;
 }
 
-const apiAuth = (key: string) => ({ type: "api" as const, key });
+const apiAuth = (key: string) => ({ key, type: "api" as const });
 
 async function setup() {
 	const db = freshDb();
@@ -40,29 +40,29 @@ async function setup() {
 
 function requestEvent(sessionID: string, request: Request) {
 	return {
-		sessionID,
 		agent: "build",
-		model: MODEL,
 		kind: "chat",
+		model: MODEL,
 		request,
+		sessionID,
 	};
 }
 
 function newRequest() {
 	return new Request("https://api.example.test/v1/messages", {
-		method: "POST",
 		headers: { authorization: "Bearer native" },
+		method: "POST",
 	});
 }
 
 function retryEvent(sessionID: string, decision: Record<string, unknown>) {
 	return {
-		sessionID,
 		agent: "build",
-		model: MODEL,
-		error: { status: 429 },
 		attempt: 1,
 		decision,
+		error: { status: 429 },
+		model: MODEL,
+		sessionID,
 	};
 }
 
@@ -74,7 +74,9 @@ describe("http.request hook", () => {
 		const event = requestEvent("request-active", newRequest());
 		await registry["http.request"](event);
 
-		expect(event.request.headers.get("authorization")).toBe("Bearer sk-primary");
+		expect(event.request.headers.get("authorization")).toBe(
+			"Bearer sk-primary",
+		);
 	});
 
 	test("injects the alternative account's key when the active account is rate limited", async () => {
@@ -140,10 +142,10 @@ describe("retry hook", () => {
 			requestEvent("retry-failover", newRequest()),
 		);
 
-		const event = retryEvent("retry-failover", { retry: false, delay: 1_500 });
+		const event = retryEvent("retry-failover", { delay: 1_500, retry: false });
 		await registry.retry(event);
 
-		expect(event.decision).toEqual({ retry: true, delay: 0 });
+		expect(event.decision).toEqual({ delay: 0, retry: true });
 	});
 
 	test("leaves the decision unchanged when no alternative account exists", async () => {
@@ -155,11 +157,11 @@ describe("retry hook", () => {
 			requestEvent("retry-no-alternative", newRequest()),
 		);
 
-		const decision = { retry: false, delay: 2_500 };
+		const decision = { delay: 2_500, retry: false };
 		const event = retryEvent("retry-no-alternative", decision);
 		await registry.retry(event);
 
-		expect(event.decision).toEqual({ retry: false, delay: 2_500 });
+		expect(event.decision).toEqual({ delay: 2_500, retry: false });
 	});
 
 	test("leaves the decision unchanged when balancing is off", async () => {
@@ -173,10 +175,10 @@ describe("retry hook", () => {
 			requestEvent("retry-balancing-off", newRequest()),
 		);
 
-		const decision = { retry: false, delay: 3_000 };
+		const decision = { delay: 3_000, retry: false };
 		const event = retryEvent("retry-balancing-off", decision);
 		await registry.retry(event);
 
-		expect(event.decision).toEqual({ retry: false, delay: 3_000 });
+		expect(event.decision).toEqual({ delay: 3_000, retry: false });
 	});
 });

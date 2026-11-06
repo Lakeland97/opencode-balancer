@@ -1,4 +1,4 @@
-import type { Context } from "@opencode/plugin";
+import type { Context } from "@opencode/plugin/promise/plugin";
 import type { AuthInfo } from "../core/types";
 
 function stringMetadata(
@@ -33,10 +33,10 @@ export function credentialToAuth(value: unknown): AuthInfo | undefined {
 			credential.metadata as Record<string, unknown> | undefined,
 		);
 		return {
-			type: "oauth",
-			refresh,
 			access,
 			expires,
+			refresh,
+			type: "oauth",
 			...(metadata ? { metadata } : {}),
 		};
 	}
@@ -46,7 +46,11 @@ export function credentialToAuth(value: unknown): AuthInfo | undefined {
 		const metadata = stringMetadata(
 			credential.metadata as Record<string, unknown> | undefined,
 		);
-		return { type: "api", key: credential.key, ...(metadata ? { metadata } : {}) };
+		return {
+			key: credential.key,
+			type: "api",
+			...(metadata ? { metadata } : {}),
+		};
 	}
 
 	return undefined;

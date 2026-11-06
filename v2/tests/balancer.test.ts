@@ -8,13 +8,12 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
-import { migrate } from "../core/schema";
 import {
 	getBalancingEnabled,
 	listProviderPriority,
 	setBalancingEnabled,
-	setProviderModel,
 } from "../core/priority";
+import { migrate } from "../core/schema";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "../server/apply-auth";
 import { runCommand } from "../server/commands";
@@ -30,14 +29,16 @@ function freshDb() {
 	return db;
 }
 
-const apiAuth = (key: string) => ({ type: "api" as const, key });
+const apiAuth = (key: string) => ({ key, type: "api" as const });
 
 describe("account store", () => {
 	test("migrate creates the schema and stores accounts", () => {
 		const db = freshDb();
 		saveAccount(db, "anthropic", "Work", apiAuth("sk-work"));
 		expect(listAccounts(db)).toHaveLength(1);
-		expect(getAccount(db, "anthropic", "work")?.auth).toEqual(apiAuth("sk-work"));
+		expect(getAccount(db, "anthropic", "work")?.auth).toEqual(
+			apiAuth("sk-work"),
+		);
 	});
 
 	test("normalizes aliases", () => {
@@ -68,7 +69,9 @@ describe("account selection", () => {
 	test("ignores disabled accounts", () => {
 		const db = freshDb();
 		saveAccount(db, "openai", "a", apiAuth("k1"));
-		db.query("UPDATE accounts SET disabled = 1 WHERE provider_id = ?").run("openai");
+		db.query("UPDATE accounts SET disabled = 1 WHERE provider_id = ?").run(
+			"openai",
+		);
 		expect(selectHealthyAccount(db, "openai")).toBeUndefined();
 	});
 
@@ -114,7 +117,7 @@ describe("credential injection", () => {
 		const headers = new Headers({ authorization: "Bearer native" });
 		applyAuthToHeaders(
 			headers,
-			{ type: "oauth", refresh: "r", access: "a", expires: 1 },
+			{ access: "a", expires: 1, refresh: "r", type: "oauth" },
 			{ preserveExistingOAuth: true },
 		);
 		expect(headers.get("authorization")).toBe("Bearer native");
@@ -123,10 +126,10 @@ describe("credential injection", () => {
 	test("forces the saved OAuth token during failover", () => {
 		const headers = new Headers({ authorization: "Bearer native" });
 		applyAuthToHeaders(headers, {
-			type: "oauth",
-			refresh: "r",
 			access: "saved",
 			expires: 1,
+			refresh: "r",
+			type: "oauth",
 		});
 		expect(headers.get("authorization")).toBe("Bearer saved");
 	});
@@ -160,7 +163,11 @@ describe("commands", () => {
 		const db = freshDb();
 		saveAccount(db, "openai", "a", apiAuth("k1"));
 		saveAccount(db, "openai", "b", apiAuth("k2"));
-		const reply = await runCommand({ ctx: {} as never, db, raw: "use openai b" });
+		const reply = await runCommand({
+			ctx: {} as never,
+			db,
+			raw: "use openai b",
+		});
 		expect(reply).toContain("openai/b");
 		expect(getActiveAccount(db, "openai")?.alias).toBe("b");
 	});
