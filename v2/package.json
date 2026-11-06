@@ -6,6 +6,7 @@
 	},
 	"exports": {
 		".": "./index.ts",
+		"./gui-experimental": "./dist/gui-experimental.cjs",
 		"./rpc": "./rpc.ts"
 	},
 	"license": "MIT",
