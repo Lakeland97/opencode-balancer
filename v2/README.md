@@ -75,6 +75,18 @@ OpenCode loads the server part from `exports["."]`. It provides `@opencode/plugi
 npx --yes bun test        # unit tests: account store, selection, failover marking, commands
 ```
 
+## Desktop GUI
+
+OpenCode Desktop 2.2+ loads the `./gui-experimental` part automatically, giving a Balancer side
+panel with account actions, a balancing toggle, and an add form. The bundle is build output, and
+upstream's `.gitignore` excludes `dist`, so build it once after cloning:
+
+```sh
+npx --yes bun run build:gui    # vite build → v2/dist/gui-experimental.cjs
+```
+
+Open it from the command palette (**Open Balancer**) or the Balancer panel in the side region.
+
 ## Upstream sync
 
 `core/` files are unmodified copies. When rebasing on a new upstream release, diff that directory
