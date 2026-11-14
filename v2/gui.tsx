@@ -9,6 +9,7 @@ import {
 	TitlebarItem,
 } from "@opencode/plugin/gui";
 import { createSignal, For, onMount, Show } from "solid-js";
+import { modelBrand } from "./core/models";
 import { Balancer } from "./rpc";
 
 type Account = {
@@ -124,6 +125,9 @@ export default Plugin.define({
 		const [creating, setCreating] = createSignal(false);
 		// Collapses the whole models section, not just the rows.
 		const [modelsOpen, setModelsOpen] = createSignal(true);
+		const [collapsedGroups, setCollapsedGroups] = createSignal<
+			Record<string, boolean>
+		>({});
 		const [createProvider, setCreateProvider] = createSignal("");
 		const [createModels, setCreateModels] = createSignal<Models["models"]>([]);
 
@@ -211,6 +215,28 @@ export default Plugin.define({
 					),
 			);
 
+		// Rows gather under the brand their label starts with, so Claude and
+		// DeepSeek rows sit together instead of interleaving alphabetically.
+		const groupedChains = () => {
+			const groups = new Map<string, Chain[]>();
+			for (const chain of visibleChains()) {
+				const key = modelBrand(chain.label);
+				const list = groups.get(key) ?? [];
+				list.push(chain);
+				groups.set(key, list);
+			}
+			return [...groups.entries()].sort((a, b) =>
+				a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
+			);
+		};
+
+		const isGroupCollapsed = (name: string) => Boolean(collapsedGroups()[name]);
+		const toggleGroup = (name: string) =>
+			setCollapsedGroups({
+				...collapsedGroups(),
+				[name]: !collapsedGroups()[name],
+			});
+
 		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
 		const toggleCollapsed = (key: string) =>
 			setCollapsed({ ...collapsed(), [key]: !collapsed()[key] });
@@ -222,9 +248,13 @@ export default Plugin.define({
 			return rows.length > 0 && rows.every((chain) => isCollapsed(chain.key));
 		};
 		const toggleAll = () => {
-			const next: Record<string, boolean> = {};
-			for (const chain of visibleChains()) next[chain.key] = !allCollapsed();
-			setCollapsed(next);
+			const collapse = !allCollapsed();
+			const rows: Record<string, boolean> = {};
+			for (const chain of visibleChains()) rows[chain.key] = collapse;
+			const groups: Record<string, boolean> = {};
+			for (const [name] of groupedChains()) groups[name] = collapse;
+			setCollapsed(rows);
+			setCollapsedGroups(groups);
 		};
 
 		const row = {

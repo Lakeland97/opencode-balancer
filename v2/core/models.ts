@@ -97,3 +97,13 @@ export function isFreeModel(model: { cost?: unknown; modelID: string }) {
 		(tier) => (tier.input ?? 0) <= 0 && (tier.output ?? 0) <= 0,
 	);
 }
+
+/**
+ * The brand a model's label belongs to, used to group rows in the panel. The
+ * version that follows the brand (`Qwen3.7`, `Claude Fable 5.2`) is dropped.
+ */
+export function modelBrand(label: string) {
+	const first = label.trim().split(/\s+/)[0] ?? label;
+	const stripped = first.replace(/[\d.].*$/, "").replace(/[^A-Za-z]+$/, "");
+	return stripped.length >= 2 ? stripped : first;
+}
