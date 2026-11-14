@@ -14,7 +14,10 @@ import { Balancer } from "./rpc";
 type Account = {
 	providerID: string;
 	alias: string;
+	/** The stored default for this provider. */
 	active: boolean;
+	/** What would authorise the next request, fallback included. */
+	inUse: boolean;
 	disabled: boolean;
 	limited: boolean;
 	failures: number;
@@ -27,16 +30,17 @@ type Reply = { ok: boolean; message: string };
 export default Plugin.define({
 	i18n: {
 		en: {
+			active: "active",
 			add: "add",
 			alias: "alias",
 			balancing: "balancing",
-			noAccounts: "no accounts yet — add one below",
-			noneHealthy: "no healthy account",
+			disabled: "disabled",
+			inUse: "in use",
+			limited: "limited",
 			open: "Open Balancer",
 			provider: "provider",
 			refresh: "refresh",
 			remove: "remove",
-			serving: "serving now",
 			title: "Balancer",
 			use: "use",
 		},
@@ -47,29 +51,6 @@ export default Plugin.define({
 		const [message, setMessage] = createSignal("");
 		const [provider, setProvider] = createSignal("");
 		const [alias, setAlias] = createSignal("");
-
-		// What each provider is authorising requests with right now, before the
-		// user touches anything. The account flagged `active` is the one the
-		// server would pick, including a fallback when the stored one is limited.
-		const serving = () => {
-			const groups = new Map<string, Account[]>();
-			for (const account of accounts()) {
-				const list = groups.get(account.providerID) ?? [];
-				list.push(account);
-				groups.set(account.providerID, list);
-			}
-			if (groups.size === 0) return ctx.t("noAccounts");
-			const parts: string[] = [];
-			for (const [providerID, list] of groups) {
-				const live = list.find((account) => account.active);
-				parts.push(
-					live
-						? `${providerID}/${live.alias}`
-						: `${providerID} · ${ctx.t("noneHealthy")}`,
-				);
-			}
-			return `${ctx.t("serving")}: ${parts.join(", ")}`;
-		};
 
 		const refresh = async () => {
 			try {
@@ -88,7 +69,8 @@ export default Plugin.define({
 		const run = async (action: () => Promise<unknown>) => {
 			try {
 				const reply = (await action()) as Reply;
-				setMessage(reply.message);
+				// The rows already show the result; only failures need words.
+				setMessage(reply.ok ? "" : reply.message);
 				await refresh();
 			} catch (error) {
 				setMessage(error instanceof Error ? error.message : String(error));
@@ -139,8 +121,6 @@ export default Plugin.define({
 						<button onClick={() => void refresh()}>{ctx.t("refresh")}</button>
 					</div>
 
-					<div style={{ opacity: 0.7 }}>{serving()}</div>
-
 					<Show when={message()}>
 						<div style={{ opacity: 0.7 }}>{message()}</div>
 					</Show>
@@ -156,9 +136,13 @@ export default Plugin.define({
 									}}
 								>
 									{account.providerID}/{account.alias}
-									{account.active ? " · active" : ""}
-									{account.limited ? " · limited" : ""}
-									{account.disabled ? " · disabled" : ""}
+									{account.inUse
+										? ` · ${ctx.t("inUse")}`
+										: account.active
+											? ` · ${ctx.t("active")}`
+											: ""}
+									{account.limited ? ` · ${ctx.t("limited")}` : ""}
+									{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
 								</span>
 								<button
 									onClick={() =>

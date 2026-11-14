@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
+	getActiveAccount,
 	listAccounts,
 	removeAccount,
 	renameAccount,
@@ -67,14 +68,17 @@ export async function registerBalancerRpc({
 				: listAccounts(db);
 			return {
 				accounts: accounts.map((account) => ({
-					// What is serving right now, which is the active account unless it
-					// is limited or disabled — then the fallback.
+					// The stored default, which is what the user chose.
 					active:
-						selectHealthyAccount(db, account.providerID)?.alias ===
-						account.alias,
+						getActiveAccount(db, account.providerID)?.alias === account.alias,
 					alias: account.alias,
 					disabled: account.disabled,
 					failures: account.failures,
+					// What would actually authorise the next request: the default
+					// unless it is limited or disabled, then the fallback.
+					inUse:
+						selectHealthyAccount(db, account.providerID)?.alias ===
+						account.alias,
 					limited: Boolean(
 						account.rateLimitedUntil && account.rateLimitedUntil > now(),
 					),
