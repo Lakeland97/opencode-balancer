@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { orderedAccounts } from "./accounts";
+import { listAccounts, orderedAccounts } from "./accounts";
 
 /**
  * Which provider comes first, derived from the credentials the router walks.
@@ -38,6 +38,60 @@ export function setBalancingEnabled(db: Database, enabled: boolean) {
 const freeOnlyPrefix = "free_only:";
 
 /**
+ * Write the order `provider_priority` held onto the credentials themselves.
+ *
+ * Rebuilding the table for the two new columns left every credential at zero,
+ * so without this the order the user had would collapse into an alphabetical
+ * one. The old order is reproduced faithfully: providers in the order
+ * `listProviderPriority` used to report — stored rows by position, everything
+ * else alphabetical after them — and each provider's credentials kept together
+ * in their own order, exactly the sequence an automatic row used to route in.
+ *
+ * Only an order-less table is seeded. Positions that are already real are the
+ * user's, written by `↑ ↓`, and must never be resorted on a later boot.
+ */
+function seedCredentialOrder(db: Database) {
+	const accounts = listAccounts(db);
+	if (accounts.length < 2) return;
+	if (accounts.some((account) => account.position !== 0)) return;
+
+	const stored = new Map(
+		db
+			.query<{ position: number; provider_id: string }, []>(
+				"SELECT provider_id, position FROM provider_priority",
+			)
+			.all()
+			.map((row) => [row.provider_id, row.position]),
+	);
+
+	const providers = [...new Set(accounts.map((account) => account.providerID))];
+	providers.sort((a, b) => {
+		const left = stored.get(a);
+		const right = stored.get(b);
+		if (left !== undefined && right !== undefined) {
+			return left - right || a.localeCompare(b);
+		}
+		if (left !== undefined) return -1;
+		if (right !== undefined) return 1;
+		return a.localeCompare(b);
+	});
+
+	const write = db.transaction(() => {
+		let position = 0;
+		for (const providerID of providers) {
+			for (const account of orderedAccounts(db, providerID)) {
+				db.query<unknown, [number, string, string]>(
+					`UPDATE accounts SET position = ?
+                     WHERE provider_id = ? AND alias = ?`,
+				).run(position, account.providerID, account.alias);
+				position += 1;
+			}
+		}
+	});
+	write();
+}
+
+/**
  * Move the switches that used to belong to a provider onto its credentials.
  *
  * This fork once kept `free models only` as a setting per provider and the
@@ -74,6 +128,9 @@ export function migrateProviderSettings(db: Database) {
 			"UPDATE accounts SET disabled = 1 WHERE provider_id = ?",
 		).run(row.provider_id);
 	}
+
+	// The order has to be read before the table that holds it is emptied.
+	seedCredentialOrder(db);
 	// Positions come from the credentials now, so nothing is left to read here.
 	db.query<unknown, []>("DELETE FROM provider_priority").run();
 }

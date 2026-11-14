@@ -418,4 +418,43 @@ describe("the provider's place in the order", () => {
 		migrateProviderSettings(db);
 		expect(getAccount(db, "p1", "c")?.freeOnly).toBe(false);
 	});
+
+	test("the order the provider had seeds the credentials that held it", () => {
+		const db = freshDb();
+		// Rebuilding the table for the new columns leaves every credential at
+		// zero, which is the state an existing database upgrades in.
+		db.query("UPDATE accounts SET position = 0").run();
+		// p2 led p1 there, so it must still lead once the order is the accounts'.
+		db.query(
+			`INSERT INTO provider_priority (provider_id, position, model_id, enabled, updated_at)
+             VALUES ('p2', 0, NULL, 1, 0)`,
+		).run();
+		db.query(
+			`INSERT INTO provider_priority (provider_id, position, model_id, enabled, updated_at)
+             VALUES ('p1', 1, NULL, 1, 0)`,
+		).run();
+
+		migrateProviderSettings(db);
+
+		// p2/a first, then p1's own credentials together as they were.
+		expect(
+			orderedAccounts(db).map((a) => `${a.providerID}/${a.alias}`),
+		).toEqual(["p2/a", "p1/a", "p1/b"]);
+	});
+
+	test("an order the user has already set is never resorted", () => {
+		const db = freshDb();
+		// p2/a lifted above p1's second credential: real positions, and a row
+		// order alphabetical seeding would get wrong.
+		moveAccount(db, "p2", "a", -1);
+		const before = orderedAccounts(db).map((a) => `${a.providerID}/${a.alias}`);
+		expect(before).toEqual(["p1/a", "p2/a", "p1/b"]);
+
+		migrateProviderSettings(db);
+		migrateProviderSettings(db);
+
+		expect(
+			orderedAccounts(db).map((a) => `${a.providerID}/${a.alias}`),
+		).toEqual(before);
+	});
 });
