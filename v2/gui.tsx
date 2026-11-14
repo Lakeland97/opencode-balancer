@@ -30,10 +30,13 @@ export default Plugin.define({
 			add: "add",
 			alias: "alias",
 			balancing: "balancing",
+			noAccounts: "no accounts yet — add one below",
+			noneHealthy: "no healthy account",
 			open: "Open Balancer",
 			provider: "provider",
 			refresh: "refresh",
 			remove: "remove",
+			serving: "serving now",
 			title: "Balancer",
 			use: "use",
 		},
@@ -44,6 +47,29 @@ export default Plugin.define({
 		const [message, setMessage] = createSignal("");
 		const [provider, setProvider] = createSignal("");
 		const [alias, setAlias] = createSignal("");
+
+		// What each provider is authorising requests with right now, before the
+		// user touches anything. The account flagged `active` is the one the
+		// server would pick, including a fallback when the stored one is limited.
+		const serving = () => {
+			const groups = new Map<string, Account[]>();
+			for (const account of accounts()) {
+				const list = groups.get(account.providerID) ?? [];
+				list.push(account);
+				groups.set(account.providerID, list);
+			}
+			if (groups.size === 0) return ctx.t("noAccounts");
+			const parts: string[] = [];
+			for (const [providerID, list] of groups) {
+				const live = list.find((account) => account.active);
+				parts.push(
+					live
+						? `${providerID}/${live.alias}`
+						: `${providerID} · ${ctx.t("noneHealthy")}`,
+				);
+			}
+			return `${ctx.t("serving")}: ${parts.join(", ")}`;
+		};
 
 		const refresh = async () => {
 			try {
@@ -112,6 +138,8 @@ export default Plugin.define({
 						</label>
 						<button onClick={() => void refresh()}>{ctx.t("refresh")}</button>
 					</div>
+
+					<div style={{ opacity: 0.7 }}>{serving()}</div>
 
 					<Show when={message()}>
 						<div style={{ opacity: 0.7 }}>{message()}</div>
