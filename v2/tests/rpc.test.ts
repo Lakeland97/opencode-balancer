@@ -4,8 +4,48 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { saveAccount } from "../core/accounts";
 import { getStoredChain } from "../core/chains";
 import { migrate } from "../core/schema";
+import { balancerDefinition } from "../rpc";
 import { invalidateCatalog } from "../server/connectors";
 import { registerBalancerRpc } from "../server/rpc";
+
+type Schema = {
+	items?: Schema;
+	properties?: Record<string, Schema>;
+	required?: string[];
+};
+
+/**
+ * The RPC layer validates handler output against this contract, so a key that
+ * is required but never declared makes every call fail at runtime.
+ */
+function assertContractIsWellFormed(schema: Schema, path: string) {
+	for (const key of schema.required ?? []) {
+		if (!schema.properties?.[key]) {
+			throw new Error(`${path}: required ${key} is not declared`);
+		}
+	}
+	for (const [key, value] of Object.entries(schema.properties ?? {})) {
+		assertContractIsWellFormed(value, `${path}.${key}`);
+	}
+	if (schema.items) assertContractIsWellFormed(schema.items, `${path}[]`);
+}
+
+describe("contract", () => {
+	test("every declared requirement exists and validates against output", async () => {
+		for (const [name, method] of Object.entries(
+			balancerDefinition.methods as Record<string, { output: Schema }>,
+		)) {
+			assertContractIsWellFormed(method.output, name);
+		}
+
+		// The shapes the panel reads are also checked against real output.
+		const db = freshDb();
+		const rpc = await handlers(db);
+		await rpc.chains({});
+		await rpc.list({});
+		await rpc.priority({});
+	});
+});
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 const OTHER_PACKAGE = "@opencode/ai/providers/anthropic-compatible";

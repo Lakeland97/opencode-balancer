@@ -64,7 +64,7 @@ const account = object(
  * Typed surface for clients (GUI part, TUI, SDK) to manage accounts without
  * parsing command output.
  */
-const definition = {
+export const balancerDefinition = {
 	events: {
 		// Lets the server-side command surface ask an open Desktop window to
 		// reveal the panel; a terminal-only session simply has no listener.
@@ -151,6 +151,7 @@ const definition = {
 						items: object(
 							{
 								enabled: bool,
+								freeOnly: bool,
 								modelID: str,
 								name: str,
 								position: num,
@@ -207,4 +208,4 @@ const definition = {
 	},
 } satisfies Rpc.PortableDefinition;
 
-export const Balancer = Rpc.define(definition);
+export const Balancer = Rpc.define(balancerDefinition);
