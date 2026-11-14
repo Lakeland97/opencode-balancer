@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { getStoredChain } from "../core/chains";
+import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import { balancerDefinition } from "../rpc";
 import { invalidateCatalog } from "../server/connectors";
@@ -255,6 +256,49 @@ describe("chain rpc", () => {
 		const row = listed.rows.find((entry) => entry.key === "mimo-v2.6-flash");
 		expect(row?.stored).toBe(true);
 		expect(row?.targets.length).toBe(1);
+	});
+
+	test("a free-only provider shows the model it will actually use", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						...connectors,
+						model("p1", "deepseek-v4.1-flash-free", 200_000),
+						model("p3", "deepseek-v4.1-flash", 1_000_000),
+					],
+				}),
+			},
+			provider: { list: async () => ({ data: [] }) },
+			rpc: {
+				register: async (
+					_definition: unknown,
+					registered: Record<string, unknown>,
+				) => ({ ...registered, events: { emit: async () => {} } }),
+			},
+		} as never;
+		const rpc = (await registerBalancerRpc({
+			buffer: { kind: "percent", percent: 0.75 },
+			ctx,
+			db,
+		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+		setFreeOnly(db, "p1", true);
+		invalidateCatalog();
+
+		const listed = (await rpc.chains({})) as {
+			rows: {
+				key: string;
+				targets: { modelID: string; providerID: string; resolved: string }[];
+			}[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		const paid = row?.targets.find((target) => target.providerID === "p1");
+		expect(paid?.modelID).toBe("deepseek-v4.1-flash");
+		expect(paid?.resolved).toBe("deepseek-v4.1-flash-free");
 	});
 
 	test("chainModels lists only routable models for a provider", async () => {

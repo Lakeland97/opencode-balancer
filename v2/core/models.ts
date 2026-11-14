@@ -92,7 +92,9 @@ type CostTier = { input?: number; output?: number };
 export function isFreeModel(model: { cost?: unknown; modelID: string }) {
 	if (/(^|[/:_-])free$/i.test(model.modelID)) return true;
 	const tiers = Array.isArray(model.cost) ? (model.cost as CostTier[]) : [];
-	if (tiers.length === 0) return true;
+	// Missing pricing is unknown, not free: treating it as free would let a
+	// free-only provider spend money on a model it was told to avoid.
+	if (tiers.length === 0) return false;
 	return tiers.every(
 		(tier) => (tier.input ?? 0) <= 0 && (tier.output ?? 0) <= 0,
 	);

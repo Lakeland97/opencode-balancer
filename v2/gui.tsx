@@ -31,7 +31,13 @@ type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
 
-type Target = { modelID: string; providerID: string; state: string };
+type Target = {
+	modelID: string;
+	providerID: string;
+	/** What is actually sent, once a free-only provider substitutes. */
+	resolved: string;
+	state: string;
+};
 type Chain = {
 	context: number;
 	declaredContext: number;
@@ -535,6 +541,17 @@ export default Plugin.define({
 																	>
 																		{index() + 1}. {target.providerID} ·{" "}
 																		{target.modelID}
+																		<Show
+																			when={
+																				target.resolved &&
+																				target.resolved !== target.modelID
+																			}
+																		>
+																			<span style={{ opacity: 0.6 }}>
+																				{" "}
+																				→ {target.resolved}
+																			</span>
+																		</Show>
 																		<Show when={target.state === "next"}>
 																			<span style={{ opacity: 0.6 }}>
 																				{" "}

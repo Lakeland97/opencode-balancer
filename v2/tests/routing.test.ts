@@ -149,7 +149,9 @@ describe("chain routing", () => {
 
 describe("free-only providers", () => {
 	test("free variants are recognised by id or zero cost", () => {
-		expect(isFreeModel({ cost: [], modelID: "openai/gpt-5" })).toBe(true);
+		// No pricing data means unknown, which must not be read as free.
+		expect(isFreeModel({ cost: [], modelID: "openai/gpt-5" })).toBe(false);
+		expect(isFreeModel({ modelID: "openai/gpt-5" })).toBe(false);
 		expect(
 			isFreeModel({
 				cost: [{ input: 0, output: 0 }],

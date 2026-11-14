@@ -12,6 +12,7 @@ import {
 import { type CompactionBuffer, declaredContext } from "../core/context";
 import {
 	getBalancingEnabled,
+	isFreeOnly,
 	listProviderPriority,
 	moveProvider,
 	setBalancingEnabled,
@@ -30,6 +31,7 @@ import {
 } from "./chain-actions";
 import { readCompactionBuffer } from "./compaction-config";
 import {
+	type FamilyRoute,
 	invalidateCatalog,
 	loadCatalog,
 	type ModelFamily,
@@ -40,6 +42,18 @@ import { chooseRoute, isProviderEnabled } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
 type Pair = { providerID: string; alias: string };
+
+/**
+ * The model a target will actually be sent to. A free-only provider is handed
+ * its own free spelling of the model, which the row should show rather than the
+ * paid id it was configured with.
+ */
+function resolvedModelID(db: Database, target: FamilyRoute): string {
+	if (target.free !== false || !isFreeOnly(db, target.providerID)) {
+		return target.modelID;
+	}
+	return target.freeVariant?.modelID ?? target.modelID;
+}
 
 function targetState(
 	db: Database,
@@ -189,6 +203,7 @@ export async function registerBalancerRpc({
 						targets: resolveChain(db, family).map((target) => ({
 							modelID: target.modelID,
 							providerID: target.providerID,
+							resolved: resolvedModelID(db, target),
 							state: targetState(db, family, target),
 						})),
 					};

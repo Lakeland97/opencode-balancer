@@ -22,9 +22,11 @@ const chainTarget = object(
 	{
 		modelID: str,
 		providerID: str,
+		/** The model actually sent, once a free-only provider substitutes. */
+		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "state"],
+	["providerID", "modelID", "resolved", "state"],
 );
 const chainRow = object(
 	{
