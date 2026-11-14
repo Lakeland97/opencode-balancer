@@ -27,6 +27,14 @@ export type Account = {
 	rateLimitedUntil?: number;
 	failures: number;
 	disabled: boolean;
+	/**
+	 * Where this credential sits in the balancer's order. Credentials are the
+	 * unit the panel lists and the router walks, so the order spans providers:
+	 * a provider's place is the earliest of its credentials.
+	 */
+	position: number;
+	/** Whether this credential may only use models that cost nothing. */
+	freeOnly: boolean;
 	/** The OpenCode credential this account was imported from, when it was. */
 	sourceID?: string;
 };

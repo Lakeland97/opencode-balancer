@@ -14,6 +14,8 @@ type AccountRow = {
 	failures: number;
 	disabled: number;
 	source_id: string | null;
+	position: number;
+	free_only: number;
 };
 
 const authTypes = ["api", "oauth", "wellknown"] as const;
@@ -178,6 +180,24 @@ function validateDisabled(row: AccountRow) {
 	return Boolean(row.disabled);
 }
 
+function validateFlag(row: AccountRow, column: "free_only") {
+	if (row[column] !== 0 && row[column] !== 1) {
+		throw new Error(
+			`Invalid account row for ${accountRowID(row)}: ${column} ${row[column]} is invalid`,
+		);
+	}
+	return Boolean(row[column]);
+}
+
+function validatePosition(row: AccountRow) {
+	if (!Number.isInteger(row.position) || row.position < 0) {
+		throw new Error(
+			`Invalid account row for ${accountRowID(row)}: position ${row.position} is invalid`,
+		);
+	}
+	return row.position;
+}
+
 function accountFromRow(row: AccountRow): Account {
 	const auth = parseAccountAuth(row);
 	const authType = validateAccountAuthType(row);
@@ -194,7 +214,9 @@ function accountFromRow(row: AccountRow): Account {
 		createdAt: row.created_at,
 		disabled: validateDisabled(row),
 		failures: row.failures,
+		freeOnly: validateFlag(row, "free_only"),
 		lastUsedAt: row.last_used_at ?? undefined,
+		position: validatePosition(row),
 		providerID: row.provider_id,
 		rateLimitedUntil: row.rate_limited_until ?? undefined,
 		sourceID: row.source_id ?? undefined,
@@ -253,8 +275,10 @@ export function saveAccount(
                  created_at,
                  updated_at,
                  failures,
-                 disabled
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 disabled,
+                 position
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?,
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM accounts))
              ON CONFLICT(provider_id, alias) DO UPDATE SET
                  auth_json = excluded.auth_json,
                  auth_type = excluded.auth_type,
@@ -358,7 +382,7 @@ export function getAccount(
 	const row = db
 		.query<AccountRow, [string, string]>(
 			`SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
-                    last_used_at, rate_limited_until, failures, disabled, source_id
+                    last_used_at, rate_limited_until, failures, disabled, source_id, position, free_only
              FROM accounts
              WHERE provider_id = ? AND alias = ?`,
 		)
@@ -368,7 +392,7 @@ export function getAccount(
 
 export function listAccounts(db: Database, providerID?: string): Account[] {
 	const sql = `SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
-                        last_used_at, rate_limited_until, failures, disabled, source_id
+                        last_used_at, rate_limited_until, failures, disabled, source_id, position, free_only
                  FROM accounts`;
 	const rows = providerID
 		? db
@@ -378,6 +402,82 @@ export function listAccounts(db: Database, providerID?: string): Account[] {
 				.all(providerID)
 		: db.query<AccountRow, []>(`${sql} ORDER BY provider_id, alias`).all();
 	return rows.map(accountFromRow);
+}
+
+/**
+ * Every account in the balancer's order, which is what the panel lists and the
+ * router walks. Credentials are the unit, so the order spans providers: a
+ * provider's place is where its earliest credential sits. `moveAccount` writes
+ * positions densely, and a tie falls back to provider and alias so the order is
+ * never ambiguous.
+ */
+export function orderedAccounts(db: Database, providerID?: string): Account[] {
+	return listAccounts(db, providerID).sort((a, b) => {
+		if (a.position !== b.position) return a.position - b.position;
+		const provider = a.providerID.localeCompare(b.providerID);
+		return provider === 0 ? a.alias.localeCompare(b.alias) : provider;
+	});
+}
+
+/** Switch a credential on or off; `disabled` is what the health check reads. */
+export function setAccountEnabled(
+	db: Database,
+	providerID: string,
+	alias: string,
+	enabled: boolean,
+) {
+	db.query<unknown, [number, number, string, string]>(
+		`UPDATE accounts SET disabled = ?, updated_at = ?
+         WHERE provider_id = ? AND alias = ?`,
+	).run(enabled ? 0 : 1, now(), providerID, normalizeAlias(alias));
+}
+
+/** Whether this credential may only be sent models that cost nothing. */
+export function setAccountFreeOnly(
+	db: Database,
+	providerID: string,
+	alias: string,
+	freeOnly: boolean,
+) {
+	db.query<unknown, [number, number, string, string]>(
+		`UPDATE accounts SET free_only = ?, updated_at = ?
+         WHERE provider_id = ? AND alias = ?`,
+	).run(freeOnly ? 1 : 0, now(), providerID, normalizeAlias(alias));
+}
+
+/**
+ * Move one credential a step through the order, swapping it with the row it
+ * passes and renumbering densely, so a later move always has a neighbour to
+ * trade places with.
+ */
+export function moveAccount(
+	db: Database,
+	providerID: string,
+	alias: string,
+	delta: number,
+) {
+	const all = orderedAccounts(db);
+	const wanted = normalizeAlias(alias);
+	const from = all.findIndex(
+		(account) => account.providerID === providerID && account.alias === wanted,
+	);
+	if (from < 0) return;
+	const to = from + delta;
+	if (to < 0 || to >= all.length) return;
+
+	const reordered = all.slice();
+	const [moved] = reordered.splice(from, 1);
+	reordered.splice(to, 0, moved);
+
+	const write = db.transaction(() => {
+		for (const [position, account] of reordered.entries()) {
+			db.query<unknown, [number, number, string, string]>(
+				`UPDATE accounts SET position = ?, updated_at = ?
+                 WHERE provider_id = ? AND alias = ?`,
+			).run(position, now(), account.providerID, account.alias);
+		}
+	});
+	write();
 }
 
 export function setActiveAccount(
@@ -514,7 +614,7 @@ function findBySourceID(
 	const row = db
 		.query<AccountRow, [string, string]>(
 			`SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
-                    last_used_at, rate_limited_until, failures, disabled, source_id
+                    last_used_at, rate_limited_until, failures, disabled, source_id, position, free_only
              FROM accounts
              WHERE provider_id = ? AND source_id = ?`,
 		)
@@ -624,8 +724,10 @@ export function importAccount(
                  updated_at,
                  failures,
                  disabled,
-                 source_id
-             ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+                 source_id,
+                 position
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?,
+                 (SELECT COALESCE(MAX(position), -1) + 1 FROM accounts))
              ON CONFLICT(provider_id, alias) DO UPDATE SET
                  auth_json = excluded.auth_json,
                  auth_type = excluded.auth_type,

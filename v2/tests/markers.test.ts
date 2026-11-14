@@ -8,9 +8,13 @@ import {
 	listAccounts,
 	markAccountUsed,
 	mostRecentlyUsed,
+	moveAccount,
+	orderedAccounts,
 	readLimitedReason,
 	removeAccount,
 	saveAccount,
+	setAccountEnabled,
+	setAccountFreeOnly,
 	setActiveAccount,
 } from "../core/accounts";
 import { migrate } from "../core/schema";
@@ -307,5 +311,52 @@ describe("account markers", () => {
 		expect(
 			listAccounts(db, "p1").find((a) => a.alias === "a")?.lastUsedAt,
 		).toBe(42);
+	});
+});
+
+describe("the credential order", () => {
+	const order = (db: Database) =>
+		orderedAccounts(db).map(
+			(account) => `${account.providerID}/${account.alias}`,
+		);
+
+	test("a new credential lands at the end rather than the front", () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "z", { key: "k", type: "api" });
+		const listed = order(db);
+		expect(listed[listed.length - 1]).toBe("p3/z");
+	});
+
+	test("a move swaps the credential with the row it passes", () => {
+		const db = freshDb();
+		// p1/a sits above p1/b, so lifting b puts it above a and leaves the rest.
+		moveAccount(db, "p1", "b", -1);
+		expect(order(db)).toEqual(["p1/b", "p1/a", "p2/a"]);
+	});
+
+	test("a move off either end is a no-op", () => {
+		const db = freshDb();
+		const before = order(db);
+		moveAccount(db, "p1", "a", -1);
+		moveAccount(db, "p2", "a", 1);
+		moveAccount(db, "nobody", "n", 1);
+		expect(order(db)).toEqual(before);
+	});
+
+	test("a credential carries its own switches", () => {
+		const db = freshDb();
+		setAccountEnabled(db, "p1", "b", false);
+		setAccountFreeOnly(db, "p1", "b", true);
+
+		expect(getAccount(db, "p1", "b")?.disabled).toBe(true);
+		expect(getAccount(db, "p1", "b")?.freeOnly).toBe(true);
+		// The neighbour is untouched: these are per credential, not per provider.
+		expect(getAccount(db, "p1", "a")?.disabled).toBe(false);
+		expect(getAccount(db, "p1", "a")?.freeOnly).toBe(false);
+
+		setAccountEnabled(db, "p1", "b", true);
+		setAccountFreeOnly(db, "p1", "b", false);
+		expect(getAccount(db, "p1", "b")?.disabled).toBe(false);
+		expect(getAccount(db, "p1", "b")?.freeOnly).toBe(false);
 	});
 });

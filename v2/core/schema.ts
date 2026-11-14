@@ -65,6 +65,8 @@ function recreateAccounts(db: Database) {
 		"failures",
 		"disabled",
 		"source_id",
+		"position",
+		"free_only",
 	]);
 
 	db.exec(`
@@ -81,6 +83,8 @@ function recreateAccounts(db: Database) {
             failures INTEGER NOT NULL DEFAULT 0,
             disabled INTEGER NOT NULL DEFAULT 0,
             source_id TEXT,
+            position INTEGER NOT NULL DEFAULT 0,
+            free_only INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (provider_id, alias)
         );
     `);
@@ -99,12 +103,15 @@ function recreateAccounts(db: Database) {
 			number,
 			number,
 			string | null,
+			number,
+			number,
 		]
 	>(
 		`INSERT OR REPLACE INTO accounts_new (
              provider_id, alias, auth_json, auth_type, created_at, updated_at,
-             last_used_at, rate_limited_until, failures, disabled, source_id
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             last_used_at, rate_limited_until, failures, disabled, source_id,
+             position, free_only
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const row of rows) {
 		if (
@@ -131,6 +138,8 @@ function recreateAccounts(db: Database) {
 			typeof row.failures === "number" ? row.failures : 0,
 			row.disabled === 1 ? 1 : 0,
 			typeof row.source_id === "string" ? row.source_id : null,
+			typeof row.position === "number" ? row.position : 0,
+			row.free_only === 1 ? 1 : 0,
 		);
 	}
 
@@ -428,6 +437,8 @@ const requiredColumns: Record<string, string[]> = {
 		"failures",
 		"disabled",
 		"source_id",
+		"position",
+		"free_only",
 	],
 	events: [
 		"id",
