@@ -95,6 +95,17 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   credential is retried hourly for the rest of the month, and each attempt is what clears
   its own `limited` marker. Honouring a stated reset, or scaling the cap, is an open
   design decision — how long to trust a park — not a bug to fix silently.
+- **The two RPC sections disagree about an expired park.** `list` calls a credential
+  `limited`, and so not `active`, whenever `rate_limited_until` is set, on the reasoning
+  that a park is cleared by the next attempt rather than the clock (`server/rpc.ts:244`);
+  `chains` calls the same credential healthy once the timestamp is in the past
+  (`server/rpc.ts:85`), because routing itself would use it then (`server/selection.ts:8`).
+  The park clears the moment that credential serves again (`core/accounts.ts:38`), so the
+  window is transient — but between expiry and next use the panel's two sections can
+  disagree, and the `status` count follows `list`. Which reading is right depends on what
+  `active` is taken to mean: "the balancer can send here now" says the clock, "this
+  credential has not failed since it was last tried" says the marker. Worth settling
+  before the marker is trusted for anything else.
 
 **Tech Stack:** TypeScript, Bun (`bun:sqlite`, `bun:test`), SolidJS GUI bundle via Vite, OpenCode 2 plugin API (`@opencode/plugin`).
 
