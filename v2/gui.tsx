@@ -107,6 +107,7 @@ export default Plugin.define({
 			addTarget: "add target",
 			always: "always",
 			apply: "apply",
+			at: "at",
 			balancing: "balancing",
 			buffer: "buffer",
 			clear: "clear",
@@ -495,6 +496,29 @@ export default Plugin.define({
 								{formatTokens(bufferTokens())}
 							</span>
 						</Show>
+						{/* Where the limit and the buffer land, labelled: a bare
+						    number beside them read as belonging to neither, and it
+						    is neither — it is where the cut actually falls. */}
+						<Show when={cutTokens() > 0}>
+							<span
+								style={{
+									"align-items": "center",
+									display: "flex",
+									gap: "4px",
+									"white-space": "nowrap",
+								}}
+							>
+								<span
+									style={{ opacity: 0.7 }}
+									title="where the cut actually lands: the limit, less the buffer where the buffer is enforced. A model whose real window is smaller is cut below this, and one whose window is unknown is measured against the declared 1M."
+								>
+									{ctx.t("at")}
+								</span>
+								<span style={{ opacity: 0.6 }}>
+									{formatTokens(cutTokens())}
+								</span>
+							</span>
+						</Show>
 						{/* Whether that room comes off a limit that already leaves
 						    plenty: the user's call, since only a limit that has run
 						    into the model needs it. The label and its dropdown are one
@@ -530,17 +554,6 @@ export default Plugin.define({
 								<option value="necessary">{ctx.t("necessary")}</option>
 							</select>
 						</span>
-						{/* What the three fields to its left work out to, at the end
-						    of the line: a bare number between them read as belonging
-						    to neither. */}
-						<Show when={cutTokens() > 0}>
-							<span
-								style={{ opacity: 0.6 }}
-								title="what this cuts at: the limit, less the buffer where the buffer is enforced. A model whose real window is smaller is cut below this, and one whose window is unknown is measured against the declared 1M."
-							>
-								{formatTokens(cutTokens())}
-							</span>
-						</Show>
 					</div>
 
 					<Show when={message()}>
