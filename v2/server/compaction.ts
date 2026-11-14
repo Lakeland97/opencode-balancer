@@ -2,8 +2,9 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	effectiveThreshold,
+	readBufferSpec,
 	readGlobalPercent,
-	readTargetPercent,
+	readModelPercent,
 } from "../core/context";
 import { balancerTargetFor } from "./hooks";
 import { recordLog } from "./log";
@@ -65,13 +66,10 @@ export function createCompactionController(input: {
 
 	const thresholdFor = (target: SessionTarget) =>
 		effectiveThreshold({
+			buffer: readBufferSpec(input.db),
 			globalPercent: readGlobalPercent(input.db),
+			modelPercent: readModelPercent(input.db, target.familyKey),
 			realContext: target.context,
-			targetPercent: readTargetPercent(
-				input.db,
-				target.familyKey,
-				target.providerID,
-			),
 		});
 
 	return {

@@ -12,7 +12,7 @@ import {
 	TitlebarItem,
 } from "@opencode/plugin/gui";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { DECLARED_CONTEXT, MAX_PERCENT } from "./core/context";
+import { DECLARED_CONTEXT, MAX_PERCENT, parseBuffer } from "./core/context";
 import { groupByBrand } from "./core/models";
 import { Balancer } from "./rpc";
 
@@ -43,13 +43,13 @@ type Target = {
 	/** What is actually sent, once a free-only provider substitutes. */
 	resolved: string;
 	state: string;
-	/** This model's own share of its window, 0 when it follows the global. */
-	percent: number;
 };
 type Chain = {
 	key: string;
 	label: string;
 	package: string;
+	/** This model's own share of its window, 0 when it follows the global. */
+	percent: number;
 	stored: boolean;
 	targets: Target[];
 };
@@ -97,6 +97,8 @@ function builtAt() {
 /** A token count the way it is said aloud: 200000 reads as 200k, 1000000 as 1m. */
 function size(value: number) {
 	if (!Number.isFinite(value) || value <= 0) return "";
+	// A buffer can be small enough that rounding to thousands would misreport it.
+	if (value < 1_000) return String(Math.round(value));
 	if (value >= 1_000_000) {
 		const millions = value / 1_000_000;
 		return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}m`;
@@ -111,6 +113,7 @@ export default Plugin.define({
 			addTarget: "add target",
 			apply: "apply",
 			balancing: "balancing",
+			buffer: "buffer",
 			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
@@ -142,6 +145,10 @@ export default Plugin.define({
 		// field being typed into. A model may override it with its own share.
 		const [globalPercent, setGlobalPercent] = createSignal(20);
 		const [globalDraft, setGlobalDraft] = createSignal("20");
+		// The room kept free below a model's window, as typed: a size in
+		// thousands or a share like 10%. Empty means the built-in rule.
+		const [buffer, setBuffer] = createSignal("");
+		const [bufferDraft, setBufferDraft] = createSignal("");
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		const [providers, setProviders] = createSignal<Provider[]>([]);
@@ -171,14 +178,16 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order, settings, log] = await Promise.all([
-					rpc.status({}),
-					rpc.list({}),
-					rpc.chains({}),
-					rpc.priority({}),
-					rpc.contextPercent({}),
-					rpc.log({}),
-				]);
+				const [status, list, rows, order, settings, room, log] =
+					await Promise.all([
+						rpc.status({}),
+						rpc.list({}),
+						rpc.chains({}),
+						rpc.priority({}),
+						rpc.contextPercent({}),
+						rpc.contextBuffer({}),
+						rpc.log({}),
+					]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
@@ -186,6 +195,8 @@ export default Plugin.define({
 				setProviders([...(order as Providers).entries]);
 				setGlobalPercent((settings as ContextState).percent);
 				setGlobalDraft(String((settings as ContextState).percent));
+				setBuffer((room as { value: string }).value);
+				setBufferDraft((room as { value: string }).value);
 				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
@@ -237,6 +248,21 @@ export default Plugin.define({
 		const commitPercent = () => {
 			if (globalDraft() === String(globalPercent())) return;
 			void run(() => rpc().setContextPercent({ value: globalDraft() }));
+		};
+
+		// What the buffer being typed works out to in tokens, for the readout
+		// that confirms `20` means twenty thousand. A share has no single size,
+		// so it shows none and the field's title explains what it measures.
+		const bufferTokens = () => {
+			const parsed = parseBuffer(bufferDraft());
+			return parsed.ok && parsed.buffer && "tokens" in parsed.buffer
+				? parsed.buffer.tokens
+				: 0;
+		};
+
+		const commitBuffer = () => {
+			if (bufferDraft() === buffer()) return;
+			void run(() => rpc().setContextBuffer({ value: bufferDraft() }));
 		};
 
 		const startAdd = async (key: string) => {
@@ -432,6 +458,36 @@ export default Plugin.define({
 							/>
 							<span style={{ opacity: 0.7 }}>%</span>
 						</span>
+						{/* The room to keep free below the window: what makes a model
+						    whose real cap is below what it reports compact before it
+						    is refused, rather than on its last token. */}
+						<span
+							style={{ opacity: 0.7 }}
+							title="the room kept free below a model's window, so compacting never lands on its last token. A size in thousands — 0.5 is five hundred — or a share like 10% of each model's real window. Empty keeps the built-in rule: 10% or 20k, whichever is larger."
+						>
+							{ctx.t("buffer")}
+						</span>
+						<input
+							onBlur={commitBuffer}
+							onInput={(event) => setBufferDraft(event.currentTarget.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Enter") event.currentTarget.blur();
+							}}
+							placeholder="20"
+							style={{ width: "4.5em" }}
+							title="the room kept free below a model's window, so compacting never lands on its last token. A size in thousands — 0.5 is five hundred — or a share like 10% of each model's real window. Empty keeps the built-in rule: 10% or 20k, whichever is larger."
+							value={bufferDraft()}
+						/>
+						{/* `20` meaning twenty thousand is worth confirming, since
+						    the field above is a share. */}
+						<Show when={bufferTokens() > 0}>
+							<span
+								style={{ opacity: 0.6 }}
+								title="what the buffer works out to"
+							>
+								{size(bufferTokens())}
+							</span>
+						</Show>
 						{/* What the share on screen works out to, at the far end of
 						    the line so the field itself stays small. */}
 						<Show when={draftTokens() > 0}>
@@ -689,6 +745,32 @@ export default Plugin.define({
 																{chain.targets.length} ·{" "}
 																{chain.stored ? "custom" : "automatic"}
 															</span>
+															{/* The model's own share, on the model's own
+															    row: it applies wherever the request is
+															    served from, so it does not belong on a
+															    provider line or to any one of them. */}
+															<input
+																inputMode="numeric"
+																onBlur={(event) => {
+																	const value = event.currentTarget.value;
+																	void run(() =>
+																		rpc().setModelPercent({
+																			key: chain.key,
+																			value,
+																		}),
+																	);
+																}}
+																onKeyDown={(event) => {
+																	if (event.key === "Enter")
+																		event.currentTarget.blur();
+																}}
+																placeholder={ctx.t("globalShare")}
+																style={{ width: "5em" }}
+																title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
+																value={
+																	chain.percent ? String(chain.percent) : ""
+																}
+															/>
 															<Show when={chain.stored}>
 																<button
 																	onClick={() =>
@@ -745,32 +827,6 @@ export default Plugin.define({
 																					</span>
 																				</Show>
 																			</span>
-																			<input
-																				inputMode="numeric"
-																				onBlur={(event) => {
-																					const value =
-																						event.currentTarget.value;
-																					void run(() =>
-																						rpc().setTargetPercent({
-																							key: chain.key,
-																							providerID: target.providerID,
-																							value,
-																						}),
-																					);
-																				}}
-																				onKeyDown={(event) => {
-																					if (event.key === "Enter")
-																						event.currentTarget.blur();
-																				}}
-																				placeholder={ctx.t("globalShare")}
-																				style={{ width: "6em" }}
-																				title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
-																				value={
-																					target.percent
-																						? String(target.percent)
-																						: ""
-																				}
-																			/>
 																			<button
 																				disabled={index() === 0}
 																				onClick={() =>

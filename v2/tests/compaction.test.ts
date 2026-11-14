@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 
-import { setGlobalPercent, setTargetPercent } from "../core/context";
+import { setGlobalPercent, setModelPercent } from "../core/context";
 import { migrate } from "../core/schema";
 import {
 	type CompactionEvent,
@@ -106,16 +106,32 @@ describe("when a conversation is compacted", () => {
 		expect(compacted).toEqual(["s1"]);
 	});
 
-	test("a per-model share overrides the global and measures its own window", async () => {
+	test("a model's own share overrides the global and measures its window", async () => {
 		const db = freshDb();
 		setGlobalPercent(db, 90);
-		setTargetPercent(db, "deepseek-v4.1-flash", "p1", 50);
+		setModelPercent(db, "deepseek-v4.1-flash", 50);
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
 
 		// 50% of this model's own 200k is 100k, not 90% of the declared window.
 		expect(await handle(step("s1", { input: 99_999 }))).toBe(false);
 		expect(await handle(step("s1", { input: 100_000 }))).toBe(true);
 		expect(compacted).toEqual(["s1"]);
+	});
+
+	test("the model's share follows the model, not the credential serving it", async () => {
+		const db = freshDb();
+		// Set while one credential served it; the other credential must not
+		// compact the same model at the global share instead.
+		setGlobalPercent(db, 90);
+		setModelPercent(db, "deepseek-v4.1-flash", 50);
+		const { handle } = harness(db, {
+			...TARGET,
+			context: 200_000,
+			providerID: "p2",
+		});
+
+		expect(await handle(step("s1", { input: 99_999 }))).toBe(false);
+		expect(await handle(step("s1", { input: 100_000 }))).toBe(true);
 	});
 
 	test("an unknown window still compacts on the share", async () => {

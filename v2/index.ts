@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin";
+import { migrateModelPercent } from "./core/context";
 import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
 import { migrateProviderSettings } from "./core/priority";
@@ -54,6 +55,9 @@ export default Plugin.define({
 		// Fold any provider-level switches left by an earlier version onto the
 		// credentials they now belong to, once the credentials are all here.
 		migrateProviderSettings(db);
+		// A row's share was once stored per credential as well as per model; it
+		// belongs to the model, so fold anything left behind onto it.
+		migrateModelPercent(db);
 
 		await registerHooks({ ctx, db });
 		const rpc = await registerBalancerRpc({ ctx, db });

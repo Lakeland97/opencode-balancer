@@ -154,7 +154,8 @@ describe("chain rpc", () => {
 		const listed = (await rpc.chains({})) as {
 			rows: {
 				key: string;
-				targets: { percent: number }[];
+				percent: number;
+				targets: unknown[];
 			}[];
 		};
 		const row = listed.rows.find(
@@ -166,7 +167,8 @@ describe("chain rpc", () => {
 		expect(row && "context" in row).toBe(false);
 		expect(row && "trip" in row).toBe(false);
 		expect(row?.targets.length).toBe(1);
-		expect(row?.targets[0]?.percent).toBe(0);
+		// The share belongs to the row, not to a credential.
+		expect(row?.percent).toBe(0);
 
 		await rpc.chainAdd({
 			key: "deepseek-v4.1-flash",
@@ -452,6 +454,29 @@ describe("context percent rpc", () => {
 		expect(after.percent).toBe(45);
 	});
 
+	test("the buffer round-trips, and what it cannot read it refuses", async () => {
+		const rpc = await handlers(freshDb());
+		expect(await rpc.contextBuffer({})).toEqual({ value: "" });
+
+		const set = (await rpc.setContextBuffer({ value: "20" })) as {
+			ok: boolean;
+		};
+		expect(set.ok).toBe(true);
+		expect(await rpc.contextBuffer({})).toEqual({ value: "20" });
+
+		// A refused value leaves the working one in place rather than clearing it.
+		const refused = (await rpc.setContextBuffer({ value: "lots" })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(refused.ok).toBe(false);
+		expect(refused.message.length).toBeGreaterThan(0);
+		expect(await rpc.contextBuffer({})).toEqual({ value: "20" });
+
+		await rpc.setContextBuffer({ value: "" });
+		expect(await rpc.contextBuffer({})).toEqual({ value: "" });
+	});
+
 	test("a share outside 1% to 100% is refused and nothing is stored", async () => {
 		const rpc = await handlers(freshDb());
 
@@ -467,13 +492,12 @@ describe("context percent rpc", () => {
 		expect(after.percent).toBe(20);
 	});
 
-	test("a per-model share is reported on that target only", async () => {
+	test("a model's share is reported on its own row", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
 
-		const set = (await rpc.setTargetPercent({
+		const set = (await rpc.setModelPercent({
 			key: "deepseek-v4.1-flash",
-			providerID: "p1",
 			value: "50",
 		})) as { ok: boolean };
 		expect(set.ok).toBe(true);
@@ -481,47 +505,45 @@ describe("context percent rpc", () => {
 		const listed = (await rpc.chains({})) as {
 			rows: {
 				key: string;
-				targets: { percent: number; providerID: string }[];
+				percent: number;
+				targets: { percent?: number; providerID: string }[];
 			}[];
 		};
 		const row = listed.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
-		const target = row?.targets.find((entry) => entry.providerID === "p1");
-		expect(target?.percent).toBe(50);
+		expect(row?.percent).toBe(50);
+		// One number for the model, so no credential carries a private one.
+		expect(row?.targets.every((target) => target.percent === undefined)).toBe(
+			true,
+		);
+		expect(row?.targets.length).toBeGreaterThan(0);
 
 		// Clearing it hands the model back to the global share.
-		await rpc.setTargetPercent({
-			key: "deepseek-v4.1-flash",
-			providerID: "p1",
-			value: "",
-		});
+		await rpc.setModelPercent({ key: "deepseek-v4.1-flash", value: "" });
 		const after = (await rpc.chains({})) as {
-			rows: { key: string; targets: { percent: number }[] }[];
+			rows: { key: string; percent: number }[];
 		};
 		expect(
-			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")
-				?.targets[0]?.percent,
+			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.percent,
 		).toBe(0);
 	});
 
-	test("a per-model share outside 1% to 100% is refused", async () => {
+	test("a share outside 1% to 100% is refused, and changes nothing", async () => {
 		const rpc = await handlers(freshDb());
 
-		const refused = (await rpc.setTargetPercent({
+		const refused = (await rpc.setModelPercent({
 			key: "deepseek-v4.1-flash",
-			providerID: "p1",
 			value: "lots",
 		})) as { message: string; ok: boolean };
 		expect(refused.ok).toBe(false);
 		expect(refused.message.length).toBeGreaterThan(0);
 
 		const listed = (await rpc.chains({})) as {
-			rows: { key: string; targets: { percent: number }[] }[];
+			rows: { key: string; percent: number }[];
 		};
 		expect(
-			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")
-				?.targets[0]?.percent,
+			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.percent,
 		).toBe(0);
 	});
 });

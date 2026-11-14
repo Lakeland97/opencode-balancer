@@ -14,10 +14,13 @@ import {
 } from "../core/accounts";
 import {
 	MAX_PERCENT,
+	parseBuffer,
+	readBuffer,
 	readGlobalPercent,
-	readTargetPercent,
+	readModelPercent,
+	setBuffer,
 	setGlobalPercent,
-	setTargetPercent,
+	setModelPercent,
 } from "../core/context";
 import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
@@ -200,12 +203,13 @@ export async function registerBalancerRpc({
 					key: family.key,
 					label: family.name,
 					package: family.package,
+					// The share of this model's own window, or 0 when it
+					// follows the global one. One value per model: the
+					// credential serving it does not change it.
+					percent: readModelPercent(db, family.key) ?? 0,
 					stored: Boolean(family.stored),
 					targets: resolveChain(db, family).map((target) => ({
 						modelID: target.modelID,
-						// The share of this model's own window, or 0 when it
-						// follows the global one.
-						percent: readTargetPercent(db, family.key, target.providerID) ?? 0,
 						providerID: target.providerID,
 						resolved: resolvedModelID(db, target),
 						state: targetState(db, family, target),
@@ -218,6 +222,8 @@ export async function registerBalancerRpc({
 			clearLog();
 			return { message: "Cleared the log.", ok: true };
 		},
+
+		contextBuffer: async () => ({ value: readBuffer(db) ?? "" }),
 
 		contextPercent: async () => ({ percent: readGlobalPercent(db) }),
 
@@ -317,6 +323,27 @@ export async function registerBalancerRpc({
 			};
 		},
 
+		setContextBuffer: async (input) => {
+			const { value } = input as { value: string };
+			const parsed = parseBuffer(value);
+			if (!parsed.ok) return { message: parsed.message, ok: false };
+			setBuffer(db, value);
+			const stored = readBuffer(db);
+			recordLog(
+				"config",
+				stored === undefined
+					? "the compaction buffer follows the built-in rule again"
+					: `the compaction buffer is ${stored}`,
+			);
+			return {
+				message:
+					stored === undefined
+						? "the compaction buffer follows the built-in rule again."
+						: `the compaction buffer is ${stored}.`,
+				ok: true,
+			};
+		},
+
 		setContextPercent: async (input) => {
 			const { value } = input as { value: string };
 			const parsed = parsePercent(value);
@@ -371,26 +398,22 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setTargetPercent: async (input) => {
-			const { key, providerID, value } = input as {
-				key: string;
-				providerID: string;
-				value: string;
-			};
+		setModelPercent: async (input) => {
+			const { key, value } = input as { key: string; value: string };
 			const parsed = parsePercent(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setTargetPercent(db, key, providerID, parsed.percent);
+			setModelPercent(db, key, parsed.percent);
 			recordLog(
 				"config",
 				parsed.percent === undefined
-					? `${key} ${providerID} follows the global limit`
-					: `${key} ${providerID} compacts at ${parsed.percent}% of its own window`,
+					? `${key} follows the global limit`
+					: `${key} compacts at ${parsed.percent}% of its own window`,
 			);
 			return {
 				message:
 					parsed.percent === undefined
-						? `${providerID} in ${key} follows the global limit again.`
-						: `${providerID} in ${key} compacts at ${parsed.percent}% of its own window.`,
+						? `${key} follows the global limit again.`
+						: `${key} compacts at ${parsed.percent}% of its own window.`,
 				ok: true,
 			};
 		},

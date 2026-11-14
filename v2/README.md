@@ -171,8 +171,9 @@ the smallest output limit among the row's targets.
 Two shares decide where the conversation is cut, and they measure different windows on purpose:
 
 - the **global share** is a slice of the declared 1M, so `20%` always means 200k whatever is serving;
-- a **per-model share** (the `%` field on a target) is a slice of that model's **own** window, so `50%`
-  on a 200k model is 100k. It *overrides* the global rather than being capped against it.
+- a **model's own share** (the `%` field on the row, not on a target) is a slice of that model's **own**
+  window, so `50%` on a 200k model is 100k. It *overrides* the global rather than being capped against
+  it, and it follows the model: whichever credential answers, the conversation is cut at the same place.
 
 The serving model's real window is the hard ceiling under either one, so a global `30%` means 300k
 on a 1M model but is clamped when a 200k model is serving — you cannot tell the host to cut past what
@@ -183,12 +184,19 @@ of the window or 20k, whichever is larger — the two agree at 200k — and neve
 window so small that 20k would swallow it. A model whose window the provider does not report has no
 ceiling to clamp against, so the share stands alone.
 
+The **buffer** field next to `context limit` replaces that reserve when a model's real cap is below what
+it reports — a free variant, say, which is refused well before its advertised window. A bare number
+means thousands (`20` is 20k, `0.5` is five hundred) and a `%` means a share of each model's own window,
+so the same setting still suits a 200k model and a 1M one. Empty restores the built-in rule. Either way
+the reserve never exceeds a quarter of the window, so a very small model is still left room to hold a
+conversation.
+
 The balancer watches `session.step.ended`, whose token counts are the same per-request figure the host
 shows against the model's limit, and sums input, output, reasoning, and both cache fields. A session
 the balancer never routed is never compacted, and a compaction already in flight is never doubled: the
 guard re-arms only once the conversation is back under the threshold, or a failed compaction is
-retried. Both shares are stored in the plugin's `settings` table (`context_percent`,
-`context_percent:<row>:<provider>`).
+retried. The shares and the buffer are stored in the plugin's `settings` table (`context_percent`,
+`model_percent:<row>`, `context_buffer`).
 
 There is no `compaction.buffer` any more: if you have one in your config, the balancer ignores it and
 you can delete it.

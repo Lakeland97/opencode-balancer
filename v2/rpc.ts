@@ -21,24 +21,28 @@ const result = object({ message: str, ok: bool }, ["ok", "message"]);
 const chainTarget = object(
 	{
 		modelID: str,
-		/** The user's share of this model's own window, 0 when it follows the global. */
-		percent: num,
 		providerID: str,
 		/** The model actually sent, once a free-only provider substitutes. */
 		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "resolved", "state", "percent"],
+	["providerID", "modelID", "resolved", "state"],
 );
 const chainRow = object(
 	{
 		key: str,
 		label: str,
 		package: str,
+		/**
+		 * The user's share of this model's own window, 0 when it follows the
+		 * global. One value per model, not per credential: who answers does not
+		 * change what the model holds.
+		 */
+		percent: num,
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
 	},
-	["key", "label", "package", "stored", "targets"],
+	["key", "label", "package", "percent", "stored", "targets"],
 );
 const logEntry = object(
 	{
@@ -133,6 +137,10 @@ export const balancerDefinition = {
 			output: object({ rows: { items: chainRow, type: "array" } }, ["rows"]),
 		},
 		clearLog: { input: empty, output: result },
+		contextBuffer: {
+			input: empty,
+			output: object({ value: str }, ["value"]),
+		},
 		contextPercent: {
 			input: empty,
 			// The share of the declared window the balancer compacts at, unless a
@@ -197,6 +205,10 @@ export const balancerDefinition = {
 			input: object({ enabled: bool }, ["enabled"]),
 			output: result,
 		},
+		setContextBuffer: {
+			input: object({ value: str }, ["value"]),
+			output: result,
+		},
 		setContextPercent: {
 			input: object({ value: str }, ["value"]),
 			output: result,
@@ -217,12 +229,8 @@ export const balancerDefinition = {
 			]),
 			output: result,
 		},
-		setTargetPercent: {
-			input: object({ key: str, providerID: str, value: str }, [
-				"key",
-				"providerID",
-				"value",
-			]),
+		setModelPercent: {
+			input: object({ key: str, value: str }, ["key", "value"]),
 			output: result,
 		},
 		status: {
