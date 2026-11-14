@@ -8,6 +8,7 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
+import { listEvents } from "../core/events";
 import { setBalancingEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
@@ -203,6 +204,50 @@ describe("retry hook", () => {
 		await registry.retry(event);
 
 		expect(event.decision).toEqual({ delay: 3_000, retry: false });
+	});
+
+	test("the host's attempt count is not what decides whether to fail over", async () => {
+		const { db, registry } = await setup();
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		saveAccount(db, PROVIDER, "backup", apiAuth("sk-backup"));
+		setActiveAccount(db, PROVIDER, "primary");
+		setBalancingEnabled(db, true);
+
+		await registry["http.request"](
+			requestEvent("retry-late-attempt", newRequest()),
+		);
+
+		// The host's counter climbs for the life of the session and the balancer
+		// never resets it, so it must not be what turns failover off. What counts
+		// is how many targets this session has tried since its last answer.
+		const event = {
+			...retryEvent("retry-late-attempt", { delay: 1_500, retry: false }),
+			attempt: 99,
+		};
+		await registry.retry(event);
+
+		expect(event.decision).toEqual({ delay: 0, retry: true });
+	});
+
+	test("a failure handed to the session is written down, with the branch that did it", async () => {
+		const { db, registry } = await setup();
+		// One account, so there is nowhere to move to and the failure is the
+		// session's. That reason used to live only in the plugin's memory, which
+		// a reload wipes; it is now in the store, where it outlives the run.
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		setBalancingEnabled(db, true);
+
+		await registry["http.request"](
+			requestEvent("retry-recorded", newRequest()),
+		);
+		await registry.retry(retryEvent("retry-recorded", {}));
+
+		const recorded = listEvents(db).find(
+			(entry) => entry.type === "error_reached_session",
+		);
+		expect(recorded?.metadata.branch).toBe("no alternative");
+		expect(recorded?.providerID).toBe(PROVIDER);
+		expect(recorded?.alias).toBe("primary");
 	});
 });
 

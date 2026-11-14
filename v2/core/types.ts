@@ -69,7 +69,8 @@ export type BalancerEventType =
 	| "usage_refreshed"
 	| "usage_unavailable"
 	| "rate_limit_detected"
-	| "failover_performed";
+	| "failover_performed"
+	| "error_reached_session";
 
 export type BalancerEvent = {
 	id: string;

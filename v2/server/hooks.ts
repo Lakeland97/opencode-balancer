@@ -6,6 +6,7 @@ import {
 	getActiveAccount,
 	markAccountUsed,
 } from "../core/accounts";
+import { appendEvent } from "../core/events";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
@@ -48,8 +49,8 @@ const STALE_AFTER_MS = 5 * 60_000;
 // The virtual provider's slot is keyed by `balancer`, which is the provider id
 // `http.response` and `retry` report for a routed call.
 const ROUTED = BALANCER_PROVIDER_ID;
-// How many times one session may be moved on before the real failure is handed
-// over. Comfortably longer than any chain, so it only fires after a wrap-around.
+// How many targets one session may try before the real failure is handed over.
+// Comfortably longer than any chain, so it only fires after a wrap-around.
 const ATTEMPT_CAP = 12;
 // A provider that names its own window is believed, but only so far: a park is
 // cleared by `use`, and a mis-parsed value must not sit on an account for days.
@@ -154,6 +155,34 @@ function describeFailure(error: unknown, status?: number) {
 		named ||
 		"the host reported a failure with no detail"
 	);
+}
+
+/**
+ * Record, durably, why a failure was handed to the session.
+ *
+ * `recordLog` lives only for the run of the plugin, so a reload — and any edit
+ * to `v2/` causes one — erased the only evidence of which branch let a failure
+ * through. This writes the same thing into the store, so "why did the session
+ * see that" is still answerable afterwards. Both go down: the panel gets the
+ * live line, and the store keeps the record.
+ */
+function recordHandedOver(input: {
+	db: Database;
+	from: string;
+	providerID: string;
+	alias: string;
+	branch: string;
+	reported: string;
+}) {
+	appendEvent(input.db, {
+		alias: input.alias,
+		message: `${input.from} was handed to the session: ${input.branch}${
+			input.reported ? ` — ${input.reported.slice(0, 200)}` : ""
+		}`,
+		metadata: { branch: input.branch },
+		providerID: input.providerID,
+		type: "error_reached_session",
+	});
 }
 
 /**
@@ -398,6 +427,14 @@ export async function registerHooks({
 					"error",
 					`a routed call failed with no target on record: ${reported.slice(0, 120)}`,
 				);
+				recordHandedOver({
+					alias: "",
+					branch: "no target on record",
+					db,
+					from: `${event.model.providerID} (routed)`,
+					providerID: event.model.providerID,
+					reported,
+				});
 			}
 			return;
 		}
@@ -408,6 +445,14 @@ export async function registerHooks({
 				"error",
 				`${from} failed and is not the account's fault, so the session sees it: ${reported.slice(0, 120)}`,
 			);
+			recordHandedOver({
+				alias: tracked.alias,
+				branch: "not the account's fault",
+				db,
+				from,
+				providerID: tracked.providerID,
+				reported,
+			});
 			return;
 		}
 
@@ -427,6 +472,14 @@ export async function registerHooks({
 				"failover",
 				`${from} failed: ${reported.slice(0, 120)}; balancing is off, so the session sees it`,
 			);
+			recordHandedOver({
+				alias: tracked.alias,
+				branch: "balancing is off",
+				db,
+				from,
+				providerID: tracked.providerID,
+				reported,
+			});
 			return;
 		}
 
@@ -449,16 +502,37 @@ export async function registerHooks({
 				"error",
 				`no alternative to ${from}: the session sees the error`,
 			);
+			recordHandedOver({
+				alias: tracked.alias,
+				branch: "no alternative",
+				db,
+				from,
+				providerID: tracked.providerID,
+				reported,
+			});
 			return;
 		}
 
 		// Past a few rounds the chain has wrapped and re-walking it would only
-		// hide the reason, so the real failure is handed over instead.
-		if (event.attempt > ATTEMPT_CAP) {
+		// hide the reason, so the real failure is handed over instead. The count
+		// is the session's own list of credentials it has tried since its last
+		// answer, not the host's `event.attempt`: the host never resets that one,
+		// so a long-lived session — every failure it ever had, added up — would
+		// eventually cross the cap and be cut off from failover for good.
+		const triedNow = triedFor(event.sessionID).size;
+		if (triedNow > ATTEMPT_CAP) {
 			recordLog(
 				"error",
-				`${from} failed after ${event.attempt} attempts; the session sees the error`,
+				`${from} failed after ${triedNow} targets tried; the session sees the error`,
 			);
+			recordHandedOver({
+				alias: tracked.alias,
+				branch: "attempt cap",
+				db,
+				from,
+				providerID: tracked.providerID,
+				reported,
+			});
 			return;
 		}
 
