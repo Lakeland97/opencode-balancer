@@ -1,5 +1,8 @@
 /** @jsxImportSource solid-js */
 
+// Stamped by vite at build time; guards against reading a stale panel.
+declare const __BALANCER_BUILT_AT__: string;
+
 import {
 	Command,
 	MenuItem,
@@ -301,6 +304,14 @@ export default Plugin.define({
 							{ctx.t("balancing")}
 						</label>
 						<button onClick={() => void refresh()}>{ctx.t("refresh")}</button>
+						<span
+							style={{ "font-size": "11px", opacity: 0.4 }}
+							title="panel build"
+						>
+							{typeof __BALANCER_BUILT_AT__ === "string"
+								? __BALANCER_BUILT_AT__
+								: "dev"}
+						</span>
 					</div>
 
 					<Show when={message()}>
