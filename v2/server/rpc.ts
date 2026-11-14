@@ -423,6 +423,14 @@ export async function registerBalancerRpc({
 			// The catalog is cached, and a new limit must reach the next read of
 			// it: the panel redraws from `chains` and routing sizes the row.
 			invalidateCatalog();
+			// The declared window is what the limit changes, so the host has to
+			// rebuild its models for the new number to reach a running session.
+			// A host that cannot is fine: the value is already saved.
+			try {
+				await refresh?.();
+			} catch {
+				// Reported as success: the stored limit is the change.
+			}
 			return {
 				message:
 					parsed.tokens === undefined
@@ -442,6 +450,13 @@ export async function registerBalancerRpc({
 			if (!parsed.ok) return { message: parsed.message, ok: false };
 			setTargetLimit(db, key, providerID, parsed.tokens);
 			invalidateCatalog();
+			// A per-target limit moves that target's window, so the host has to
+			// rebuild its models just as for a row limit.
+			try {
+				await refresh?.();
+			} catch {
+				// Reported as success: the stored limit is the change.
+			}
 			return {
 				message:
 					parsed.tokens === undefined

@@ -395,6 +395,49 @@ describe("limit rpc", () => {
 		const target = row?.targets.find((entry) => entry.providerID === "p1");
 		expect(target?.limit).toBe(400_000);
 	});
+
+	test("a limit change asks the host to re-read its models", async () => {
+		const db = freshDb();
+		let refreshed = 0;
+		const rpc = await handlers(db, connectors, {
+			refresh: async () => {
+				refreshed++;
+			},
+		});
+
+		await rpc.setRowLimit({ key: "deepseek-v4.1-flash", value: "300000" });
+		await rpc.setTargetLimit({
+			key: "deepseek-v4.1-flash",
+			providerID: "p1",
+			value: "200000",
+		});
+
+		// Both are declared windows, so both must reach the host without a
+		// restart, exactly as the buffer field does.
+		expect(refreshed).toBe(2);
+	});
+
+	test("a limit still stands when the host cannot re-read its models", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db, connectors, {
+			refresh: async () => {
+				throw new Error("this host cannot reload");
+			},
+		});
+
+		const set = (await rpc.setRowLimit({
+			key: "deepseek-v4.1-flash",
+			value: "300000",
+		})) as { ok: boolean };
+		expect(set.ok).toBe(true);
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; limit: number }[];
+		};
+		expect(
+			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
+		).toBe(300_000);
+	});
 });
 
 describe("buffer rpc", () => {

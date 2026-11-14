@@ -741,9 +741,9 @@ export default Plugin.define({
 																			if (event.key === "Enter")
 																				event.currentTarget.blur();
 																		}}
-																		placeholder={ctx.t("limit")}
+																		placeholder="none"
 																		style={{ width: "6em" }}
-																		title="the most this target may hold, in tokens"
+																		title="the most this target may hold, in tokens; empty means the provider's own window"
 																		value={
 																			target.limit ? String(target.limit) : ""
 																		}
@@ -820,9 +820,9 @@ export default Plugin.define({
 																	if (event.key === "Enter")
 																		event.currentTarget.blur();
 																}}
-																placeholder={size(chain.declaredContext)}
+																placeholder="none"
 																style={{ width: "6em" }}
-																title="the most this row may hold, in tokens"
+																title="the most this row may hold, in tokens; empty means the smaller of the targets' own windows"
 																value={chain.limit ? String(chain.limit) : ""}
 															/>
 														</div>
