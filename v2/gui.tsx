@@ -87,6 +87,13 @@ function describe(error: unknown) {
 	}
 }
 
+/** The build stamp vite bakes in, so a stale panel is obvious. */
+function builtAt() {
+	return typeof __BALANCER_BUILT_AT__ === "string"
+		? __BALANCER_BUILT_AT__
+		: "dev";
+}
+
 /** A token count the way it is said aloud: 200000 reads as 200k, 1000000 as 1m. */
 function size(value: number) {
 	if (!Number.isFinite(value) || value <= 0) return "";
@@ -107,6 +114,7 @@ export default Plugin.define({
 			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
+			diagnostics: "diagnostics",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
@@ -143,6 +151,12 @@ export default Plugin.define({
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
+		// The diagnostics block at the foot of the panel: the values, when they
+		// were read, and the button that re-reads them. Folded until asked for,
+		// so the panel opens on what it is for rather than on its own plumbing.
+		const [diagOpen, setDiagOpen] = createSignal(false);
+		// When every value on the panel was last read in full.
+		const [lastRefreshed, setLastRefreshed] = createSignal(0);
 		// What the balancer has actually done this run, newest last.
 		const [logEntries, setLogEntries] = createSignal<LogEntry[]>([]);
 		const [logOpen, setLogOpen] = createSignal(false);
@@ -174,6 +188,7 @@ export default Plugin.define({
 				setProviders([...(order as Providers).entries]);
 				setGlobalPercent((settings as ContextState).percent);
 				setGlobalDraft(String((settings as ContextState).percent));
+				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -366,6 +381,7 @@ export default Plugin.define({
 						<strong>{ctx.t("title")}</strong>
 						<label
 							style={{ display: "flex", gap: "4px", "margin-left": "auto" }}
+							title="route each request across the providers automatically. Off leaves every request on the credential OpenCode itself picked, so the balancer only reports."
 						>
 							<input
 								checked={balancing()}
@@ -380,15 +396,6 @@ export default Plugin.define({
 							/>
 							{ctx.t("balancing")}
 						</label>
-						<button onClick={() => void refresh()}>{ctx.t("refresh")}</button>
-						<span
-							style={{ "font-size": "11px", opacity: 0.4 }}
-							title="panel build"
-						>
-							{typeof __BALANCER_BUILT_AT__ === "string"
-								? __BALANCER_BUILT_AT__
-								: "dev"}
-						</span>
 					</div>
 
 					<div style={divider} />
@@ -435,7 +442,9 @@ export default Plugin.define({
 					<div style={divider} />
 
 					<div style={row}>
-						<strong>{ctx.t("providers")}</strong>
+						<strong title="one row per credential, in the order routing tries them. active = this provider's pick; in use = served the last request; limited = parked after a failure — hover a marker for the reason. Two credentials on one provider are two rows, and each is tried in turn.">
+							{ctx.t("providers")}
+						</strong>
 					</div>
 
 					<For each={providerEntries()}>
@@ -902,6 +911,53 @@ export default Plugin.define({
 								</div>
 							)}
 						</For>
+					</Show>
+
+					<div style={divider} />
+
+					{/* Diagnostics: what the panel is made of and when its values were
+					    read, with the one button that re-reads them. Kept down here so
+					    the top line stays the name and the on/off switch. */}
+					<div style={{ ...row, "align-items": "center" }}>
+						<button onClick={() => setDiagOpen(!diagOpen())}>
+							{diagOpen() ? "▾" : "▸"} {ctx.t("diagnostics")}
+						</button>
+						<button
+							onClick={() => void refresh()}
+							style={{ "margin-left": "auto" }}
+							title="re-read every value on this panel from the balancer"
+						>
+							{ctx.t("refresh")}
+						</button>
+					</div>
+					<Show when={diagOpen()}>
+						<div
+							style={{
+								"border-top": "1px solid currentColor",
+								display: "flex",
+								"flex-direction": "column",
+								"font-family": "ui-monospace, monospace",
+								"font-size": "11px",
+								gap: "2px",
+								opacity: 0.8,
+								"padding-top": "4px",
+							}}
+						>
+							<span title="the panel bundle in use; reload the window to pick up a newer build">
+								build {builtAt()}
+							</span>
+							<span title="when every value below was last read in full; the credential list and the log also follow along every couple of seconds">
+								values{" "}
+								{lastRefreshed()
+									? new Date(lastRefreshed()).toLocaleTimeString()
+									: "not read yet"}
+							</span>
+							<span>
+								{providerEntries().length} credentials ·{" "}
+								{visibleChains().length} rows · {logEntries().length} log lines
+							</span>
+							<span>context limit {globalPercent()}% of 1m</span>
+						</div>
 					</Show>
 
 					<div style={divider} />
