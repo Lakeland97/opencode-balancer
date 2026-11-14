@@ -238,10 +238,17 @@ export async function registerBalancerRpc({
 		},
 
 		priority: async () => {
-			const providers = await ctx.provider.list();
-			const names = new Map(
-				providers.data.map((provider) => [provider.id, provider.name]),
-			);
+			// The panel's client cannot always reach the provider catalogue, and
+			// a missing display name must not cost the whole list.
+			const names = new Map<string, string>();
+			try {
+				const providers = await ctx.provider.list();
+				for (const provider of providers.data) {
+					names.set(provider.id, provider.name);
+				}
+			} catch {
+				// Ids are the fallback.
+			}
 			return {
 				entries: listProviderPriority(db).map((entry) => ({
 					enabled: entry.enabled,

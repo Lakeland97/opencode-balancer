@@ -48,6 +48,17 @@ type Provider = {
 type Providers = { entries: Provider[] };
 type Models = { models: { modelID: string; name: string }[] };
 
+/** A failure the RPC layer raised: not everything it throws is an Error. */
+function describe(error: unknown) {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	try {
+		return JSON.stringify(error);
+	} catch {
+		return String(error);
+	}
+}
+
 /** Compact window size: 200000 becomes 200k, 1000000 becomes 1m. */
 function size(value: number) {
 	if (!value) return "?";
@@ -115,7 +126,7 @@ export default Plugin.define({
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
 			} catch (error) {
-				setMessage(error instanceof Error ? error.message : String(error));
+				setMessage(describe(error));
 			}
 		};
 
@@ -126,7 +137,7 @@ export default Plugin.define({
 				setMessage(reply.ok ? "" : reply.message);
 				await refresh();
 			} catch (error) {
-				setMessage(error instanceof Error ? error.message : String(error));
+				setMessage(describe(error));
 			}
 		};
 
@@ -148,7 +159,7 @@ export default Plugin.define({
 				const reply = (await rpc().chainModels({ providerID })) as Models;
 				setAddModels(reply.models);
 			} catch (error) {
-				setMessage(error instanceof Error ? error.message : String(error));
+				setMessage(describe(error));
 			}
 		};
 
@@ -160,7 +171,7 @@ export default Plugin.define({
 				const reply = (await rpc().chainModels({ providerID })) as Models;
 				setCreateModels(reply.models);
 			} catch (error) {
-				setMessage(error instanceof Error ? error.message : String(error));
+				setMessage(describe(error));
 			}
 		};
 

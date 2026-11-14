@@ -69,6 +69,32 @@ async function handlers(db: Database, data: unknown[] = connectors) {
 	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
 }
 
+/** A client whose provider list throws, as the Desktop panel's does. */
+async function handlersFailingProviderList(db: Database) {
+	const ctx = {
+		model: { list: async () => ({ data: connectors }) },
+		provider: {
+			list: async () => {
+				throw new Error("no provider catalogue in this context");
+			},
+		},
+		rpc: {
+			register: async (
+				_definition: unknown,
+				registered: Record<string, unknown>,
+			) => ({
+				...registered,
+				events: { emit: async () => {} },
+			}),
+		},
+	} as never;
+	return (await registerBalancerRpc({
+		buffer: { kind: "percent", percent: 0.75 },
+		ctx,
+		db,
+	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+}
+
 beforeEach(() => {
 	invalidateCatalog();
 });
@@ -154,6 +180,18 @@ describe("chain rpc", () => {
 			entries: { name: string; providerID: string }[];
 		};
 		expect(listed.entries[0]?.name).toBe("Provider One");
+	});
+
+	test("priority still lists providers when names are unavailable", async () => {
+		const db = freshDb();
+		const rpc = await handlersFailingProviderList(db);
+
+		const listed = (await rpc.priority({})) as {
+			entries: { freeOnly: boolean; name: string; providerID: string }[];
+		};
+		const entry = listed.entries.find((row) => row.providerID === "p1");
+		expect(entry?.name).toBe("p1");
+		expect(entry?.freeOnly).toBe(false);
 	});
 
 	test("chainCreate starts a custom row from one model", async () => {
