@@ -1,4 +1,3 @@
-import type { Context } from "@opencode/plugin/promise/plugin";
 import type { AuthInfo } from "../core/types";
 
 function stringMetadata(
@@ -54,11 +53,4 @@ export function credentialToAuth(value: unknown): AuthInfo | undefined {
 	}
 
 	return undefined;
-}
-
-export async function readActiveCredential(ctx: Context, providerID: string) {
-	const connection = await ctx.integration.connection.active(providerID);
-	if (!connection) return undefined;
-	const value = await ctx.integration.connection.resolve(connection);
-	return credentialToAuth(value);
 }

@@ -22,6 +22,8 @@ type Account = {
 	alias: string;
 	/** The stored default for this provider. */
 	active: boolean;
+	/** The credential OpenCode itself is pointed at, when it is imported. */
+	hostActive: boolean;
 	/** What would authorise the next request, fallback included. */
 	inUse: boolean;
 	disabled: boolean;
@@ -107,9 +109,7 @@ export default Plugin.define({
 	i18n: {
 		en: {
 			active: "active",
-			add: "add",
 			addTarget: "add target",
-			alias: "alias",
 			apply: "apply",
 			balancing: "balancing",
 			clear: "clear",
@@ -119,6 +119,7 @@ export default Plugin.define({
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
+			inOpenCode: "in opencode",
 			inUse: "in use",
 			limit: "limit",
 			limited: "limited",
@@ -131,7 +132,6 @@ export default Plugin.define({
 			provider: "provider",
 			providers: "providers",
 			refresh: "refresh",
-			remove: "remove",
 			reset: "reset",
 			title: "Balancer",
 			tripsAt: "trips at",
@@ -147,8 +147,6 @@ export default Plugin.define({
 		const [targetDraft, setTargetDraft] = createSignal("");
 		const [reserve, setReserve] = createSignal("");
 		const [message, setMessage] = createSignal("");
-		const [provider, setProvider] = createSignal("");
-		const [alias, setAlias] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		const [providers, setProviders] = createSignal<Provider[]>([]);
 		// The row whose add form is open, plus what the user has picked in it.
@@ -526,6 +524,11 @@ export default Plugin.define({
 													: account.active
 														? ` · ${ctx.t("active")}`
 														: ""}
+												<Show when={account.hostActive && !account.active}>
+													<span title="the credential OpenCode itself is pointed at">
+														{` · ${ctx.t("inOpenCode")}`}
+													</span>
+												</Show>
 												<Show when={account.limited}>
 													<span title={account.limitedReason || undefined}>
 														{` · ${ctx.t("limited")}`}
@@ -547,48 +550,12 @@ export default Plugin.define({
 													{ctx.t("use")}
 												</button>
 											</Show>
-											<button
-												onClick={() =>
-													void run(() =>
-														rpc().remove({
-															alias: account.alias,
-															providerID: account.providerID,
-														}),
-													)
-												}
-											>
-												{ctx.t("remove")}
-											</button>
 										</div>
 									)}
 								</For>
 							</div>
 						)}
 					</For>
-
-					<div style={{ ...row, "margin-top": "4px" }}>
-						<input
-							onInput={(event) => setProvider(event.currentTarget.value)}
-							placeholder={ctx.t("provider")}
-							style={field}
-							value={provider()}
-						/>
-						<input
-							onInput={(event) => setAlias(event.currentTarget.value)}
-							placeholder={ctx.t("alias")}
-							style={field}
-							value={alias()}
-						/>
-						<button
-							onClick={() =>
-								void run(() =>
-									rpc().add({ alias: alias(), providerID: provider() }),
-								)
-							}
-						>
-							{ctx.t("add")}
-						</button>
-					</div>
 
 					<div style={divider} />
 

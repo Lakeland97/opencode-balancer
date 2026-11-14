@@ -2,7 +2,12 @@ import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 import type { Context } from "@opencode/plugin/promise/plugin";
 
-import { getAccount, saveAccount, setActiveAccount } from "../core/accounts";
+import {
+	getAccount,
+	readLimitedReason,
+	saveAccount,
+	setActiveAccount,
+} from "../core/accounts";
 import { setBalancingEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
@@ -146,6 +151,21 @@ describe("retry hook", () => {
 		await registry.retry(event);
 
 		expect(event.decision).toEqual({ delay: 0, retry: true });
+	});
+
+	test("a failure the host does not put into words still says why", async () => {
+		const { db, registry } = await setup();
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		saveAccount(db, PROVIDER, "backup", apiAuth("sk-backup"));
+		setActiveAccount(db, PROVIDER, "primary");
+		setBalancingEnabled(db, true);
+
+		await registry["http.request"](requestEvent("retry-silent", newRequest()));
+		// The host raised a typed error with a status but no text of its own,
+		// so the status is the only evidence the panel can be given.
+		await registry.retry(retryEvent("retry-silent", {}));
+
+		expect(readLimitedReason(db, PROVIDER, "primary")).toBe("HTTP 429");
 	});
 
 	test("leaves the decision unchanged when no alternative account exists", async () => {

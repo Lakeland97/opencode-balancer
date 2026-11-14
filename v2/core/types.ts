@@ -27,6 +27,8 @@ export type Account = {
 	rateLimitedUntil?: number;
 	failures: number;
 	disabled: boolean;
+	/** The OpenCode credential this account was imported from, when it was. */
+	sourceID?: string;
 };
 
 export type ProviderState = {

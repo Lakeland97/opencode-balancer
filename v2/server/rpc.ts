@@ -4,10 +4,8 @@ import {
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
+	readHostActiveSource,
 	readLimitedReason,
-	removeAccount,
-	renameAccount,
-	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
 import {
@@ -54,7 +52,6 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
-import { readActiveCredential } from "./credentials";
 import { clearLog, readLog, recordLog } from "./log";
 import { chooseRoute, isProviderEnabled } from "./routing";
 import { selectHealthyAccount } from "./selection";
@@ -128,30 +125,6 @@ export async function registerBalancerRpc({
 	refresh?: () => Promise<void> | void;
 }) {
 	const registration = await ctx.rpc.register(Balancer, {
-		add: async (input) => {
-			const { providerID, alias } = input as Pair;
-			try {
-				const auth = await readActiveCredential(ctx, providerID);
-				if (!auth) {
-					return {
-						message: `No usable active credential for ${providerID}.`,
-						ok: false,
-					};
-				}
-				const account = saveAccount(db, providerID, alias, auth);
-				invalidateCatalog();
-				return {
-					message: `Saved ${account.providerID}/${account.alias}.`,
-					ok: true,
-				};
-			} catch (error) {
-				return {
-					message: error instanceof Error ? error.message : "Save failed.",
-					ok: false,
-				};
-			}
-		},
-
 		chainAdd: async (input) => {
 			const { key, providerID, modelID } = input as {
 				key: string;
@@ -296,6 +269,12 @@ export async function registerBalancerRpc({
 						alias: account.alias,
 						disabled: account.disabled,
 						failures: account.failures,
+						// True when this is the credential OpenCode itself is
+						// pointed at, so the panel can show the two sides
+						// agreeing or drifting apart.
+						hostActive:
+							account.sourceID !== undefined &&
+							account.sourceID === readHostActiveSource(db, account.providerID),
 						inUse:
 							!account.disabled &&
 							used?.providerID === account.providerID &&
@@ -303,7 +282,11 @@ export async function registerBalancerRpc({
 						lastUsedAt: account.lastUsedAt ?? 0,
 						limited,
 						limitedReason: limited
-							? (readLimitedReason(db, account.providerID, account.alias) ?? "")
+							? readLimitedReason(db, account.providerID, account.alias) ||
+								// A park from before reasons were kept, or one the
+								// host described with no words at all. Saying so is
+								// better than a marker that explains nothing.
+								"no reason was recorded for this park"
 							: "",
 						providerID: account.providerID,
 					};
@@ -344,36 +327,6 @@ export async function registerBalancerRpc({
 					...(entry.modelID ? { modelID: entry.modelID } : {}),
 				})),
 			};
-		},
-
-		remove: async (input) => {
-			const { providerID, alias } = input as Pair;
-			const removed = removeAccount(db, providerID, alias);
-			invalidateCatalog();
-			return {
-				message: removed
-					? `Removed ${providerID}/${alias}.`
-					: `No account ${providerID}/${alias}.`,
-				ok: removed,
-			};
-		},
-
-		rename: async (input) => {
-			const { providerID, alias, nextAlias } = input as Pair & {
-				nextAlias: string;
-			};
-			try {
-				const account = renameAccount(db, providerID, alias, nextAlias);
-				return {
-					message: `Renamed to ${providerID}/${account.alias}.`,
-					ok: true,
-				};
-			} catch (error) {
-				return {
-					message: error instanceof Error ? error.message : "Rename failed.",
-					ok: false,
-				};
-			}
 		},
 
 		setBalancing: async (input) => {

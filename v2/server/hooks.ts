@@ -279,24 +279,31 @@ export async function registerHooks({
 		});
 		if (!tracked) return;
 
-		// The typed error the host raised carries the provider's own words, so
-		// it is a better answer than the bare status the response already set.
-		const reported = (
-			event.error as { message?: string } | undefined
-		)?.message?.trim();
-		markRateLimited(
-			db,
-			tracked.providerID,
-			tracked.alias,
-			60_000,
-			reported || undefined,
-		);
+		// The typed error the host raised carries the provider's own words when
+		// it has any; failing that, the status it raised; failing that, whatever
+		// the error calls itself. A park the panel cannot explain reads exactly
+		// like a bug, so one of these always lands.
+		const error = event.error as
+			| { message?: unknown; name?: unknown; type?: unknown; _tag?: unknown }
+			| undefined;
+		const described =
+			typeof error?.message === "string" ? error.message.trim() : "";
+		const named = [error?.name, error?.type, error?._tag]
+			.filter(
+				(value): value is string =>
+					typeof value === "string" && value.trim() !== "",
+			)
+			.join(" ");
+		const reported =
+			described ||
+			(typeof status === "number" ? `HTTP ${status}` : "") ||
+			named ||
+			"the host reported a failure with no detail";
+		markRateLimited(db, tracked.providerID, tracked.alias, 60_000, reported);
 		triedFor(event.sessionID).add(tracked.providerID);
 		recordLog(
 			"failover",
-			`${tracked.providerID}/${tracked.alias} failed${
-				reported ? `: ${reported.slice(0, 120)}` : ""
-			}; moving to the next target`,
+			`${tracked.providerID}/${tracked.alias} failed: ${reported.slice(0, 120)}; moving to the next target`,
 		);
 
 		if (!getBalancingEnabled(db)) return;

@@ -60,6 +60,8 @@ const account = object(
 		alias: str,
 		disabled: bool,
 		failures: num,
+		/** The credential OpenCode itself is pointed at, when it is imported. */
+		hostActive: bool,
 		inUse: bool,
 		lastUsedAt: num,
 		limited: bool,
@@ -82,7 +84,6 @@ export const balancerDefinition = {
 	},
 	id: "balancer",
 	methods: {
-		add: { input: pair, output: result },
 		chainAdd: {
 			input: object({ key: str, modelID: str, providerID: str }, [
 				"key",
@@ -188,15 +189,6 @@ export const balancerDefinition = {
 				},
 				["entries"],
 			),
-		},
-		remove: { input: pair, output: result },
-		rename: {
-			input: object({ alias: str, nextAlias: str, providerID: str }, [
-				"providerID",
-				"alias",
-				"nextAlias",
-			]),
-			output: result,
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),

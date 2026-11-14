@@ -35,7 +35,7 @@ re-implements the integration on the V2 hook surface.
 | Part | Status |
 |---|---|
 | `core/` account store, schema, priority | unchanged from upstream |
-| Credential capture | V2 `integration.connection.resolve` instead of `auth.json` |
+| Credential capture | V2 `integration.list` / `connection.resolve`, synced on credential events |
 | Credential injection | `session.hook("http.request")` instead of a global `fetch` patch |
 | Rate-limit detection | `session.hook("http.response")` |
 | Failover | `session.hook("retry")` forces a retry; the next request selects another account or connector |
@@ -59,6 +59,21 @@ session. It registers its own provider instead:
 Families never mix wire formats: a model offered as `anthropic-compatible` gets its own row,
 because routing only rewrites the `model` field and the request shape stays whatever the package
 built.
+
+## Accounts
+
+Accounts are **not** added by hand. OpenCode is the one place credentials are managed: the balancer
+reads every provider and credential OpenCode holds on startup and again whenever a credential is
+connected, removed, or switched, and keeps its own copy so a request needs no host call.
+
+That includes **two credentials on the same provider** — connect a personal key and a work key to the
+same provider and they become two accounts, each with its own `use`, its own park and reason, and its
+own line in the log. The account's name is the credential's own label, so nothing has to be typed.
+
+Deleting a credential in OpenCode removes the account on the next sync; renaming one renames the
+account, because the two are matched by the credential's id rather than its text. `use` picks which
+of a provider's accounts the balancer sends to, and the panel marks the one OpenCode itself is pointed
+at (`in opencode`) when the two differ.
 
 ## Model chains
 
@@ -92,8 +107,8 @@ marker.
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
 pickers, and a `reset` on any customised row. Every provider is one block: its own `enabled` and `free`
-checkboxes and `↑ ↓` ordering on the header line, with its accounts — and their `use` / `remove`
-actions — nested underneath. A row's ceiling can be set in tokens per row and per target; each is
+checkboxes and `↑ ↓` ordering on the header line, with its accounts — each with a `use` button, filled
+from OpenCode — nested underneath. A row's ceiling can be set in tokens per row and per target; each is
 described under Context windows.
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
@@ -174,10 +189,8 @@ press Enter.
 /balancer help                        command list
 /balancer status                      balancing state, account totals, rate-limited count
 /balancer list [provider]             accounts with active/disabled/limited markers
-/balancer add <provider> <alias>      save the provider's current credential as an account
 /balancer use <provider> <alias>      make an account active
-/balancer remove <provider> <alias>
-/balancer rename <provider> <alias> <new>
+/balancer import                       re-read the credentials OpenCode holds
 /balancer on | off                    toggle automatic failover
 /balancer priority                     provider order and on/off state
 /balancer chain <model>                targets for a row, in the order they are tried
@@ -213,7 +226,7 @@ npx --yes bun test        # unit tests: account store, selection, failover marki
 ## Desktop GUI
 
 OpenCode Desktop 2.2+ loads the `./gui-experimental` part automatically, giving a Balancer side
-panel with account actions, a balancing toggle, an add form, a chain editor per model, and the
+panel with a balancing toggle, the accounts OpenCode holds, a chain editor per model, and the
 provider order. The bundle is build output, and
 upstream's `.gitignore` excludes `dist`, so build it once after cloning:
 

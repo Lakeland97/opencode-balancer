@@ -64,6 +64,7 @@ function recreateAccounts(db: Database) {
 		"rate_limited_until",
 		"failures",
 		"disabled",
+		"source_id",
 	]);
 
 	db.exec(`
@@ -79,6 +80,7 @@ function recreateAccounts(db: Database) {
             rate_limited_until INTEGER,
             failures INTEGER NOT NULL DEFAULT 0,
             disabled INTEGER NOT NULL DEFAULT 0,
+            source_id TEXT,
             PRIMARY KEY (provider_id, alias)
         );
     `);
@@ -96,12 +98,13 @@ function recreateAccounts(db: Database) {
 			number | null,
 			number,
 			number,
+			string | null,
 		]
 	>(
 		`INSERT OR REPLACE INTO accounts_new (
              provider_id, alias, auth_json, auth_type, created_at, updated_at,
-             last_used_at, rate_limited_until, failures, disabled
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+             last_used_at, rate_limited_until, failures, disabled, source_id
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 	);
 	for (const row of rows) {
 		if (
@@ -127,6 +130,7 @@ function recreateAccounts(db: Database) {
 				: null,
 			typeof row.failures === "number" ? row.failures : 0,
 			row.disabled === 1 ? 1 : 0,
+			typeof row.source_id === "string" ? row.source_id : null,
 		);
 	}
 
@@ -423,6 +427,7 @@ const requiredColumns: Record<string, string[]> = {
 		"rate_limited_until",
 		"failures",
 		"disabled",
+		"source_id",
 	],
 	events: [
 		"id",

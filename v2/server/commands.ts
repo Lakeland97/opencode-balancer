@@ -4,9 +4,6 @@ import {
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
-	removeAccount,
-	renameAccount,
-	saveAccount,
 	setActiveAccount,
 	type UsedAccount,
 } from "../core/accounts";
@@ -31,7 +28,7 @@ import {
 	shiftTarget,
 } from "./chain-actions";
 import { invalidateCatalog } from "./connectors";
-import { readActiveCredential } from "./credentials";
+import { syncAccounts } from "./import-credentials";
 import { chooseRoute, isProviderEnabled } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
@@ -154,10 +151,8 @@ export async function runCommand({
 			"  gui                          Open the Desktop panel",
 			"  list [provider]              Accounts, with active/limited markers",
 			"  status                       Balancing state and account totals",
-			"  add <provider> <alias>       Save the provider's current credential as an account",
 			"  use <provider> <alias>       Make an account active",
-			"  remove <provider> <alias>    Delete a saved account",
-			"  rename <provider> <alias> <new>",
+			"  import                       Re-read the credentials OpenCode holds",
 			"  on | off                     Toggle automatic failover",
 			"  priority                     Provider order and on/off state",
 			"  chain <model>                Targets for a row, in the order they are tried",
@@ -185,18 +180,20 @@ export async function runCommand({
 	}
 
 	if (action === "add" || action === "import") {
-		const [providerID, alias] = args;
-		if (!providerID || !alias) return "Usage: /balancer add <provider> <alias>";
+		// Accounts mirror the credentials OpenCode holds, so this is a re-read
+		// rather than a way to type one in.
 		try {
-			const auth = await readActiveCredential(ctx, providerID);
-			if (!auth) {
-				return `No usable active credential for ${providerID}. Connect the provider in opencode first.`;
-			}
-			const account = saveAccount(db, providerID, alias, auth);
+			const result = await syncAccounts(ctx, db);
 			invalidateCatalog();
-			return `Saved ${account.providerID}/${account.alias}.`;
+			const parts = [
+				`${result.imported} credential${result.imported === 1 ? "" : "s"} seen`,
+			];
+			if (result.pruned > 0) parts.push(`${result.pruned} removed`);
+			return `${parts.join(", ")}. Accounts follow OpenCode: connect a provider there and it appears here.`;
 		} catch (error) {
-			return error instanceof Error ? error.message : "Could not save account.";
+			return error instanceof Error
+				? error.message
+				: "Could not read credentials.";
 		}
 	}
 
@@ -220,27 +217,11 @@ export async function runCommand({
 	}
 
 	if (action === "remove") {
-		const [providerID, alias] = args;
-		if (!providerID || !alias)
-			return "Usage: /balancer remove <provider> <alias>";
-		const removed = removeAccount(db, providerID, alias);
-		invalidateCatalog();
-		return removed
-			? `Removed ${providerID}/${alias}.`
-			: `No account ${providerID}/${alias}.`;
+		return "Accounts follow OpenCode: remove the credential there and it disappears here on the next sync.";
 	}
 
 	if (action === "rename") {
-		const [providerID, alias, next] = args;
-		if (!providerID || !alias || !next) {
-			return "Usage: /balancer rename <provider> <alias> <newAlias>";
-		}
-		try {
-			const account = renameAccount(db, providerID, alias, next);
-			return `Renamed to ${providerID}/${account.alias}.`;
-		} catch (error) {
-			return error instanceof Error ? error.message : "Rename failed.";
-		}
+		return "Accounts follow OpenCode: rename the credential there and the account follows it.";
 	}
 
 	if (action === "on") {

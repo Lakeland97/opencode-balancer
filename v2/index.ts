@@ -4,10 +4,13 @@ import { storePath } from "./core/path";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
 import {
+	invalidateCatalog,
 	refreshBalancerProvider,
 	registerBalancerProvider,
 } from "./server/connectors";
 import { registerHooks } from "./server/hooks";
+import { syncAccounts } from "./server/import-credentials";
+import { recordLog } from "./server/log";
 import { registerBalancerRpc } from "./server/rpc";
 
 const COMMAND_INPUT = {
@@ -42,6 +45,11 @@ export default Plugin.define({
 		const db = openBalancerDatabase(storePath());
 		migrate(db);
 
+		// The balancer keeps its own copy of every credential OpenCode holds, so
+		// nothing has to be added here by hand. Import before the provider is
+		// registered, because the registration reads the accounts.
+		await syncAccounts(ctx, db);
+
 		await registerHooks({ ctx, db });
 		const rpc = await registerBalancerRpc({
 			ctx,
@@ -54,6 +62,43 @@ export default Plugin.define({
 		const openGui = async () => {
 			await rpc.events.emit("open", {});
 		};
+
+		// Keep up with credentials added, removed, or switched while OpenCode is
+		// running. A sync that changes something rebuilds the provider, so a key
+		// connected mid-session can start serving without a restart.
+		const resync = async () => {
+			const result = await syncAccounts(ctx, db);
+			if (result.imported > 0 || result.pruned > 0) {
+				invalidateCatalog();
+				await refreshBalancerProvider({ ctx, db });
+			}
+		};
+		void (async () => {
+			try {
+				for await (const event of ctx.event.subscribe({
+					types: ["credential.updated", "credential.switched"],
+				})) {
+					if (
+						event.type !== "credential.updated" &&
+						event.type !== "credential.switched"
+					) {
+						continue;
+					}
+					try {
+						await resync();
+					} catch (error) {
+						recordLog(
+							"error",
+							`credential sync failed: ${
+								error instanceof Error ? error.message : String(error)
+							}`,
+						);
+					}
+				}
+			} catch {
+				// The event stream ended; imports still happen at startup.
+			}
+		})();
 
 		await ctx.command.transform((editor) => {
 			editor.add({

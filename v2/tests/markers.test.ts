@@ -3,10 +3,12 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
 	getAccount,
+	importAccount,
 	listAccounts,
 	markAccountUsed,
 	mostRecentlyUsed,
 	saveAccount,
+	setHostActiveSource,
 } from "../core/accounts";
 import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
@@ -143,6 +145,60 @@ describe("account markers", () => {
 		);
 		expect(cleared?.limited).toBe(false);
 		expect(cleared?.limitedReason).toBe("");
+	});
+
+	test("a park with no recorded reason says so rather than showing nothing", async () => {
+		const db = freshDb();
+		// Parks made before the reason was kept, and any failure the host
+		// describes with neither words nor a status, look like this.
+		markRateLimited(db, "p1", "a", 60_000);
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.list({})) as {
+			accounts: {
+				alias: string;
+				limited: boolean;
+				limitedReason: string;
+				providerID: string;
+			}[];
+		};
+		const account = listed.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "a",
+		);
+
+		expect(account?.limited).toBe(true);
+		expect(account?.limitedReason).toBe("no reason was recorded for this park");
+	});
+
+	test("the account OpenCode is pointed at is marked as such", async () => {
+		const db = freshDb();
+		importAccount(db, {
+			auth: { key: "k1", type: "api" },
+			label: "Personal",
+			providerID: "p1",
+			sourceID: "cred_1",
+		});
+		importAccount(db, {
+			auth: { key: "k2", type: "api" },
+			label: "Work",
+			providerID: "p1",
+			sourceID: "cred_2",
+		});
+		setHostActiveSource(db, "p1", "cred_2");
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.list({})) as {
+			accounts: { alias: string; hostActive: boolean; providerID: string }[];
+		};
+		const hostActive = (alias: string) =>
+			listed.accounts.find(
+				(entry) => entry.providerID === "p1" && entry.alias === alias,
+			)?.hostActive;
+
+		expect(hostActive("work")).toBe(true);
+		expect(hostActive("personal")).toBe(false);
+		// A hand-added or never-imported account has no credential behind it.
+		expect(hostActive("a")).toBe(false);
 	});
 
 	test("only the most recently used account is in use", async () => {

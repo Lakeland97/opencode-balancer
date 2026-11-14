@@ -13,6 +13,7 @@ type AccountRow = {
 	rate_limited_until: number | null;
 	failures: number;
 	disabled: number;
+	source_id: string | null;
 };
 
 const authTypes = ["api", "oauth", "wellknown"] as const;
@@ -80,6 +81,38 @@ export function clearLimitedReason(
 	db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(
 		limitedReasonKey(providerID, alias),
 	);
+}
+
+/** Where the host's own active credential for a provider is remembered. */
+function hostActiveKey(providerID: string) {
+	return `host_active_source:${providerID}`;
+}
+
+/**
+ * Remember which credential OpenCode itself is pointed at, so the panel can
+ * show when the balancer's own choice and the host's have gone their separate
+ * ways.
+ */
+export function setHostActiveSource(
+	db: Database,
+	providerID: string,
+	sourceID: string,
+) {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(hostActiveKey(providerID), sourceID);
+}
+
+export function readHostActiveSource(
+	db: Database,
+	providerID: string,
+): string | undefined {
+	return db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(hostActiveKey(providerID))?.value;
 }
 
 /**
@@ -179,6 +212,7 @@ function accountFromRow(row: AccountRow): Account {
 		lastUsedAt: row.last_used_at ?? undefined,
 		providerID: row.provider_id,
 		rateLimitedUntil: row.rate_limited_until ?? undefined,
+		sourceID: row.source_id ?? undefined,
 		updatedAt: row.updated_at,
 	};
 }
@@ -339,7 +373,7 @@ export function getAccount(
 	const row = db
 		.query<AccountRow, [string, string]>(
 			`SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
-                    last_used_at, rate_limited_until, failures, disabled
+                    last_used_at, rate_limited_until, failures, disabled, source_id
              FROM accounts
              WHERE provider_id = ? AND alias = ?`,
 		)
@@ -349,7 +383,7 @@ export function getAccount(
 
 export function listAccounts(db: Database, providerID?: string): Account[] {
 	const sql = `SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
-                        last_used_at, rate_limited_until, failures, disabled
+                        last_used_at, rate_limited_until, failures, disabled, source_id
                  FROM accounts`;
 	const rows = providerID
 		? db
@@ -485,4 +519,187 @@ export function getSelectedModel(
 	const modelID = parseMetadataJson(row?.metadata_json).selected_model_id;
 	if (typeof modelID !== "string" || modelID.length === 0) return undefined;
 	return { modelID, providerID };
+}
+
+function findBySourceID(
+	db: Database,
+	providerID: string,
+	sourceID: string,
+): Account | undefined {
+	const row = db
+		.query<AccountRow, [string, string]>(
+			`SELECT provider_id, alias, auth_json, auth_type, created_at, updated_at,
+                    last_used_at, rate_limited_until, failures, disabled, source_id
+             FROM accounts
+             WHERE provider_id = ? AND source_id = ?`,
+		)
+		.get(providerID, sourceID);
+	return row ? accountFromRow(row) : undefined;
+}
+
+/**
+ * The account a host credential was imported as, if it is still here.
+ */
+export function getAccountBySourceID(
+	db: Database,
+	providerID: string,
+	sourceID: string,
+): Account | undefined {
+	return findBySourceID(db, providerID, sourceID);
+}
+
+/** A free alias for a new account, numbering a collision rather than merging. */
+function uniqueAlias(db: Database, providerID: string, base: string): string {
+	const taken = new Set(
+		listAccounts(db, providerID).map((account) => account.alias),
+	);
+	if (!taken.has(base)) return base;
+	let suffix = 2;
+	while (taken.has(`${base}-${suffix}`)) suffix += 1;
+	return `${base}-${suffix}`;
+}
+
+/**
+ * The credential's own name is the alias here, so everything that was keyed by
+ * the alias — the park's reason, the usage history, the provider's selection —
+ * has to follow it.
+ */
+function moveAlias(
+	db: Database,
+	providerID: string,
+	fromAlias: string,
+	toAlias: string,
+) {
+	db.query<unknown, [string, string, string]>(
+		"UPDATE accounts SET alias = ? WHERE provider_id = ? AND alias = ?",
+	).run(toAlias, providerID, fromAlias);
+	db.query<unknown, [string, string, string]>(
+		"UPDATE usage_snapshots SET alias = ? WHERE provider_id = ? AND alias = ?",
+	).run(toAlias, providerID, fromAlias);
+
+	const active = db
+		.query<{ active_alias: string | null }, [string]>(
+			"SELECT active_alias FROM provider_state WHERE provider_id = ?",
+		)
+		.get(providerID);
+	if (active?.active_alias === fromAlias)
+		setActiveAlias(db, providerID, toAlias);
+
+	const reason = readLimitedReason(db, providerID, fromAlias);
+	if (reason !== undefined) {
+		clearLimitedReason(db, providerID, fromAlias);
+		setLimitedReason(db, providerID, toAlias, reason);
+	}
+}
+
+/**
+ * Copy a credential OpenCode holds into the balancer's own store. The host is
+ * the source of truth: re-importing a credential refreshes its key and follows
+ * a rename in OpenCode, but leaves everything the balancer itself tracks — the
+ * last use, a park, a failure count — exactly as it was found.
+ */
+export function importAccount(
+	db: Database,
+	input: {
+		auth: AuthInfo;
+		label: string;
+		providerID: string;
+		sourceID: string;
+	},
+): Account {
+	const { providerID } = input;
+	const save = db.transaction(() => {
+		const timestamp = now();
+		const existing = findBySourceID(db, providerID, input.sourceID);
+		const wanted =
+			normalizeAlias(input.label) ||
+			`credential-${normalizeAlias(input.sourceID)}`;
+
+		let alias: string;
+		if (existing) {
+			// Follow OpenCode's rename, but never take a name another account
+			// already answers to.
+			alias =
+				wanted !== existing.alias && !getAccount(db, providerID, wanted)
+					? wanted
+					: existing.alias;
+			if (alias !== existing.alias)
+				moveAlias(db, providerID, existing.alias, alias);
+		} else {
+			alias = uniqueAlias(db, providerID, wanted);
+		}
+
+		db.query<unknown, [string, string, string, string, number, number, string]>(
+			`INSERT INTO accounts (
+                 provider_id,
+                 alias,
+                 auth_json,
+                 auth_type,
+                 created_at,
+                 updated_at,
+                 failures,
+                 disabled,
+                 source_id
+             ) VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?)
+             ON CONFLICT(provider_id, alias) DO UPDATE SET
+                 auth_json = excluded.auth_json,
+                 auth_type = excluded.auth_type,
+                 updated_at = excluded.updated_at,
+                 source_id = excluded.source_id`,
+		).run(
+			providerID,
+			alias,
+			JSON.stringify(input.auth),
+			input.auth.type,
+			timestamp,
+			timestamp,
+			input.sourceID,
+		);
+
+		const account = getAccount(db, providerID, alias);
+		if (!account) throw new Error(`Account not found: ${providerID}/${alias}`);
+		return account;
+	});
+
+	return save();
+}
+
+/**
+ * Drop every account whose credential OpenCode no longer lists. Entries added
+ * by hand have no credential behind them, so they go the same way: the host is
+ * the one place keys are managed.
+ */
+export function pruneImportedAccounts(
+	db: Database,
+	keepSourceIDs: string[],
+): number {
+	const keep = new Set(keepSourceIDs);
+	const rows = db
+		.query<
+			{ provider_id: string; alias: string; source_id: string | null },
+			[]
+		>("SELECT provider_id, alias, source_id FROM accounts")
+		.all();
+
+	let removed = 0;
+	for (const row of rows) {
+		if (row.source_id && keep.has(row.source_id)) continue;
+		if (removeAccount(db, row.provider_id, row.alias)) removed += 1;
+	}
+	return removed;
+}
+
+/**
+ * Point a provider at the credential OpenCode calls active, but only when the
+ * balancer has no selection of its own left. A live selection is the user's
+ * choice and survives a sync.
+ */
+export function ensureActiveAlias(
+	db: Database,
+	providerID: string,
+	alias: string,
+) {
+	if (getActiveAccount(db, providerID)) return;
+	if (!getAccount(db, providerID, alias)) return;
+	setActiveAccount(db, providerID, alias);
 }
