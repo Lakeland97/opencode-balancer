@@ -8,7 +8,7 @@ import {
 	rowWindow,
 } from "../core/context";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
-import { listProviderPriority } from "../core/priority";
+import { isFreeOnly, listProviderPriority } from "../core/priority";
 import { readCompactionBuffer } from "./compaction-config";
 
 /** The provider this plugin registers; sessions pin it and never change. */
@@ -118,6 +118,9 @@ export async function loadCatalog(
 	// free marker. Free-only providers are pointed at the free spelling of
 	// whatever the family matched, instead of being handed the paid one.
 	const freeSiblings = new Map<string, ModelRecord>();
+	const freeOnlyProviders = new Set(
+		[...connectorIDs].filter((providerID) => isFreeOnly(db, providerID)),
+	);
 	for (const model of models.data) {
 		if (!connectorIDs.has(model.providerID)) continue;
 		if (typeof model.settings?.baseURL !== "string") continue;
@@ -171,10 +174,15 @@ export async function loadCatalog(
 		const sibling = free
 			? undefined
 			: freeSiblings.get(`${providerID}:${family}:${pkg}`);
+		// A free-only provider will be sent the sibling, so its real window is
+		// the sibling's: sizing the row by the model it will not use would let a
+		// conversation grow past what the model that serves it can hold.
+		const served =
+			freeOnlyProviders.has(providerID) && sibling ? sibling : undefined;
 		const route: FamilyRoute = {
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
-			context: model.limit?.context,
+			context: served?.limit?.context ?? model.limit?.context,
 			free,
 			...(sibling && typeof sibling.settings?.baseURL === "string"
 				? {
@@ -187,7 +195,7 @@ export async function loadCatalog(
 					}
 				: {}),
 			modelID: model.modelID,
-			output: model.limit?.output,
+			output: served?.limit?.output ?? model.limit?.output,
 			package: pkg,
 			providerID,
 		};
@@ -243,15 +251,22 @@ export async function loadCatalog(
 		if (chain.targets.length === 0) continue;
 		const targets: FamilyRoute[] = chain.targets.map((target) => {
 			const record = byRef.get(`${target.providerID}:${target.modelID}`);
+			// The stored id may be paid while the provider is free-only, in which
+			// case the free spelling is what serves and what sizes the row.
+			const sibling = freeOnlyProviders.has(target.providerID)
+				? freeSiblings.get(
+						`${target.providerID}:${modelFamily(normalizeModel(target.modelID))}:${record?.package ?? ""}`,
+					)
+				: undefined;
 			return {
 				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
-				context: record?.limit?.context,
+				context: sibling?.limit?.context ?? record?.limit?.context,
 				free: record
 					? isFreeModel({ cost: record.cost, modelID: target.modelID })
 					: undefined,
 				modelID: target.modelID,
-				output: record?.limit?.output,
+				output: sibling?.limit?.output ?? record?.limit?.output,
 				package: chain.package,
 				providerID: target.providerID,
 			};

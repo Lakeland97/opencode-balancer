@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { saveChain } from "../core/chains";
+import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
 	invalidateCatalog,
@@ -155,6 +156,71 @@ describe("catalog rows", () => {
 			context: 200_000,
 			output: 32_000,
 		});
+	});
+
+	test("a free-only provider sizes the row by the model it will use", async () => {
+		const db = freshDb();
+		setFreeOnly(db, "p1", true);
+		const catalog = await loadCatalog(
+			ctxWith([
+				model("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+					context: 1_000_000,
+					output: 384_000,
+				}),
+				model("p1", "deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash", {
+					context: 200_000,
+					output: 32_000,
+				}),
+				model("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+					context: 1_000_000,
+					output: 384_000,
+				}),
+			]),
+			db,
+		);
+		const family = catalog.families.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+
+		expect(family?.window?.context).toBe(200_000);
+		expect(family?.window?.output).toBe(32_000);
+		expect(family?.window?.ceiling).toBe(1_000_000);
+	});
+
+	test("a stored chain is also sized by the free model it will use", async () => {
+		const db = freshDb();
+		setFreeOnly(db, "p1", true);
+		saveChain(db, {
+			familyKey: "deepseek-v4.1-flash",
+			label: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			targets: [
+				{
+					baseURL: "https://p1.invalid/v1",
+					modelID: "deepseek-v4.1-flash",
+					providerID: "p1",
+				},
+			],
+		});
+		const catalog = await loadCatalog(
+			ctxWith([
+				model("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+					context: 1_000_000,
+					output: 384_000,
+				}),
+				model("p1", "deepseek-v4.1-flash-free", "DeepSeek V4.1 Flash", {
+					context: 200_000,
+					output: 32_000,
+				}),
+			]),
+			db,
+		);
+		const family = catalog.families.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+
+		expect(family?.window?.context).toBe(200_000);
+		expect(family?.window?.ceiling).toBe(200_000);
 	});
 
 	test("a stored target keeps its own baseURL", async () => {
