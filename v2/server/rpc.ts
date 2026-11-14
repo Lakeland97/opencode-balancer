@@ -355,7 +355,13 @@ export async function registerBalancerRpc({
 					ok: false,
 				};
 			}
-			await refresh?.();
+			// The value is saved whatever the host can do about it: a host that
+			// cannot re-read its models still has the new buffer on disk.
+			try {
+				await refresh?.();
+			} catch {
+				// Reported as success: the file is what the change is.
+			}
 			return {
 				message: `Context limit set to ${usableShare(readBufferAt(configPath))}.`,
 				ok: true,

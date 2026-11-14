@@ -384,4 +384,19 @@ describe("buffer rpc", () => {
 
 		expect(refreshed).toBe(1);
 	});
+
+	test("a host that cannot re-read its models still keeps the new value", async () => {
+		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
+		const rpc = await handlers(freshDb(), connectors, {
+			configPath: file,
+			refresh: async () => {
+				throw new Error("this host cannot reload");
+			},
+		});
+
+		const result = (await rpc.setBuffer({ value: "5%" })) as { ok: boolean };
+
+		expect(result.ok).toBe(true);
+		expect(readFileSync(file, "utf8")).toContain('"buffer": "95%"');
+	});
 });
