@@ -32,10 +32,13 @@ export function parseBuffer(value: unknown): CompactionBuffer {
  * Strip JSONC comments and trailing commas. A character scanner, not a regex:
  * the config routinely contains `https://` URLs inside strings.
  */
-function stripJsonc(text: string): string {
+export function stripJsonc(text: string): string {
 	let out = "";
 	let inString = false;
 	let escaped = false;
+	// String spans in output coordinates, so the trailing-comma pass can leave
+	// text inside quotes alone.
+	const strings: Array<[number, number]> = [];
 
 	for (let index = 0; index < text.length; index++) {
 		const char = text[index];
@@ -45,12 +48,17 @@ function stripJsonc(text: string): string {
 			out += char;
 			if (escaped) escaped = false;
 			else if (char === "\\") escaped = true;
-			else if (char === '"') inString = false;
+			else if (char === '"') {
+				inString = false;
+				const span = strings[strings.length - 1];
+				if (span) span[1] = out.length;
+			}
 			continue;
 		}
 
 		if (char === '"') {
 			inString = true;
+			strings.push([out.length, out.length]);
 			out += char;
 			continue;
 		}
@@ -72,7 +80,12 @@ function stripJsonc(text: string): string {
 		out += char;
 	}
 
-	return out.replace(/,(\s*[}\]])/g, "$1");
+	return out.replace(/,(\s*[}\]])/g, (match, tail: string, offset: number) => {
+		const quoted = strings.some(
+			([start, end]) => offset >= start && offset < end,
+		);
+		return quoted ? match : tail;
+	});
 }
 
 function candidatePaths(

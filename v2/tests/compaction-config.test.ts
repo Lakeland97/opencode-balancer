@@ -6,6 +6,7 @@ import {
 	invalidateBufferCache,
 	parseBuffer,
 	readCompactionBuffer,
+	stripJsonc,
 } from "../server/compaction-config";
 
 function tempDir() {
@@ -29,6 +30,26 @@ describe("parseBuffer", () => {
 		expect(parseBuffer("abc")).toEqual({ kind: "none" });
 		expect(parseBuffer(undefined)).toEqual({ kind: "none" });
 		expect(parseBuffer("0%")).toEqual({ kind: "none" });
+	});
+});
+
+describe("stripJsonc", () => {
+	test("trailing commas are removed outside strings only", () => {
+		const text =
+			'{\n  "note": "keep,] and,} as written",\n  "list": [1, 2,],\n}';
+		const parsed = JSON.parse(stripJsonc(text)) as {
+			list: number[];
+			note: string;
+		};
+		expect(parsed.list).toEqual([1, 2]);
+		expect(parsed.note).toBe("keep,] and,} as written");
+	});
+
+	test("urls and comments survive", () => {
+		const text = '{\n  // base\n  "u": "https://api.example/v1",\n}';
+		expect(JSON.parse(stripJsonc(text))).toEqual({
+			u: "https://api.example/v1",
+		});
 	});
 });
 
