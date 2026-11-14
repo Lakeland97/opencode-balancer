@@ -1,32 +1,71 @@
 import type { Database } from "bun:sqlite";
+import { listProviderPriority } from "../core/priority";
 import type { Account } from "../core/types";
 import {
 	BALANCER_BASE_URL,
 	type FamilyRoute,
 	type ModelFamily,
-	sortRoutes,
+	resolveChain,
 } from "./connectors";
 import { selectHealthyAccount } from "./selection";
 
 export type ChosenRoute = FamilyRoute & { account: Account };
 
+/** Whether the user has switched this provider off in the balancer. */
+export function isProviderEnabled(db: Database, providerID: string): boolean {
+	const entry = listProviderPriority(db).find(
+		(row) => row.providerID === providerID,
+	);
+	return entry ? entry.enabled : true;
+}
+
+/** Rough prompt size, used only when the host will not compact for us. */
+export function estimateTokens(body: string): number {
+	return Math.ceil(body.length / 4);
+}
+
 /**
- * The next connector able to answer for this family, in the user's provider
- * priority order. Limited, disabled, and excluded providers are skipped, which
- * is what makes a retry hop connectors instead of repeating the same one.
+ * The next target able to answer for this row, in chain order. Limited,
+ * disabled, withdrawn, and excluded targets are skipped, which is what makes a
+ * retry hop connectors instead of repeating the same one.
+ *
+ * `body` is only consulted when `guardOverflow` is set: without automatic
+ * compaction nothing else stops a conversation outgrowing a small target.
  */
-export function chooseRoute(
+export function chooseRouteForRequest(
 	db: Database,
 	family: ModelFamily,
-	exclude: ReadonlySet<string> = new Set(),
+	body: string | undefined,
+	options: {
+		guardOverflow: boolean;
+		exclude?: ReadonlySet<string>;
+	},
 ): ChosenRoute | undefined {
-	for (const route of sortRoutes(family.routes, db)) {
-		if (exclude.has(route.providerID)) continue;
+	const tokens = options.guardOverflow && body ? estimateTokens(body) : 0;
+
+	for (const route of resolveChain(db, family)) {
+		if (options.exclude?.has(route.providerID)) continue;
+		if (route.available === false) continue;
+		if (!isProviderEnabled(db, route.providerID)) continue;
+		if (tokens > 0 && route.context && tokens > route.context) continue;
+
 		const account = selectHealthyAccount(db, route.providerID);
 		if (!account) continue;
 		return { ...route, account };
 	}
 	return undefined;
+}
+
+/** The route the next request would take, without a prompt-size guard. */
+export function chooseRoute(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+): ChosenRoute | undefined {
+	return chooseRouteForRequest(db, family, undefined, {
+		exclude,
+		guardOverflow: false,
+	});
 }
 
 export function hasAlternativeRoute(

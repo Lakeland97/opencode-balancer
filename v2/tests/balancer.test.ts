@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
 	getAccount,
@@ -8,15 +8,13 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
-import {
-	getBalancingEnabled,
-	listProviderPriority,
-	setBalancingEnabled,
-} from "../core/priority";
+import { getStoredChain } from "../core/chains";
+import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "../server/apply-auth";
 import { runCommand } from "../server/commands";
+import { invalidateCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
 import {
 	hasAlternativeAccount,
@@ -30,6 +28,10 @@ function freshDb() {
 }
 
 const apiAuth = (key: string) => ({ key, type: "api" as const });
+
+beforeEach(() => {
+	invalidateCatalog();
+});
 
 describe("account store", () => {
 	test("migrate creates the schema and stores accounts", () => {
@@ -172,49 +174,6 @@ describe("commands", () => {
 		expect(getActiveAccount(db, "openai")?.alias).toBe("b");
 	});
 
-	test("model sets priority and selected model", async () => {
-		const db = freshDb();
-		saveAccount(db, "openai", "a", apiAuth("k1"));
-		await runCommand({
-			ctx: {
-				model: {
-					list: async () => ({
-						data: [{ modelID: "gpt-5", name: "GPT-5", providerID: "openai" }],
-					}),
-				},
-			} as never,
-			db,
-			raw: "model openai gpt-5",
-		});
-		const entry = listProviderPriority(db).find(
-			(row) => row.providerID === "openai",
-		);
-		expect(entry?.modelID).toBe("gpt-5");
-	});
-
-	test("model accepts the label the picker shows", async () => {
-		const db = freshDb();
-		saveAccount(db, "opencode-go", "a", apiAuth("k1"));
-		const reply = await runCommand({
-			ctx: {
-				model: {
-					list: async () => ({
-						data: [
-							{
-								modelID: "deepseek-v4.1-flash",
-								name: "DeepSeek V4.1 Flash 1017",
-								providerID: "opencode-go",
-							},
-						],
-					}),
-				},
-			} as never,
-			db,
-			raw: "model opencode-go DeepSeek V4.1 Flash 1017",
-		});
-		expect(reply).toContain("deepseek-v4.1-flash");
-	});
-
 	test("bare command reports state instead of help", async () => {
 		const db = freshDb();
 		saveAccount(db, "openai", "a", apiAuth("k1"));
@@ -243,5 +202,140 @@ describe("commands", () => {
 		});
 		expect(opened).toBe(1);
 		expect(reply).toContain("Balancer panel");
+	});
+});
+
+const PACKAGE = "@opencode/ai/providers/openai-compatible";
+
+function connectorModel(providerID: string, modelID: string, name = modelID) {
+	return {
+		enabled: true,
+		limit: { context: 200_000, output: 4096 },
+		modelID,
+		name,
+		package: PACKAGE,
+		providerID,
+		settings: { baseURL: `https://${providerID}.invalid/v1` },
+		type: "chat",
+	};
+}
+
+function commandCtx(data: unknown[]) {
+	return { model: { list: async () => ({ data }) } } as never;
+}
+
+describe("chain commands", () => {
+	test("chain lists targets in order with markers", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+		]);
+
+		const reply = await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash",
+		});
+
+		expect(reply).toContain("1. p1");
+		expect(reply).toContain("2. p2");
+		expect(reply).toContain("in use");
+	});
+
+	test("chain add appends a foreign model and refuses a duplicate provider", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+			connectorModel("p2", "mimo-v2.6-flash", "MiMo V2.6 Flash"),
+		]);
+
+		const added = await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash add p2 mimo-v2.6-flash",
+		});
+		expect(added).toContain("p2");
+
+		const duplicate = await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash add p2 mimo-v2.6-flash",
+		});
+		expect(duplicate.toLowerCase()).toContain("already");
+	});
+
+	test("chain remove drops one target and refuses the last", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+		]);
+
+		await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash remove p1",
+		});
+		expect(getStoredChain(db, "deepseek-v4.1-flash")?.targets).toHaveLength(1);
+
+		const refused = await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash remove p2",
+		});
+		expect(refused.toLowerCase()).toContain("last");
+	});
+
+	test("chain up moves a target and snapshots the automatic chain", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+		]);
+
+		await runCommand({ ctx, db, raw: "chain deepseek-v4.1-flash up p2" });
+
+		expect(
+			getStoredChain(db, "deepseek-v4.1-flash")?.targets.map(
+				(target) => target.providerID,
+			),
+		).toEqual(["p2", "p1"]);
+	});
+
+	test("chain reset deletes the stored chain", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+		]);
+
+		await runCommand({ ctx, db, raw: "chain deepseek-v4.1-flash add p1 x" });
+		const reply = await runCommand({
+			ctx,
+			db,
+			raw: "chain deepseek-v4.1-flash reset",
+		});
+		expect(reply.toLowerCase()).toContain("automatic");
+		expect(getStoredChain(db, "deepseek-v4.1-flash")).toBeUndefined();
+	});
+
+	test("the model and equivalents commands are gone", async () => {
+		const db = freshDb();
+		const ctx = commandCtx([]);
+		expect(await runCommand({ ctx, db, raw: "model openai gpt-5" })).toContain(
+			"Unknown command: model",
+		);
+		expect(await runCommand({ ctx, db, raw: "equivalents" })).toContain(
+			"Unknown command: equivalents",
+		);
 	});
 });

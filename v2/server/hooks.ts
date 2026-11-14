@@ -4,10 +4,12 @@ import { getActiveAccount } from "../core/accounts";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
+import { getCompactionAutoEnabled } from "./compaction-config";
 import {
 	BALANCER_PROVIDER_ID,
 	loadCatalog,
 	type ModelFamily,
+	resolveChain,
 } from "./connectors";
 import {
 	markRateLimited,
@@ -16,6 +18,7 @@ import {
 } from "./request-state";
 import {
 	chooseRoute,
+	chooseRouteForRequest,
 	hasAlternativeRoute,
 	rewriteModel,
 	routedURL,
@@ -110,14 +113,23 @@ export async function registerHooks({
 			if (!family) return;
 
 			const remembered = bySession.get(sessionKey(event.sessionID, ROUTED));
+			const ordered = resolveChain(db, family);
 			const pinned = remembered
-				? family.routes.filter(
-						(route) => route.providerID === remembered.providerID,
-					)
+				? ordered.filter((route) => route.providerID === remembered.providerID)
 				: [];
+			// Without automatic compaction nothing trims the conversation, so a
+			// target that cannot hold it is skipped rather than sent the request.
+			const guardOverflow = !getCompactionAutoEnabled();
+			const body = guardOverflow
+				? await event.request.clone().text()
+				: undefined;
 			const route =
-				chooseRoute(db, { ...family, routes: pinned }) ??
-				chooseRoute(db, family);
+				chooseRouteForRequest(
+					db,
+					{ ...family, stored: true, targets: pinned },
+					body,
+					{ guardOverflow },
+				) ?? chooseRouteForRequest(db, family, body, { guardOverflow });
 			if (!route) return;
 
 			let request = event.request;

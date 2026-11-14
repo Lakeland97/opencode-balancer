@@ -433,6 +433,14 @@ const requiredColumns: Record<string, string[]> = {
 		"created_at",
 		"metadata_json",
 	],
+	model_chain_targets: [
+		"family_key",
+		"position",
+		"provider_id",
+		"model_id",
+		"base_url",
+	],
+	model_chains: ["family_key", "label", "package", "updated_at"],
 	pending_connections: [
 		"id",
 		"provider_id",
@@ -489,6 +497,22 @@ export function migrate(db: Database) {
 	if (hasMigration(db, 1) && schemaIsCurrent(db)) return;
 
 	const apply = db.transaction(() => {
+		db.exec(`
+            CREATE TABLE IF NOT EXISTS model_chains (
+                family_key TEXT PRIMARY KEY,
+                label TEXT NOT NULL,
+                package TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS model_chain_targets (
+                family_key TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                PRIMARY KEY (family_key, provider_id)
+            );
+        `);
 		recreateAccounts(db);
 		recreateProviderState(db);
 		recreatePendingConnections(db);
