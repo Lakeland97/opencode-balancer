@@ -630,15 +630,12 @@ export default Plugin.define({
 							</div>
 						</Show>
 
+						{/* Each category sits one step in from the `models` heading, its
+						    rows one step in again, and a row's targets one step in from
+						    that: section, category, row, target. */}
 						<For each={groupedChains()}>
 							{(group) => (
-								<div
-									style={{
-										display: "flex",
-										"flex-direction": "column",
-										gap: "4px",
-									}}
-								>
+								<div style={stair(1)}>
 									<Show when={group.brand}>
 										<div style={{ ...row, "margin-top": "4px" }}>
 											<button
@@ -657,7 +654,7 @@ export default Plugin.define({
 										</div>
 									</Show>
 									<Show when={!isGroupCollapsed(group.brand ?? "")}>
-										<div style={stair(group.brand ? 1 : 0)}>
+										<div style={stair(1)}>
 											<For each={group.rows}>
 												{(chain) => (
 													<div

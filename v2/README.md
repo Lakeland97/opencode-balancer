@@ -121,8 +121,8 @@ model's own window at which it should be compacted, and names the model it will 
 the `-free` spelling where the credential that would serve is set to spend nothing. That stays on
 screen while the credential sits out a park, because what a row is set up to send does not change just
 because its key is briefly out of service; the row's own marker reports the park. Nested rows are
-indented one step per level, so the contents of an expanded row read as inside it rather than beside
-it.
+indented one step per level — section, category, row, target — so a category reads as under the
+section, a row as under its category, and an expanded row's targets as inside it rather than beside it.
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
 healthy. A failure moves forward to a credential this session has not tried since its last answer,
