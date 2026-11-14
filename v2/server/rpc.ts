@@ -177,7 +177,7 @@ export async function registerBalancerRpc({
 					return {
 						context: window?.context ?? 0,
 						declaredContext: window
-							? declaredContext(window.context, buffer)
+							? declaredContext(window.context, buffer, window.ceiling)
 							: 0,
 						key: family.key,
 						label: family.name,

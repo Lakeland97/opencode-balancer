@@ -150,7 +150,11 @@ describe("catalog rows", () => {
 		const family = catalog.families.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
-		expect(family?.window).toEqual({ context: 200_000, output: 32_000 });
+		expect(family?.window).toEqual({
+			ceiling: 1_000_000,
+			context: 200_000,
+			output: 32_000,
+		});
 	});
 
 	test("a stored target keeps its own baseURL", async () => {

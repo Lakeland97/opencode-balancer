@@ -84,8 +84,9 @@ describe("chain rpc", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// One 1M target, buffer 75%: declare 4M so compaction fires at 1M.
-		expect(row?.declaredContext).toBe(4_000_000);
+		// One 1M target at 75% would compensate to 4M, but nothing holds more
+		// than 1M, so the declaration is capped at the ceiling.
+		expect(row?.declaredContext).toBe(1_000_000);
 		expect(row?.targets.length).toBe(1);
 
 		await rpc.chainAdd({
