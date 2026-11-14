@@ -46,8 +46,8 @@ export type ModelFamily = {
 	stored?: boolean;
 	/** The effective order: the stored chain, or the automatic routes. */
 	targets: readonly FamilyRoute[];
-	/** The smallest window across the targets, which every hop must fit. */
-	window?: { context: number; output: number };
+	/** The smallest window every hop must fit, and the largest any hop holds. */
+	window?: { ceiling: number; context: number; output: number };
 };
 
 type Catalog = {
