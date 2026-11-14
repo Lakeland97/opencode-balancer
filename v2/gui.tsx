@@ -77,8 +77,10 @@ export default Plugin.define({
 			addTarget: "add target",
 			alias: "alias",
 			balancing: "balancing",
+			collapse: "collapse all",
 			declares: "declares",
 			disabled: "disabled",
+			expand: "expand all",
 			free: "free",
 			inUse: "in use",
 			limited: "limited",
@@ -183,6 +185,18 @@ export default Plugin.define({
 		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
 		const toggleCollapsed = (key: string) =>
 			setCollapsed({ ...collapsed(), [key]: !collapsed()[key] });
+
+		// Collapse all flips the whole list at once, so a long catalogue is one
+		// click away from a single screen of headers.
+		const allCollapsed = () => {
+			const rows = visibleChains();
+			return rows.length > 0 && rows.every((chain) => isCollapsed(chain.key));
+		};
+		const toggleAll = () => {
+			const next: Record<string, boolean> = {};
+			for (const chain of visibleChains()) next[chain.key] = !allCollapsed();
+			setCollapsed(next);
+		};
 
 		const row = {
 			"align-items": "center",
@@ -310,12 +324,18 @@ export default Plugin.define({
 					<div style={{ ...row, "margin-top": "4px" }}>
 						<strong>{ctx.t("models")}</strong>
 						<button
+							onClick={toggleAll}
+							style={{ "margin-left": "auto" }}
+							title={allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
+						>
+							{allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
+						</button>
+						<button
 							onClick={() => {
 								setCreating(!creating());
 								setCreateProvider("");
 								setCreateModels([]);
 							}}
-							style={{ "margin-left": "auto" }}
 						>
 							+ {ctx.t("newChain")}
 						</button>
