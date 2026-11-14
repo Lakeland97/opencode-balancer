@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	groupByBrand,
 	matchModel,
 	modelBrand,
 	modelFamily,
@@ -93,5 +94,31 @@ describe("modelBrand", () => {
 		expect(modelBrand("Claude-Fable-5.2")).toBe("Claude");
 		expect(modelBrand("deepseek-v4.1-flash")).toBe("deepseek");
 		expect(modelBrand("kimi-k3.1-pro")).toBe("kimi");
+	});
+});
+
+describe("groupByBrand", () => {
+	test("rows gather under their brand, groups in order", () => {
+		const rows = [
+			{ label: "Claude Fable 5.1" },
+			{ label: "DeepSeek V4 Pro" },
+			{ label: "Claude Opus 5.5" },
+			{ label: "GLM-5.3" },
+		];
+		const grouped = groupByBrand(rows);
+
+		expect(grouped.map(([brand]) => brand)).toEqual([
+			"Claude",
+			"DeepSeek",
+			"GLM",
+		]);
+		expect(grouped[0]?.[1].map((row) => row.label)).toEqual([
+			"Claude Fable 5.1",
+			"Claude Opus 5.5",
+		]);
+	});
+
+	test("an empty list has no groups", () => {
+		expect(groupByBrand([])).toEqual([]);
 	});
 });

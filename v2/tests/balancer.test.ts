@@ -242,7 +242,7 @@ describe("chain commands", () => {
 
 		expect(reply).toContain("1. p1");
 		expect(reply).toContain("2. p2");
-		expect(reply).toContain("in use");
+		expect(reply).toContain("[next]");
 	});
 
 	test("chain add appends a foreign model and refuses a duplicate provider", async () => {

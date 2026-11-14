@@ -56,7 +56,9 @@ function targetState(
 	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
 		return "limited";
 	}
-	return serving ? "in use" : "available";
+	// A row's targets are labelled by what would serve next, not by what is
+	// serving: only one account is genuinely in use at a time.
+	return serving ? "next" : "available";
 }
 
 /**

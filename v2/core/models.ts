@@ -111,3 +111,22 @@ export function modelBrand(label: string) {
 	if (stripped.length >= 2) return stripped;
 	return head.length > 0 ? head : first;
 }
+
+/**
+ * Groups labelled rows under their brand, keeping the order inside each group
+ * and sorting the groups case-insensitively.
+ */
+export function groupByBrand<T extends { label: string }>(
+	rows: readonly T[],
+): Array<[string, T[]]> {
+	const groups = new Map<string, T[]>();
+	for (const row of rows) {
+		const brand = modelBrand(row.label);
+		const list = groups.get(brand) ?? [];
+		list.push(row);
+		groups.set(brand, list);
+	}
+	return [...groups.entries()].sort((a, b) =>
+		a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
+	);
+}
