@@ -3,7 +3,10 @@ import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
-import { registerBalancerProvider } from "./server/connectors";
+import {
+	refreshBalancerProvider,
+	registerBalancerProvider,
+} from "./server/connectors";
 import { registerHooks } from "./server/hooks";
 import { registerBalancerRpc } from "./server/rpc";
 
@@ -40,7 +43,13 @@ export default Plugin.define({
 		migrate(db);
 
 		await registerHooks({ ctx, db });
-		const rpc = await registerBalancerRpc({ ctx, db });
+		const rpc = await registerBalancerRpc({
+			ctx,
+			db,
+			// A buffer change only reaches the host once it rebuilds its models
+			// from the new value.
+			refresh: () => refreshBalancerProvider({ ctx, db }),
+		});
 		await registerBalancerProvider({ ctx, db });
 		const openGui = async () => {
 			await rpc.events.emit("open", {});

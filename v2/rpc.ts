@@ -75,6 +75,10 @@ export const balancerDefinition = {
 	id: "balancer",
 	methods: {
 		add: { input: pair, output: result },
+		buffer: {
+			input: empty,
+			output: object({ path: str, value: str }, ["value", "path"]),
+		},
 		chainAdd: {
 			input: object({ key: str, modelID: str, providerID: str }, [
 				"key",
@@ -83,6 +87,7 @@ export const balancerDefinition = {
 			]),
 			output: result,
 		},
+
 		chainCreate: {
 			input: object({ modelID: str, providerID: str }, [
 				"providerID",
@@ -178,6 +183,10 @@ export const balancerDefinition = {
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),
+			output: result,
+		},
+		setBuffer: {
+			input: object({ value: str }, ["value"]),
 			output: result,
 		},
 		setEnabled: {

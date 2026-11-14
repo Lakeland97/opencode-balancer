@@ -96,19 +96,30 @@ pickers, and a `reset` on any customised row. It also lists providers, with an e
 
 The panel lists only rows that route between providers, or that you built by hand. Rows are grouped
 under their brand where a brand has more than one, and every row, group and the whole section can be
-folded away; `collapse all` / `expand all` folds the lot at once.
+folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
+
+The `buffer` field at the top edits `compaction.buffer` in the config file directly — in place, so
+comments and every other setting survive — then asks the host to rebuild its models, so the change
+reaches the declared windows without restarting OpenCode. It accepts a percentage from `1%` to `99%`
+or a token count; `0%` is not a value the host accepts.
 
 ### Context windows
 
 A row declares the **smallest** context window in its chain, because every target must be able to
 take over the same conversation. `compaction.buffer` is a share of the declared window, so the host
 would compact early if the declared window were the real one. The plugin compensates: with a real
-window of 200k and a 75% buffer, the row declares `200k / (1 − 0.75) = 800k`, and the host compacts
-at 200k — where the smallest target actually ends. The same applies to output limits, which use the
-smallest output limit in the chain.
+window of 200k the row declares `200k / (1 − p)`, and the host compacts at 200k — where the smallest
+target actually ends. The same applies to output limits, which use the smallest output limit in the
+chain.
 
-The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, since
-the plugin API exposes no config accessor. With `compaction.auto: false` nothing trims the
+That declaration is capped at the chain's largest real window, so a row of similarly sized models
+cannot claim more than any target holds. The cap costs at most `p` in earlier compaction, which is why
+a **small** buffer is what the design wants: at `1%` a 200k row declares 202k and compacts at 200k,
+while at `75%` a uniform 1M row would declare 1M and compact at 250k, leaving three quarters of its
+window unused.
+
+The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
+re-read whenever the panel writes a new value. With `compaction.auto: false` nothing trims the
 conversation, so routing also skips targets smaller than the request's estimated token count.
 
 ## Deliberate limits

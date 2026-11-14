@@ -334,6 +334,50 @@ export function sortRoutes(
  * Declares the balancer provider: one virtual model per family, named so the
  * picker reads as a single choice instead of one row per connector.
  */
+/** What the declared models are built from; replaced whenever the host reloads. */
+let declarations: { buffer: CompactionBuffer; catalog: Catalog } | undefined;
+
+/** The balancer's virtual models, one per family, at the window each settles on. */
+function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
+	return catalog.families.map((family) => {
+		const source = catalog.sources.get(family.key);
+		const window = family.window;
+		return {
+			// A stored row outlives its family, so it may have no source
+			// record at all; the host sorts on these fields and crashes
+			// without them.
+			...(source ?? {
+				capabilities: { input: ["text"], output: ["text"], tools: true },
+				cost: [],
+				enabled: true,
+				status: "active" as const,
+				time: { released: 0 },
+				variants: [],
+			}),
+			id: family.key,
+			// The window is the smallest target's, declared so the host's
+			// buffer applies to that real limit instead of a fraction of it.
+			...(window
+				? {
+						limit: {
+							context: declaredContext(window.context, buffer, window.ceiling),
+							...(window.output > 0 ? { output: window.output } : {}),
+						},
+					}
+				: { limit: { context: 0, output: 0 } }),
+			modelID: family.key,
+			name: `Balancer · ${family.name}`,
+			package: family.package,
+			providerID: BALANCER_PROVIDER_ID,
+			settings: {
+				...(source?.settings ?? {}),
+				apiKey: "balancer",
+				baseURL: BALANCER_BASE_URL,
+			},
+		};
+	});
+}
+
 export async function registerBalancerProvider({
 	ctx,
 	db,
@@ -345,50 +389,11 @@ export async function registerBalancerProvider({
 }) {
 	const catalog = await loadCatalog(ctx, db);
 	if (catalog.families.length === 0) return;
+	declarations = { buffer, catalog };
 
 	await ctx.provider.transform((editor) => {
-		const models = catalog.families.map((family) => {
-			const source = catalog.sources.get(family.key);
-			const window = family.window;
-			return {
-				// A stored row outlives its family, so it may have no source
-				// record at all; the host sorts on these fields and crashes
-				// without them.
-				...(source ?? {
-					capabilities: { input: ["text"], output: ["text"], tools: true },
-					cost: [],
-					enabled: true,
-					status: "active" as const,
-					time: { released: 0 },
-					variants: [],
-				}),
-				id: family.key,
-				// The window is the smallest target's, declared so the host's
-				// buffer applies to that real limit instead of a fraction of it.
-				...(window
-					? {
-							limit: {
-								context: declaredContext(
-									window.context,
-									buffer,
-									window.ceiling,
-								),
-								...(window.output > 0 ? { output: window.output } : {}),
-							},
-						}
-					: { limit: { context: 0, output: 0 } }),
-				modelID: family.key,
-				name: `Balancer · ${family.name}`,
-				package: family.package,
-				providerID: BALANCER_PROVIDER_ID,
-				settings: {
-					...(source?.settings ?? {}),
-					apiKey: "balancer",
-					baseURL: BALANCER_BASE_URL,
-				},
-			};
-		});
-
+		const current = declarations;
+		if (!current) return;
 		editor.add({
 			info: {
 				activation: "enabled",
@@ -401,7 +406,25 @@ export async function registerBalancerProvider({
 					provider: BALANCER_PROVIDER_ID,
 				},
 			},
-			models,
+			models: declaredModels(current.catalog, current.buffer),
 		} as never);
 	});
+}
+
+/**
+ * Re-reads the catalog and buffer and has the host rebuild its models, so a
+ * changed buffer, an edited chain or a toggled free-only provider reaches the
+ * declared windows without restarting the application.
+ */
+export async function refreshBalancerProvider({
+	ctx,
+	db,
+}: {
+	ctx: Context;
+	db: Database;
+}) {
+	invalidateCatalog();
+	const catalog = await loadCatalog(ctx, db);
+	declarations = { buffer: readCompactionBuffer(), catalog };
+	await ctx.provider.reload();
 }

@@ -1,5 +1,8 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { saveAccount } from "../core/accounts";
 import { getStoredChain } from "../core/chains";
@@ -84,7 +87,11 @@ const connectors = [
 ];
 
 /** The registered handlers, as a client would call them. */
-async function handlers(db: Database, data: unknown[] = connectors) {
+async function handlers(
+	db: Database,
+	data: unknown[] = connectors,
+	options: { configPath?: string; refresh?: () => Promise<void> | void } = {},
+) {
 	const ctx = {
 		model: { list: async () => ({ data }) },
 		provider: {
@@ -105,9 +112,18 @@ async function handlers(db: Database, data: unknown[] = connectors) {
 
 	return (await registerBalancerRpc({
 		buffer: { kind: "percent", percent: 0.75 },
+		...options,
 		ctx,
 		db,
 	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+}
+
+/** A config file on disk, so the writer has something real to edit. */
+function tempConfig(text: string) {
+	const dir = mkdtempSync(join(tmpdir(), "balancer-rpc-"));
+	const file = join(dir, "opencode.json");
+	writeFileSync(file, text);
+	return file;
 }
 
 /** A client whose provider list throws, as the Desktop panel's does. */
@@ -311,5 +327,61 @@ describe("chain rpc", () => {
 		expect(listed.models.map((entry) => entry.modelID)).toEqual([
 			"mimo-v2.6-flash",
 		]);
+	});
+});
+
+describe("buffer rpc", () => {
+	test("reports the value and the file it comes from", async () => {
+		const file = tempConfig(
+			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
+		);
+		const rpc = await handlers(freshDb(), connectors, { configPath: file });
+
+		const state = (await rpc.buffer({})) as { path: string; value: string };
+		expect(state.value).toBe("75%");
+		expect(state.path).toBe(file);
+	});
+
+	test("setBuffer rewrites the file, keeps its comments, and reports the new value", async () => {
+		const file = tempConfig(
+			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
+		);
+		const rpc = await handlers(freshDb(), connectors, { configPath: file });
+
+		const result = (await rpc.setBuffer({ value: "1%" })) as { ok: boolean };
+		expect(result.ok).toBe(true);
+
+		const text = readFileSync(file, "utf8");
+		expect(text).toContain("// keep this");
+		expect(text).toContain('"buffer": "1%"');
+		expect(((await rpc.buffer({})) as { value: string }).value).toBe("1%");
+	});
+
+	test("setBuffer refuses a value the host would reject", async () => {
+		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
+		const rpc = await handlers(freshDb(), connectors, { configPath: file });
+
+		const result = (await rpc.setBuffer({ value: "0%" })) as {
+			message: string;
+			ok: boolean;
+		};
+
+		expect(result.ok).toBe(false);
+		expect(readFileSync(file, "utf8")).toContain('"buffer":"75%"');
+	});
+
+	test("setBuffer asks the host to re-read its models", async () => {
+		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
+		let refreshed = 0;
+		const rpc = await handlers(freshDb(), connectors, {
+			configPath: file,
+			refresh: async () => {
+				refreshed++;
+			},
+		});
+
+		await rpc.setBuffer({ value: "5%" });
+
+		expect(refreshed).toBe(1);
 	});
 });

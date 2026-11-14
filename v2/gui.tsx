@@ -30,6 +30,7 @@ type Account = {
 type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
+type BufferState = { path: string; value: string };
 
 type Target = {
 	modelID: string;
@@ -95,7 +96,9 @@ export default Plugin.define({
 			add: "add",
 			addTarget: "add target",
 			alias: "alias",
+			apply: "apply",
 			balancing: "balancing",
+			buffer: "buffer",
 			collapse: "collapse all",
 			declares: "declares",
 			disabled: "disabled",
@@ -121,6 +124,9 @@ export default Plugin.define({
 	setup(ctx) {
 		const [accounts, setAccounts] = createSignal<Account[]>([]);
 		const [balancing, setBalancing] = createSignal(false);
+		const [buffer, setBuffer] = createSignal("");
+		const [bufferDraft, setBufferDraft] = createSignal("");
+		const [bufferPath, setBufferPath] = createSignal("");
 		const [message, setMessage] = createSignal("");
 		const [provider, setProvider] = createSignal("");
 		const [alias, setAlias] = createSignal("");
@@ -132,8 +138,9 @@ export default Plugin.define({
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
 		const [creating, setCreating] = createSignal(false);
-		// Collapses the whole models section, not just the rows.
-		const [modelsOpen, setModelsOpen] = createSignal(true);
+		// Collapses the whole models section, not just the rows. Starts folded,
+		// and rows and groups do too, so the panel opens compact.
+		const [modelsOpen, setModelsOpen] = createSignal(false);
 		const [collapsedGroups, setCollapsedGroups] = createSignal<
 			Record<string, boolean>
 		>({});
@@ -143,16 +150,20 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order] = await Promise.all([
+				const [status, list, rows, order, settings] = await Promise.all([
 					rpc.status({}),
 					rpc.list({}),
 					rpc.chains({}),
 					rpc.priority({}),
+					rpc.buffer({}),
 				]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
+				setBuffer((settings as BufferState).value);
+				setBufferPath((settings as BufferState).path);
+				setBufferDraft((settings as BufferState).value);
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -228,16 +239,17 @@ export default Plugin.define({
 		// DeepSeek rows sit together instead of interleaving alphabetically.
 		const groupedChains = () => groupByBrand(visibleChains());
 
-		const isGroupCollapsed = (name: string) => Boolean(collapsedGroups()[name]);
+		const isGroupCollapsed = (name: string) =>
+			collapsedGroups()[name] !== false;
 		const toggleGroup = (name: string) =>
 			setCollapsedGroups({
 				...collapsedGroups(),
-				[name]: !collapsedGroups()[name],
+				[name]: !isGroupCollapsed(name),
 			});
 
-		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
+		const isCollapsed = (key: string) => collapsed()[key] !== false;
 		const toggleCollapsed = (key: string) =>
-			setCollapsed({ ...collapsed(), [key]: !collapsed()[key] });
+			setCollapsed({ ...collapsed(), [key]: !isCollapsed(key) });
 
 		// Collapse all flips the whole list at once, so a long catalogue is one
 		// click away from a single screen of headers.
@@ -309,6 +321,29 @@ export default Plugin.define({
 								? __BALANCER_BUILT_AT__
 								: "dev"}
 						</span>
+					</div>
+
+					<div style={row}>
+						<span
+							style={{ opacity: 0.7 }}
+							title="Share of each model's window the host keeps free before compacting. 1% to 99%, or a token count."
+						>
+							{ctx.t("buffer")}
+						</span>
+						<input
+							onChange={(event) => setBufferDraft(event.currentTarget.value)}
+							placeholder="75% or 150000"
+							style={{ width: "9em" }}
+							title={bufferPath()}
+							value={bufferDraft()}
+						/>
+						<button
+							onClick={() =>
+								void run(() => rpc().setBuffer({ value: bufferDraft() }))
+							}
+						>
+							{ctx.t("apply")}
+						</button>
 					</div>
 
 					<Show when={message()}>

@@ -29,7 +29,12 @@ import {
 	rowByKey,
 	shiftTarget,
 } from "./chain-actions";
-import { readCompactionBuffer } from "./compaction-config";
+import {
+	compactionConfigPath,
+	readBufferAt,
+	readCompactionBuffer,
+	writeCompactionBuffer,
+} from "./compaction-config";
 import {
 	type FamilyRoute,
 	invalidateCatalog,
@@ -79,14 +84,28 @@ function targetState(
  * Typed RPC surface so clients (a GUI part, the TUI, or any SDK client) can
  * manage accounts without parsing command output.
  */
+/** A buffer as the panel shows it: `75%`, `150000`, or blank for none. */
+function bufferText(buffer: CompactionBuffer): string {
+	if (buffer.kind === "percent")
+		return `${Number((buffer.percent * 100).toFixed(2))}%`;
+	if (buffer.kind === "tokens") return String(buffer.tokens);
+	return "";
+}
+
 export async function registerBalancerRpc({
 	ctx,
 	db,
 	buffer = readCompactionBuffer(),
+	configPath = compactionConfigPath(),
+	refresh,
 }: {
 	ctx: Context;
 	db: Database;
 	buffer?: CompactionBuffer;
+	/** The file a buffer change is written to. Defaults to the effective one. */
+	configPath?: string;
+	/** Re-reads models so a changed buffer reaches the host's declared limits. */
+	refresh?: () => Promise<void> | void;
 }) {
 	const registration = await ctx.rpc.register(Balancer, {
 		add: async (input) => {
@@ -112,6 +131,11 @@ export async function registerBalancerRpc({
 				};
 			}
 		},
+
+		buffer: async () => ({
+			path: configPath ?? "",
+			value: bufferText(configPath ? readBufferAt(configPath) : buffer),
+		}),
 
 		chainAdd: async (input) => {
 			const { key, providerID, modelID } = input as {
@@ -313,6 +337,30 @@ export async function registerBalancerRpc({
 			setBalancingEnabled(db, enabled);
 			return {
 				message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
+				ok: true,
+			};
+		},
+
+		setBuffer: async (input) => {
+			const { value } = input as { value: string };
+			if (!configPath) {
+				return {
+					message: "No OpenCode config file to write a buffer into.",
+					ok: false,
+				};
+			}
+			try {
+				writeCompactionBuffer(configPath, value);
+			} catch (error) {
+				return {
+					message:
+						error instanceof Error ? error.message : "Could not write buffer.",
+					ok: false,
+				};
+			}
+			await refresh?.();
+			return {
+				message: `Compaction buffer set to ${bufferText(readBufferAt(configPath))}.`,
 				ok: true,
 			};
 		},

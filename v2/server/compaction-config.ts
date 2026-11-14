@@ -1,4 +1,11 @@
-import { readFileSync, statSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CompactionBuffer } from "../core/context";
@@ -173,4 +180,130 @@ export function getCompactionAutoEnabled(paths?: {
 
 export function invalidateBufferCache() {
 	cache.clear();
+}
+
+/**
+ * The file that currently decides the buffer: the first that defines one, else
+ * the first that exists, so a value can be added where nothing sets one yet.
+ */ export function compactionConfigPath(paths?: {
+	env?: Record<string, string | undefined>;
+	cwd?: string;
+}): string | undefined {
+	const env = paths?.env ?? process.env;
+	const cwd = paths?.cwd ?? process.cwd();
+	const candidates = candidatePaths(env, cwd);
+
+	for (const path of candidates) {
+		const entry = readAt(path);
+		if (entry && entry.buffer.kind !== "none") return path;
+	}
+	return candidates.find((path) => existsSync(path));
+}
+
+/** The buffer one specific file defines, ignoring the env/project/global layering. */
+export function readBufferAt(path: string): CompactionBuffer {
+	return readAt(path)?.buffer ?? { kind: "none" };
+}
+
+/**
+ * Index just past the object or array that opens at `open`. Braces inside
+ * strings and comments do not count, matching `stripJsonc`.
+ */
+function containerEnd(text: string, open: number): number {
+	let depth = 0;
+	let inString = false;
+	let escaped = false;
+
+	for (let index = open; index < text.length; index++) {
+		const char = text[index];
+		const next = text[index + 1];
+
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			while (index < text.length && text[index] !== "\n") index++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			index += 2;
+			while (
+				index < text.length &&
+				!(text[index] === "*" && text[index + 1] === "/")
+			)
+				index++;
+			index++;
+			continue;
+		}
+		if (char === "{" || char === "[") depth++;
+		else if (char === "}" || char === "]") {
+			depth--;
+			if (depth === 0) return index + 1;
+		}
+	}
+	return text.length;
+}
+
+/**
+ * The value forms the host accepts: a percentage from 1% to 99%, or a positive
+ * token count. Anything else is refused rather than written and ignored.
+ */
+function normalizeBufferValue(value: string): string | number {
+	const trimmed = value.trim();
+	const percent = /^(\d+(?:\.\d+)?)%$/.exec(trimmed);
+	if (percent) {
+		const parsed = Number(percent[1]);
+		if (parsed >= 1 && parsed <= 99) return `${percent[1]}%`;
+		throw new Error(`buffer percent must be 1% to 99%, got "${value}"`);
+	}
+	if (/^\d+$/.test(trimmed) && Number(trimmed) > 0) return Number(trimmed);
+	throw new Error(
+		`buffer must be a percent from 1% to 99% or a token count, got "${value}"`,
+	);
+}
+
+/** Replace `compaction.buffer` in place, adding the key if the section lacks one. */
+function withBufferValue(text: string, json: string): string {
+	const section = /"compaction"\s*:\s*\{/.exec(text);
+	if (!section) throw new Error("no compaction section to update");
+
+	const open = section.index + section[0].length - 1;
+	const end = containerEnd(text, open);
+	const region = text.slice(open, end);
+	const existing = /"buffer"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)/.exec(
+		region,
+	);
+
+	if (!existing) {
+		return `${text.slice(0, open + 1)}\n\t\t"buffer": ${json},${text.slice(open + 1)}`;
+	}
+	const from = open + existing.index;
+	return `${text.slice(0, from)}"buffer": ${json}${text.slice(from + existing[0].length)}`;
+}
+
+/**
+ * Point the host's compaction buffer at a new value, editing the config in
+ * place so comments, formatting and every other setting survive. The first
+ * write to a file keeps a `.bak` of the original, and a malformed result is
+ * refused before anything lands on disk.
+ */
+export function writeCompactionBuffer(path: string, value: string) {
+	const json = JSON.stringify(normalizeBufferValue(value));
+	const next = withBufferValue(readFileSync(path, "utf8"), json);
+	// Never persist text we cannot parse back.
+	JSON.parse(stripJsonc(next));
+
+	const backup = `${path}.bak`;
+	if (!existsSync(backup)) copyFileSync(path, backup);
+	const temp = `${path}.balancer.tmp`;
+	writeFileSync(temp, next);
+	renameSync(temp, path);
+	invalidateBufferCache();
 }

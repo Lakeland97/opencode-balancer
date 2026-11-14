@@ -8,6 +8,7 @@ import { migrate } from "../core/schema";
 import {
 	invalidateCatalog,
 	loadCatalog,
+	refreshBalancerProvider,
 	registerBalancerProvider,
 	resolveChain,
 } from "../server/connectors";
@@ -338,5 +339,72 @@ describe("provider registration", () => {
 			(entry) => (entry as { id?: string }).id === "deepseek-v4.1-flash",
 		);
 		expect(row?.limit).toEqual({ context: 800_000, output: 32_000 });
+	});
+});
+
+type DeclaredModel = { id: string; limit?: { context: number } };
+
+/** A host that keeps the provider transform and replays it on reload. */
+function hostingCtx(data: unknown[]) {
+	let transform: ((editor: Editor) => void) | undefined;
+	let models: DeclaredModel[] = [];
+	const editor: Editor = {
+		add: (input) => {
+			models = input.models;
+		},
+	};
+	const ctx = {
+		model: { list: async () => ({ data }) },
+		provider: {
+			reload: async () => {
+				models = [];
+				transform?.(editor);
+			},
+			transform: async (callback: (editor: Editor) => void) => {
+				transform = callback;
+				callback(editor);
+				return { dispose: async () => {} };
+			},
+		},
+	} as never;
+	return {
+		ctx,
+		limitOf: (id: string) =>
+			models.find((entry) => entry.id === id)?.limit?.context,
+	};
+}
+
+type Editor = { add: (input: { models: DeclaredModel[] }) => void };
+
+describe("provider re-declaration", () => {
+	test("a refreshed provider sizes the row by the chain it now has", async () => {
+		const db = freshDb();
+		const host = hostingCtx(twoConnectors);
+		await registerBalancerProvider({
+			buffer: { kind: "percent", percent: 0.75 },
+			ctx: host.ctx,
+			db,
+		});
+
+		// The smallest target is 200k, so the declaration is 200k / 0.25.
+		expect(host.limitOf("deepseek-v4.1-flash")).toBe(800_000);
+
+		// Narrow the row to the 1M connector alone.
+		saveChain(db, {
+			familyKey: "deepseek-v4.1-flash",
+			label: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			targets: [
+				{
+					baseURL: "https://p1.invalid/v1",
+					modelID: "deepseek-v4.1-flash",
+					providerID: "p1",
+				},
+			],
+		});
+		await refreshBalancerProvider({ ctx: host.ctx, db });
+
+		// Nothing tiny caps the row any more, so it can declare the 1M window.
+		expect(host.limitOf("deepseek-v4.1-flash")).toBe(1_000_000);
 	});
 });
