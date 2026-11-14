@@ -16,6 +16,12 @@ import {
 	usableShare,
 } from "../core/context";
 import {
+	readRowLimit,
+	readTargetLimit,
+	setRowLimit,
+	setTargetLimit,
+} from "../core/limits";
+import {
 	getBalancingEnabled,
 	isFreeOnly,
 	listProviderPriority,
@@ -83,6 +89,21 @@ function targetState(
 	// A row's targets are labelled by what would serve next, not by what is
 	// serving: only one account is genuinely in use at a time.
 	return serving ? "next" : "available";
+}
+
+/**
+ * A limit the panel typed. An empty field clears the limit; anything that is
+ * not a whole token count is refused rather than stored as a NaN.
+ */
+function parseLimit(
+	value: string,
+): { ok: true; tokens: number | undefined } | { ok: false; message: string } {
+	const trimmed = value.trim();
+	if (trimmed === "") return { ok: true, tokens: undefined };
+	if (!/^\d+$/.test(trimmed)) {
+		return { message: `"${value}" is not a token count.`, ok: false };
+	}
+	return { ok: true, tokens: Number(trimmed) };
 }
 
 /**
@@ -219,9 +240,11 @@ export async function registerBalancerRpc({
 							: 0,
 						key: family.key,
 						label: family.name,
+						limit: readRowLimit(db, family.key) ?? 0,
 						package: family.package,
 						stored: Boolean(family.stored),
 						targets: resolveChain(db, family).map((target) => ({
+							limit: readTargetLimit(db, family.key, target.providerID) ?? 0,
 							modelID: target.modelID,
 							providerID: target.providerID,
 							resolved: resolvedModelID(db, target),
@@ -388,6 +411,42 @@ export async function registerBalancerRpc({
 			setFreeOnly(db, providerID, enabled);
 			return {
 				message: `${providerID} uses ${enabled ? "free models only" : "paid models too"}.`,
+				ok: true,
+			};
+		},
+
+		setRowLimit: async (input) => {
+			const { key, value } = input as { key: string; value: string };
+			const parsed = parseLimit(value);
+			if (!parsed.ok) return { message: parsed.message, ok: false };
+			setRowLimit(db, key, parsed.tokens);
+			// The catalog is cached, and a new limit must reach the next read of
+			// it: the panel redraws from `chains` and routing sizes the row.
+			invalidateCatalog();
+			return {
+				message:
+					parsed.tokens === undefined
+						? `Cleared the limit on ${key}.`
+						: `${key} is limited to ${parsed.tokens} tokens.`,
+				ok: true,
+			};
+		},
+
+		setTargetLimit: async (input) => {
+			const { key, providerID, value } = input as {
+				key: string;
+				providerID: string;
+				value: string;
+			};
+			const parsed = parseLimit(value);
+			if (!parsed.ok) return { message: parsed.message, ok: false };
+			setTargetLimit(db, key, providerID, parsed.tokens);
+			invalidateCatalog();
+			return {
+				message:
+					parsed.tokens === undefined
+						? `Cleared the limit on ${providerID} in ${key}.`
+						: `${providerID} in ${key} is limited to ${parsed.tokens} tokens.`,
 				ok: true,
 			};
 		},

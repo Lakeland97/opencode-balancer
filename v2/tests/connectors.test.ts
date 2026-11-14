@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { saveChain } from "../core/chains";
+import { setRowLimit, setTargetLimit } from "../core/limits";
 import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
@@ -246,6 +247,60 @@ describe("catalog rows", () => {
 		expect(resolveChain(db, family!)[0]?.baseURL).toBe(
 			"https://mirror.invalid/v1",
 		);
+	});
+});
+
+describe("context limits", () => {
+	test("a per-target limit lowers that target and the row", async () => {
+		const db = freshDb();
+		setTargetLimit(db, "deepseek-v4.1-flash", "p1", 100_000);
+
+		const catalog = await loadCatalog(ctxWith(twoConnectors), db);
+		const family = catalog.families.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		const p1 = family?.targets.find((route) => route.providerID === "p1");
+
+		expect(p1?.context).toBe(100_000);
+		expect(family?.window?.context).toBe(100_000);
+		expect(family?.window?.ceiling).toBe(200_000);
+	});
+
+	test("a row limit raises the row and is clamped to the largest target", async () => {
+		const db = freshDb();
+		setRowLimit(db, "deepseek-v4.1-flash", 500_000);
+
+		const catalog = await loadCatalog(ctxWith(twoConnectors), db);
+		const family = catalog.families.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		expect(family?.window?.context).toBe(500_000);
+		expect(family?.guardOverflow).toBe(true);
+
+		setRowLimit(db, "deepseek-v4.1-flash", 5_000_000);
+		invalidateCatalog();
+		const again = await loadCatalog(ctxWith(twoConnectors), db);
+		const clamped = again.families.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		expect(clamped?.window?.context).toBe(1_000_000);
+	});
+
+	test("guardOverflow is true only when a target is below the row", async () => {
+		const db = freshDb();
+		const plain = await loadCatalog(ctxWith(twoConnectors), db);
+		expect(
+			plain.families.find((entry) => entry.key === "deepseek-v4.1-flash")
+				?.guardOverflow,
+		).toBe(false);
+
+		setRowLimit(db, "deepseek-v4.1-flash", 500_000);
+		invalidateCatalog();
+		const limited = await loadCatalog(ctxWith(twoConnectors), db);
+		expect(
+			limited.families.find((entry) => entry.key === "deepseek-v4.1-flash")
+				?.guardOverflow,
+		).toBe(true);
 	});
 });
 

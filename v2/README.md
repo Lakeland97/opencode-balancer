@@ -91,8 +91,13 @@ marker.
 ```
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
-pickers, and a `reset` on any customised row. It also lists providers, with an enabled checkbox, a
-`free` checkbox, and the same `↑ ↓` ordering controls.
+pickers, and a `reset` on any customised row. Every provider is one block: its own `enabled` and `free`
+checkboxes and `↑ ↓` ordering on the header line, with its accounts — and their `use` / `remove`
+actions — nested underneath. A row's ceiling can be set in tokens per row and per target; each is
+described under Context windows.
+
+The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
+`models`.
 
 The panel lists only rows that route between providers, or that you built by hand. Rows are grouped
 under their brand where a brand has more than one, and every row, group and the whole section can be
@@ -123,6 +128,22 @@ model, so it grows with the buffer: 200k at 75% declares 800k, and a uniform 1M 
 The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
 re-read whenever the panel writes a new value. With `compaction.auto: false` nothing trims the
 conversation, so routing also skips targets smaller than the request's estimated token count.
+
+### Limits
+
+A row can be given a token limit, and each target in it its own. With none set, the row behaves as
+above: the smallest target wins. A row limit lets the conversation grow past the smallest target,
+toward the largest one, but never past it — a conversation bigger than every target has nowhere to go.
+A per-target limit can only *lower* a target below the window the provider reports, never raise it, so
+it is how you say "this model is really only good for this much".
+
+Once a row limit is above a target's own window, that target can no longer take over the whole
+conversation, so routing skips it and keeps the rest. That skip only turns on when a limit actually
+creates a gap; without limits, nothing changes.
+
+Both limits are stored in the plugin's `settings` table (`row_limit:<row>`, `target_limit:<row>:<provider>`)
+and are edited from the panel by typing a token count, which saves when the field loses focus or you
+press Enter.
 
 ## Deliberate limits
 

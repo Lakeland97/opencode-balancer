@@ -38,6 +38,8 @@ type Target = {
 	/** What is actually sent, once a free-only provider substitutes. */
 	resolved: string;
 	state: string;
+	/** The user's token ceiling for this target, 0 when none. */
+	limit: number;
 };
 type Chain = {
 	context: number;
@@ -47,6 +49,8 @@ type Chain = {
 	package: string;
 	stored: boolean;
 	targets: Target[];
+	/** The user's token ceiling for the whole row, 0 when none. */
+	limit: number;
 };
 type Chains = { rows: Chain[] };
 type Provider = {
@@ -89,6 +93,11 @@ function size(value: number) {
 	return `${Math.round(value / 1000)}k`;
 }
 
+/** The editable part of a stored share: `99%` becomes `99`, a token count stays. */
+function bareShare(value: string) {
+	return value.endsWith("%") ? value.slice(0, -1) : value;
+}
+
 export default Plugin.define({
 	i18n: {
 		en: {
@@ -106,6 +115,7 @@ export default Plugin.define({
 			expand: "expand all",
 			free: "free",
 			inUse: "in use",
+			limit: "limit",
 			limited: "limited",
 			models: "models",
 			newChain: "new chain",
@@ -163,7 +173,7 @@ export default Plugin.define({
 				setProviders([...(order as Providers).entries]);
 				setBuffer((settings as BufferState).value);
 				setBufferPath((settings as BufferState).path);
-				setBufferDraft((settings as BufferState).value);
+				setBufferDraft(bareShare((settings as BufferState).value));
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -181,6 +191,15 @@ export default Plugin.define({
 		};
 
 		const rpc = () => ctx.client.rpc(Balancer);
+
+		// The buffer reads as the share the user typed: a stored percentage keeps
+		// its `%` after the input, while a token count stays a bare number.
+		const bufferIsPercent = () => buffer().endsWith("%");
+		const commitBuffer = () => {
+			if (bufferDraft() === bareShare(buffer())) return;
+			const value = bufferIsPercent() ? `${bufferDraft()}%` : bufferDraft();
+			void run(() => rpc().setBuffer({ value }));
+		};
 
 		const startAdd = async (key: string) => {
 			setAdding(key);
@@ -277,6 +296,13 @@ export default Plugin.define({
 		} as const;
 		// Narrow panels must wrap instead of pushing controls off the edge.
 		const field = { flex: "1 1 120px", "min-width": 0 } as const;
+		// A hairline between segments, drawn in the text colour so it follows
+		// the theme rather than assuming a light or dark background.
+		const divider = {
+			"border-top": "1px solid currentColor",
+			height: 0,
+			opacity: 0.15,
+		} as const;
 
 		const View = () => {
 			onMount(() => void refresh());
@@ -323,6 +349,8 @@ export default Plugin.define({
 						</span>
 					</div>
 
+					<div style={divider} />
+
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
@@ -330,71 +358,162 @@ export default Plugin.define({
 						>
 							{ctx.t("contextLimit")}
 						</span>
-						<input
-							onChange={(event) => setBufferDraft(event.currentTarget.value)}
-							placeholder="80%"
-							style={{ width: "9em" }}
-							title={bufferPath()}
-							value={bufferDraft()}
-						/>
-						<button
-							onClick={() =>
-								void run(() => rpc().setBuffer({ value: bufferDraft() }))
-							}
-						>
-							{ctx.t("apply")}
-						</button>
+						<span style={{ "align-items": "center", display: "flex" }}>
+							<input
+								onBlur={commitBuffer}
+								onInput={(event) => setBufferDraft(event.currentTarget.value)}
+								onKeyDown={(event) => {
+									if (event.key === "Enter") event.currentTarget.blur();
+								}}
+								placeholder="80"
+								style={{ width: "9em" }}
+								title={bufferPath()}
+								value={bufferDraft()}
+							/>
+							<span style={{ opacity: 0.7 }}>
+								{bufferIsPercent() ? "%" : ""}
+							</span>
+						</span>
 					</div>
 
 					<Show when={message()}>
 						<div style={{ opacity: 0.7 }}>{message()}</div>
 					</Show>
 
-					<For each={accounts()}>
-						{(account) => (
-							<div style={row}>
-								<span
-									style={{
-										flex: "1 1 140px",
-										"min-width": 0,
-										"overflow-wrap": "anywhere",
-									}}
-								>
-									{account.providerID}/{account.alias}
-									{account.inUse
-										? ` · ${ctx.t("inUse")}`
-										: account.active
-											? ` · ${ctx.t("active")}`
-											: ""}
-									{account.limited ? ` · ${ctx.t("limited")}` : ""}
-									{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
-								</span>
-								<Show when={!account.inUse}>
+					<div style={divider} />
+
+					<div style={row}>
+						<strong>{ctx.t("providers")}</strong>
+					</div>
+
+					<For each={providers()}>
+						{(entry, index) => (
+							<div
+								style={{
+									display: "flex",
+									"flex-direction": "column",
+									gap: "2px",
+								}}
+							>
+								<div style={row}>
+									<input
+										checked={entry.enabled}
+										onChange={(event) =>
+											void run(() =>
+												rpc().setEnabled({
+													enabled: event.currentTarget.checked,
+													providerID: entry.providerID,
+												}),
+											)
+										}
+										type="checkbox"
+									/>
+									<span
+										style={{
+											flex: "1 1 140px",
+											"min-width": 0,
+											"overflow-wrap": "anywhere",
+										}}
+									>
+										{entry.name}
+									</span>
+									<label
+										style={{ display: "flex", gap: "4px" }}
+										title="use only this provider's free models"
+									>
+										<input
+											checked={entry.freeOnly}
+											onChange={(event) =>
+												void run(() =>
+													rpc().setFreeOnly({
+														enabled: event.currentTarget.checked,
+														providerID: entry.providerID,
+													}),
+												)
+											}
+											type="checkbox"
+										/>
+										{ctx.t("free")}
+									</label>
 									<button
+										disabled={index() === 0}
 										onClick={() =>
 											void run(() =>
-												rpc().use({
-													alias: account.alias,
-													providerID: account.providerID,
+												rpc().move({
+													direction: "up",
+													providerID: entry.providerID,
 												}),
 											)
 										}
 									>
-										{ctx.t("use")}
+										↑
 									</button>
-								</Show>
-								<button
-									onClick={() =>
-										void run(() =>
-											rpc().remove({
-												alias: account.alias,
-												providerID: account.providerID,
-											}),
-										)
-									}
+									<button
+										disabled={index() === providers().length - 1}
+										onClick={() =>
+											void run(() =>
+												rpc().move({
+													direction: "down",
+													providerID: entry.providerID,
+												}),
+											)
+										}
+									>
+										↓
+									</button>
+								</div>
+								<For
+									each={accounts().filter(
+										(account) => account.providerID === entry.providerID,
+									)}
 								>
-									{ctx.t("remove")}
-								</button>
+									{(account) => (
+										<div style={{ ...row, "padding-left": "18px" }}>
+											<span
+												style={{
+													flex: "1 1 140px",
+													"min-width": 0,
+													"overflow-wrap": "anywhere",
+												}}
+											>
+												{account.alias}
+												{account.inUse
+													? ` · ${ctx.t("inUse")}`
+													: account.active
+														? ` · ${ctx.t("active")}`
+														: ""}
+												{account.limited ? ` · ${ctx.t("limited")}` : ""}
+												{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
+											</span>
+											<Show when={!account.inUse}>
+												<button
+													onClick={() =>
+														void run(() =>
+															rpc().use({
+																alias: account.alias,
+																providerID: account.providerID,
+															}),
+														)
+													}
+												>
+													{ctx.t("use")}
+												</button>
+											</Show>
+											<button
+												onClick={() =>
+													void run(() =>
+														rpc().remove({
+															alias: account.alias,
+															providerID: account.providerID,
+														}),
+													)
+												}
+											>
+												{ctx.t("remove")}
+											</button>
+										</div>
+									)}
+								</For>
 							</div>
 						)}
 					</For>
@@ -422,6 +541,8 @@ export default Plugin.define({
 							{ctx.t("add")}
 						</button>
 					</div>
+
+					<div style={divider} />
 
 					<div style={{ ...row, "margin-top": "4px" }}>
 						<button
@@ -605,6 +726,28 @@ export default Plugin.define({
 																			</span>
 																		</Show>
 																	</span>
+																	<input
+																		inputMode="numeric"
+																		onBlur={(event) =>
+																			void run(() =>
+																				rpc().setTargetLimit({
+																					key: chain.key,
+																					providerID: target.providerID,
+																					value: event.currentTarget.value,
+																				}),
+																			)
+																		}
+																		onKeyDown={(event) => {
+																			if (event.key === "Enter")
+																				event.currentTarget.blur();
+																		}}
+																		placeholder={ctx.t("limit")}
+																		style={{ width: "6em" }}
+																		title="the most this target may hold, in tokens"
+																		value={
+																			target.limit ? String(target.limit) : ""
+																		}
+																	/>
 																	<button
 																		disabled={index() === 0}
 																		onClick={() =>
@@ -657,6 +800,31 @@ export default Plugin.define({
 														<div style={{ opacity: 0.6 }}>
 															{ctx.t("window")} {size(chain.context)} ·{" "}
 															{ctx.t("declares")} {size(chain.declaredContext)}
+														</div>
+
+														<div style={row}>
+															<span style={{ opacity: 0.6 }}>
+																{ctx.t("limit")}
+															</span>
+															<input
+																inputMode="numeric"
+																onBlur={(event) =>
+																	void run(() =>
+																		rpc().setRowLimit({
+																			key: chain.key,
+																			value: event.currentTarget.value,
+																		}),
+																	)
+																}
+																onKeyDown={(event) => {
+																	if (event.key === "Enter")
+																		event.currentTarget.blur();
+																}}
+																placeholder={size(chain.declaredContext)}
+																style={{ width: "6em" }}
+																title="the most this row may hold, in tokens"
+																value={chain.limit ? String(chain.limit) : ""}
+															/>
 														</div>
 
 														<Show
@@ -752,83 +920,6 @@ export default Plugin.define({
 											)}
 										</For>
 									</Show>
-								</div>
-							)}
-						</For>
-					</Show>
-
-					<Show when={providers().length > 0}>
-						<div style={{ ...row, "margin-top": "4px" }}>
-							<strong>{ctx.t("providers")}</strong>
-						</div>
-						<For each={providers()}>
-							{(entry, index) => (
-								<div style={row}>
-									<input
-										checked={entry.enabled}
-										onChange={(event) =>
-											void run(() =>
-												rpc().setEnabled({
-													enabled: event.currentTarget.checked,
-													providerID: entry.providerID,
-												}),
-											)
-										}
-										type="checkbox"
-									/>
-									<span
-										style={{
-											flex: "1 1 140px",
-											"min-width": 0,
-											"overflow-wrap": "anywhere",
-										}}
-									>
-										{entry.name}
-									</span>
-									<label
-										style={{ display: "flex", gap: "4px" }}
-										title="use only this provider's free models"
-									>
-										<input
-											checked={entry.freeOnly}
-											onChange={(event) =>
-												void run(() =>
-													rpc().setFreeOnly({
-														enabled: event.currentTarget.checked,
-														providerID: entry.providerID,
-													}),
-												)
-											}
-											type="checkbox"
-										/>
-										{ctx.t("free")}
-									</label>
-									<button
-										disabled={index() === 0}
-										onClick={() =>
-											void run(() =>
-												rpc().move({
-													direction: "up",
-													providerID: entry.providerID,
-												}),
-											)
-										}
-									>
-										↑
-									</button>
-									<button
-										disabled={index() === providers().length - 1}
-										onClick={() =>
-											void run(() =>
-												rpc().move({
-													direction: "down",
-													providerID: entry.providerID,
-												}),
-											)
-										}
-									>
-										↓
-									</button>
 								</div>
 							)}
 						</For>

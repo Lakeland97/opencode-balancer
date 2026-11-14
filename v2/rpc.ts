@@ -20,13 +20,15 @@ const pair = object({ alias: str, providerID: str }, ["providerID", "alias"]);
 const result = object({ message: str, ok: bool }, ["ok", "message"]);
 const chainTarget = object(
 	{
+		/** The user's token ceiling for this target, 0 when none. */
+		limit: num,
 		modelID: str,
 		providerID: str,
 		/** The model actually sent, once a free-only provider substitutes. */
 		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "resolved", "state"],
+	["providerID", "modelID", "resolved", "state", "limit"],
 );
 const chainRow = object(
 	{
@@ -34,6 +36,8 @@ const chainRow = object(
 		declaredContext: num,
 		key: str,
 		label: str,
+		/** The user's token ceiling for the whole row, 0 when none. */
+		limit: num,
 		package: str,
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
@@ -46,6 +50,7 @@ const chainRow = object(
 		"context",
 		"declaredContext",
 		"targets",
+		"limit",
 	],
 );
 const account = object(
@@ -200,6 +205,18 @@ export const balancerDefinition = {
 			input: object({ enabled: bool, providerID: str }, [
 				"providerID",
 				"enabled",
+			]),
+			output: result,
+		},
+		setRowLimit: {
+			input: object({ key: str, value: str }, ["key", "value"]),
+			output: result,
+		},
+		setTargetLimit: {
+			input: object({ key: str, providerID: str, value: str }, [
+				"key",
+				"providerID",
+				"value",
 			]),
 			output: result,
 		},

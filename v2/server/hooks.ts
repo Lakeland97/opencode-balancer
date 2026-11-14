@@ -120,7 +120,10 @@ export async function registerHooks({
 				: [];
 			// Without automatic compaction nothing trims the conversation, so a
 			// target that cannot hold it is skipped rather than sent the request.
-			const guardOverflow = !getCompactionAutoEnabled();
+			// A row limit can also leave a smaller target unable to hold what the
+			// row now permits, which needs the same skip.
+			const guardOverflow =
+				!getCompactionAutoEnabled() || Boolean(family.guardOverflow);
 			const body = guardOverflow
 				? await event.request.clone().text()
 				: undefined;

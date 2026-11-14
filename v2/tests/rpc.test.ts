@@ -330,6 +330,73 @@ describe("chain rpc", () => {
 	});
 });
 
+describe("limit rpc", () => {
+	test("setRowLimit is reported by chains and an empty value clears it", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const set = (await rpc.setRowLimit({
+			key: "deepseek-v4.1-flash",
+			value: "600000",
+		})) as { ok: boolean };
+		expect(set.ok).toBe(true);
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; limit: number }[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		expect(row?.limit).toBe(600_000);
+
+		const cleared = (await rpc.setRowLimit({
+			key: "deepseek-v4.1-flash",
+			value: "",
+		})) as { ok: boolean };
+		expect(cleared.ok).toBe(true);
+
+		const after = (await rpc.chains({})) as {
+			rows: { key: string; limit: number }[];
+		};
+		expect(
+			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
+		).toBe(0);
+	});
+
+	test("setRowLimit refuses a value that is not a token count", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const refused = (await rpc.setRowLimit({
+			key: "deepseek-v4.1-flash",
+			value: "lots",
+		})) as { message: string; ok: boolean };
+		expect(refused.ok).toBe(false);
+		expect(refused.message.length).toBeGreaterThan(0);
+	});
+
+	test("setTargetLimit is reported per target", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const set = (await rpc.setTargetLimit({
+			key: "deepseek-v4.1-flash",
+			providerID: "p1",
+			value: "400000",
+		})) as { ok: boolean };
+		expect(set.ok).toBe(true);
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; targets: { providerID: string; limit: number }[] }[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		const target = row?.targets.find((entry) => entry.providerID === "p1");
+		expect(target?.limit).toBe(400_000);
+	});
+});
+
 describe("buffer rpc", () => {
 	test("reports the usable share, not the host's reserve", async () => {
 		const file = tempConfig(

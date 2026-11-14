@@ -7,6 +7,7 @@ import {
 	declaredContext,
 	rowWindow,
 } from "../core/context";
+import { readRowLimit, readTargetLimit } from "../core/limits";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
 import { isFreeOnly, listProviderPriority } from "../core/priority";
 import { readCompactionBuffer } from "./compaction-config";
@@ -57,6 +58,8 @@ export type ModelFamily = {
 	targets: readonly FamilyRoute[];
 	/** The smallest window every hop must fit, and the largest any hop holds. */
 	window?: { ceiling: number; context: number; output: number };
+	/** True when some target is smaller than the row now permits. */
+	guardOverflow: boolean;
 };
 
 type Catalog = {
@@ -89,6 +92,42 @@ function freeBase(modelID: string) {
 /** Distinguishes rows that exist in more than one wire format. */
 function labelSuffix(pkg: string) {
 	return pkg === DEFAULT_PACKAGE ? "" : ` (${packageTag(pkg)})`;
+}
+
+/** A per-target limit can only lower the window the provider reports. */
+function boundedWindow(
+	realWindow: number | undefined,
+	targetLimit: number | undefined,
+): number | undefined {
+	if (realWindow === undefined) return undefined;
+	return targetLimit === undefined
+		? realWindow
+		: Math.min(targetLimit, realWindow);
+}
+
+/**
+ * The row's declared window. A row limit lets the conversation grow past the
+ * smallest target, toward the largest one; a conversation bigger than every
+ * target has nowhere to go, so the largest is the clamp.
+ */
+function limitedRowWindow(
+	window: { ceiling: number; context: number; output: number } | undefined,
+	rowLimit: number | undefined,
+): { ceiling: number; context: number; output: number } | undefined {
+	if (!window || rowLimit === undefined) return window;
+	return { ...window, context: Math.min(rowLimit, window.ceiling) };
+}
+
+/** True when a target cannot hold what the row now permits, so it is skipped. */
+function overflowsRow(
+	window: { ceiling: number; context: number; output: number } | undefined,
+	targets: readonly FamilyRoute[],
+): boolean {
+	if (!window) return false;
+	return targets.some(
+		(target) =>
+			typeof target.context === "number" && target.context < window.context,
+	);
 }
 
 /**
@@ -182,7 +221,10 @@ export async function loadCatalog(
 		const route: FamilyRoute = {
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
-			context: served?.limit?.context ?? model.limit?.context,
+			context: boundedWindow(
+				served?.limit?.context ?? model.limit?.context,
+				readTargetLimit(db, key, providerID),
+			),
 			free,
 			...(sibling && typeof sibling.settings?.baseURL === "string"
 				? {
@@ -229,13 +271,18 @@ export async function loadCatalog(
 	const families: ModelFamily[] = [];
 	const sources = new Map<string, ModelRecord>();
 	for (const [key, group] of groups) {
+		const window = limitedRowWindow(
+			rowWindow(group.routes),
+			readRowLimit(db, key),
+		);
 		families.push({
+			guardOverflow: overflowsRow(window, group.routes),
 			key,
 			name: `${group.label}${labelSuffix(group.package)}`,
 			package: group.package,
 			routes: group.routes,
 			targets: group.routes,
-			window: rowWindow(group.routes),
+			window,
 		});
 		if (group.source) sources.set(key, group.source);
 	}
@@ -261,7 +308,10 @@ export async function loadCatalog(
 			return {
 				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
-				context: sibling?.limit?.context ?? record?.limit?.context,
+				context: boundedWindow(
+					sibling?.limit?.context ?? record?.limit?.context,
+					readTargetLimit(db, chain.familyKey, target.providerID),
+				),
 				free: record
 					? isFreeModel({ cost: record.cost, modelID: target.modelID })
 					: undefined,
@@ -271,7 +321,11 @@ export async function loadCatalog(
 				providerID: target.providerID,
 			};
 		});
-		const window = rowWindow(targets);
+		const window = limitedRowWindow(
+			rowWindow(targets),
+			readRowLimit(db, chain.familyKey),
+		);
+		const guardOverflow = overflowsRow(window, targets);
 		const name = `${chain.label}${labelSuffix(chain.package)}`;
 		const existing = families.find((family) => family.key === chain.familyKey);
 
@@ -281,10 +335,12 @@ export async function loadCatalog(
 			existing.stored = true;
 			existing.targets = targets;
 			existing.window = window;
+			existing.guardOverflow = guardOverflow;
 			continue;
 		}
 
 		families.push({
+			guardOverflow,
 			key: chain.familyKey,
 			name,
 			package: chain.package,
