@@ -1,8 +1,15 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import { listAccounts } from "../core/accounts";
+import { listStoredChains } from "../core/chains";
+import {
+	type CompactionBuffer,
+	declaredContext,
+	rowWindow,
+} from "../core/context";
 import { modelFamily, normalizeModel } from "../core/models";
 import { listProviderPriority } from "../core/priority";
+import { readCompactionBuffer } from "./compaction-config";
 
 /** The provider this plugin registers; sessions pin it and never change. */
 export const BALANCER_PROVIDER_ID = "balancer";
@@ -21,6 +28,9 @@ export type FamilyRoute = {
 	/** The provider's API root, already normalised without a trailing slash. */
 	baseURL: string;
 	package: string;
+	/** The model's own window, used to size the row. */
+	context?: number;
+	output?: number;
 };
 
 export type ModelFamily = {
@@ -30,6 +40,12 @@ export type ModelFamily = {
 	name: string;
 	package: string;
 	routes: readonly FamilyRoute[];
+	/** True when the user has taken over this row's order. */
+	stored?: boolean;
+	/** The effective order: the stored chain, or the automatic routes. */
+	targets: readonly FamilyRoute[];
+	/** The smallest window across the targets, which every hop must fit. */
+	window?: { context: number; output: number };
 };
 
 type Catalog = {
@@ -52,6 +68,11 @@ function stripTrailingSlash(value: string) {
 /** Short name for a wire format, e.g. `anthropic` from its package. */
 function packageTag(pkg: string) {
 	return (pkg.split("/").pop() ?? pkg).replace(/-compatible$/, "");
+}
+
+/** Distinguishes rows that exist in more than one wire format. */
+function labelSuffix(pkg: string) {
+	return pkg === DEFAULT_PACKAGE ? "" : ` (${packageTag(pkg)})`;
 }
 
 /**
@@ -116,7 +137,9 @@ export async function loadCatalog(
 
 		const route: FamilyRoute = {
 			baseURL: stripTrailingSlash(baseURL),
+			context: model.limit?.context,
 			modelID: model.modelID,
+			output: model.limit?.output,
 			package: pkg,
 			providerID,
 		};
@@ -150,17 +173,61 @@ export async function loadCatalog(
 	const families: ModelFamily[] = [];
 	const sources = new Map<string, ModelRecord>();
 	for (const [key, group] of groups) {
-		const suffix =
-			group.package === DEFAULT_PACKAGE
-				? ""
-				: ` (${packageTag(group.package)})`;
 		families.push({
 			key,
-			name: `${group.label}${suffix}`,
+			name: `${group.label}${labelSuffix(group.package)}`,
 			package: group.package,
 			routes: group.routes,
+			targets: group.routes,
+			window: rowWindow(group.routes),
 		});
 		if (group.source) sources.set(key, group.source);
+	}
+
+	// A stored chain wins over the automatic order, and keeps the row alive even
+	// when no connector offers that family any more.
+	const byRef = new Map<string, ModelRecord>();
+	for (const model of models.data) {
+		byRef.set(`${model.providerID}:${model.modelID}`, model);
+	}
+
+	for (const chain of listStoredChains(db)) {
+		if (chain.targets.length === 0) continue;
+		const targets: FamilyRoute[] = chain.targets.map((target) => {
+			const record = byRef.get(`${target.providerID}:${target.modelID}`);
+			return {
+				baseURL: stripTrailingSlash(target.baseURL),
+				context: record?.limit?.context,
+				modelID: target.modelID,
+				output: record?.limit?.output,
+				package: chain.package,
+				providerID: target.providerID,
+			};
+		});
+		const window = rowWindow(targets);
+		const name = `${chain.label}${labelSuffix(chain.package)}`;
+		const existing = families.find((family) => family.key === chain.familyKey);
+
+		if (existing) {
+			existing.name = name;
+			existing.package = chain.package;
+			existing.stored = true;
+			existing.targets = targets;
+			existing.window = window;
+			continue;
+		}
+
+		families.push({
+			key: chain.familyKey,
+			name,
+			package: chain.package,
+			routes: [],
+			stored: true,
+			targets,
+			window,
+		});
+		const head = byRef.get(`${targets[0].providerID}:${targets[0].modelID}`);
+		if (head) sources.set(chain.familyKey, head);
 	}
 
 	const catalog = { families, sources };
@@ -172,6 +239,13 @@ function priorityOrder(db: Database): Map<string, number> {
 	return new Map(
 		listProviderPriority(db).map((entry) => [entry.providerID, entry.position]),
 	);
+}
+
+/** The order a row routes in: a stored chain as written, or provider priority. */
+export function resolveChain(db: Database, family: ModelFamily): FamilyRoute[] {
+	return family.stored
+		? family.targets.slice()
+		: sortRoutes(family.targets, db);
 }
 
 /** Sort routes by the user's provider priority, then by name. */
@@ -196,9 +270,11 @@ export function sortRoutes(
 export async function registerBalancerProvider({
 	ctx,
 	db,
+	buffer = readCompactionBuffer(),
 }: {
 	ctx: Context;
 	db: Database;
+	buffer?: CompactionBuffer;
 }) {
 	const catalog = await loadCatalog(ctx, db);
 	if (catalog.families.length === 0) return;
@@ -206,9 +282,20 @@ export async function registerBalancerProvider({
 	await ctx.provider.transform((editor) => {
 		const models = catalog.families.map((family) => {
 			const source = catalog.sources.get(family.key);
+			const window = family.window;
 			return {
 				...(source ?? {}),
 				id: family.key,
+				// The window is the smallest target's, declared so the host's
+				// buffer applies to that real limit instead of a fraction of it.
+				...(window
+					? {
+							limit: {
+								context: declaredContext(window.context, buffer),
+								...(window.output > 0 ? { output: window.output } : {}),
+							},
+						}
+					: {}),
 				modelID: family.key,
 				name: `Balancer · ${family.name}`,
 				package: family.package,
