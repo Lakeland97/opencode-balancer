@@ -23,7 +23,15 @@ decisions rather than completed as written.
 | 5 — commands | shipped |
 | 6 — RPC | shipped |
 | 7 — panel editor | shipped |
-| 8 — docs and end-to-end check | docs shipped, **live check still outstanding** |
+| 8 — docs and end-to-end check | shipped |
+
+**Task 8 Step 3, the live check, has since been run.** The credential walk was observed
+routing a real request: the log line `deepseek-v4.1-flash: cline-pass/clinepass (first
+choice)` while `opencode/personal` was parked. The live RPC agrees — a row resolves each
+credential in order and reports the parked one `unavailable`, the next `next`, the rest
+`available`, and a free-only row resolves its parked credential to the free variant
+(`opencode → deepseek-v4.1-flash-free`). So "routing works" no longer rests on unit tests
+alone; the Outstanding note that said otherwise is gone.
 
 **What was superseded, and by what.** Commit `1813a2f` ("Report a 1M window for every
 balancer model and compact it ourselves") removed the whole buffer mechanism:
@@ -76,10 +84,6 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
 
 **Outstanding**
 
-- **Task 8 Step 3, the live check, has never been run.** The gates below pass and the
-  plugin loads (`opencode plugin list` reports id `balancer`), but no real request has
-  been observed going through the credential walk. Until it is, "routing works" rests on
-  unit tests alone.
 - **No proactive awareness of a spent credential.** `usage_snapshots` exists in the schema
   (upstream's V1 dashboard kept it there) but v2 never reads it — only the migration
   recreates it and rename/remove rewrite it. The two usage event types in `core/types.ts`
