@@ -48,6 +48,15 @@ type Provider = {
 type Providers = { entries: Provider[] };
 type Models = { models: { modelID: string; name: string }[] };
 
+/** Model pickers read alphabetically, by the name the picker shows. */
+function sortByName(models: { modelID: string; name: string }[]) {
+	return models
+		.slice()
+		.sort((a, b) =>
+			a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+		);
+}
+
 /** A failure the RPC layer raised: not everything it throws is an Error. */
 function describe(error: unknown) {
 	if (error instanceof Error) return error.message;
@@ -159,7 +168,7 @@ export default Plugin.define({
 			if (!providerID) return;
 			try {
 				const reply = (await rpc().chainModels({ providerID })) as Models;
-				setAddModels(reply.models);
+				setAddModels(sortByName(reply.models));
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -171,7 +180,7 @@ export default Plugin.define({
 			if (!providerID) return;
 			try {
 				const reply = (await rpc().chainModels({ providerID })) as Models;
-				setCreateModels(reply.models);
+				setCreateModels(sortByName(reply.models));
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -179,8 +188,14 @@ export default Plugin.define({
 
 		// The panel lists rows that actually triage between providers, plus any
 		// row the user built by hand. Everything else is noise.
+		// Multi-provider rows and hand-built ones, read alphabetically: the
+		// catalogue order is whatever the connectors happened to report.
 		const visibleChains = () =>
-			chains().filter((chain) => chain.stored || chain.targets.length > 1);
+			chains()
+				.filter((chain) => chain.stored || chain.targets.length > 1)
+				.sort((a, b) =>
+					a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+				);
 
 		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
 		const toggleCollapsed = (key: string) =>
