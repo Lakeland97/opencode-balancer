@@ -61,6 +61,19 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
+**Follow-ons after this reconcile.** Three changes landed afterwards, on 2026-11-15:
+
+- A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
+  `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
+  model once, and the panel's `%` field moved off each target line onto the model's own row (`997c6a2`).
+- The reserve kept free below a model's window is settable again (`context_buffer`), as a size in
+  thousands or as a share of each model's own window, in the field next to `context limit`
+  (`997c6a2`). This is **not** Task 2's `compaction.buffer`: nothing is read from or written to
+  `opencode.json`, and Task 2 stays superseded as described above.
+- A failover trail older than a five-hour quota window is dropped, so a session that has been idle
+  that long starts its balance from the head of the order again rather than resuming where it left off
+  (`a45a54e`).
+
 **Outstanding**
 
 - **Task 8 Step 3, the live check, has never been run.** The gates below pass and the

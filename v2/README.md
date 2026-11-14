@@ -130,6 +130,12 @@ rather than restarting at the top of the order and parking everything on the way
 has been tried, the order wraps back to the head. A provider's second credential is a second chance:
 parking one is what sends the next request to the other, not an error the session has to see.
 
+That trail is not honoured forever: past five hours since the session was last balanced it is dropped
+and the order starts again from the head. Provider quotas refill on a five-hour window, so by then the
+credentials this session had already tried are worth trying first again. What is *not* dropped is a
+park — that is the provider's own clock and expires on its own schedule, so a call is never sent back
+to something still limited.
+
 `limited` therefore means **failed, and not yet tried again** — it is cleared by the next routing
 attempt, or by picking the credential again, not by a clock. Hovering the marker shows what the
 endpoint actually reported: the HTTP status, or the host's typed error when it raised one.
