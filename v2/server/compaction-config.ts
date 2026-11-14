@@ -3,7 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { CompactionBuffer } from "../core/context";
 
-type CacheEntry = { mtimeMs: number; buffer: CompactionBuffer };
+type CacheEntry = {
+	mtimeMs: number;
+	buffer: CompactionBuffer;
+	auto: boolean | undefined;
+};
 
 const cache = new Map<string, CacheEntry>();
 
@@ -86,29 +90,38 @@ function candidatePaths(
 	return paths;
 }
 
-function readBufferAt(path: string): CompactionBuffer {
+function readAt(path: string): CacheEntry | undefined {
 	let mtimeMs: number;
 	try {
 		mtimeMs = statSync(path).mtimeMs;
 	} catch {
-		return { kind: "none" };
+		return undefined;
 	}
 
 	const hit = cache.get(path);
-	if (hit && hit.mtimeMs === mtimeMs) return hit.buffer;
+	if (hit && hit.mtimeMs === mtimeMs) return hit;
 
-	let buffer: CompactionBuffer = { kind: "none" };
+	let entry: CacheEntry = {
+		auto: undefined,
+		buffer: { kind: "none" },
+		mtimeMs,
+	};
 	try {
 		const parsed = JSON.parse(stripJsonc(readFileSync(path, "utf8"))) as {
-			compaction?: { buffer?: unknown };
+			compaction?: { auto?: unknown; buffer?: unknown };
 		};
-		buffer = parseBuffer(parsed?.compaction?.buffer);
+		const auto = parsed?.compaction?.auto;
+		entry = {
+			auto: typeof auto === "boolean" ? auto : undefined,
+			buffer: parseBuffer(parsed?.compaction?.buffer),
+			mtimeMs,
+		};
 	} catch {
-		buffer = { kind: "none" };
+		// A malformed config is no config, never a crash.
 	}
 
-	cache.set(path, { buffer, mtimeMs });
-	return buffer;
+	cache.set(path, entry);
+	return entry;
 }
 
 /**
@@ -124,10 +137,25 @@ export function readCompactionBuffer(paths?: {
 	const cwd = paths?.cwd ?? process.cwd();
 
 	for (const path of candidatePaths(env, cwd)) {
-		const buffer = readBufferAt(path);
-		if (buffer.kind !== "none") return buffer;
+		const entry = readAt(path);
+		if (entry && entry.buffer.kind !== "none") return entry.buffer;
 	}
 	return { kind: "none" };
+}
+
+/** Whether the host compacts on its own. Absent config means it does. */
+export function getCompactionAutoEnabled(paths?: {
+	env?: Record<string, string | undefined>;
+	cwd?: string;
+}): boolean {
+	const env = paths?.env ?? process.env;
+	const cwd = paths?.cwd ?? process.cwd();
+
+	for (const path of candidatePaths(env, cwd)) {
+		const entry = readAt(path);
+		if (entry && entry.auto !== undefined) return entry.auto;
+	}
+	return true;
 }
 
 export function invalidateBufferCache() {

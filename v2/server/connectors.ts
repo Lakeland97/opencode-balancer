@@ -31,6 +31,8 @@ export type FamilyRoute = {
 	/** The model's own window, used to size the row. */
 	context?: number;
 	output?: number;
+	/** False when the connector no longer offers this model. */
+	available?: boolean;
 };
 
 export type ModelFamily = {
@@ -136,6 +138,7 @@ export async function loadCatalog(
 		};
 
 		const route: FamilyRoute = {
+			available: true,
 			baseURL: stripTrailingSlash(baseURL),
 			context: model.limit?.context,
 			modelID: model.modelID,
@@ -196,6 +199,7 @@ export async function loadCatalog(
 		const targets: FamilyRoute[] = chain.targets.map((target) => {
 			const record = byRef.get(`${target.providerID}:${target.modelID}`);
 			return {
+				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
 				context: record?.limit?.context,
 				modelID: target.modelID,
