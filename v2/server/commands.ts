@@ -13,9 +13,11 @@ import {
 import { matchModel } from "../core/models";
 import {
 	getBalancingEnabled,
+	isFreeOnly,
 	listProviderPriority,
 	moveProvider,
 	setBalancingEnabled,
+	setFreeOnly,
 	setProviderEnabled,
 } from "../core/priority";
 import { now } from "../core/time";
@@ -163,6 +165,7 @@ export async function runCommand({
 			"  chain <model> remove|up|down <provider>",
 			"  chain <model> reset          Hand the row back to provider priority",
 			"  enable <provider> | disable <provider>",
+			"  free <provider> on | off     Use only that provider's free models",
 			"  up <provider> | down <provider>",
 		].join("\n");
 	}
@@ -256,7 +259,9 @@ export async function runCommand({
 		return entries
 			.map(
 				(entry, index) =>
-					`${index + 1}. ${entry.providerID}  ${entry.enabled ? "on" : "off"}`,
+					`${index + 1}. ${entry.providerID}  ${entry.enabled ? "on" : "off"}${
+						isFreeOnly(db, entry.providerID) ? "  free-only" : ""
+					}`,
 			)
 			.join("\n");
 	}
@@ -327,6 +332,16 @@ export async function runCommand({
 		}
 
 		return `Unknown chain action: ${verb}.`;
+	}
+
+	if (action === "free") {
+		const [providerID, toggle] = args;
+		if (!providerID || (toggle !== "on" && toggle !== "off")) {
+			return "Usage: /balancer free <provider> on | off";
+		}
+		setFreeOnly(db, providerID, toggle === "on");
+		invalidateCatalog();
+		return `${providerID} uses ${toggle === "on" ? "free models only" : "paid models too"}.`;
 	}
 
 	if (action === "enable" || action === "disable") {

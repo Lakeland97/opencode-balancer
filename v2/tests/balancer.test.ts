@@ -328,6 +328,30 @@ describe("chain commands", () => {
 		expect(getStoredChain(db, "deepseek-v4.1-flash")).toBeUndefined();
 	});
 
+	test("free toggles a provider's free-only rule", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		const ctx = commandCtx([
+			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+		]);
+
+		expect(await runCommand({ ctx, db, raw: "free p1 on" })).toContain(
+			"free models only",
+		);
+		expect(await runCommand({ ctx, db, raw: "priority" })).toContain(
+			"free-only",
+		);
+
+		expect(await runCommand({ ctx, db, raw: "free p1 off" })).toContain(
+			"paid models too",
+		);
+		expect(await runCommand({ ctx, db, raw: "priority" })).not.toContain(
+			"free-only",
+		);
+
+		expect(await runCommand({ ctx, db, raw: "free p1" })).toContain("Usage:");
+	});
+
 	test("the model and equivalents commands are gone", async () => {
 		const db = freshDb();
 		const ctx = commandCtx([]);

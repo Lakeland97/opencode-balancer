@@ -40,6 +40,7 @@ type Chain = {
 type Chains = { rows: Chain[] };
 type Provider = {
 	enabled: boolean;
+	freeOnly: boolean;
 	name: string;
 	position: number;
 	providerID: string;
@@ -67,6 +68,7 @@ export default Plugin.define({
 			balancing: "balancing",
 			declares: "declares",
 			disabled: "disabled",
+			free: "free",
 			inUse: "in use",
 			limited: "limited",
 			models: "models",
@@ -557,6 +559,24 @@ export default Plugin.define({
 									>
 										{entry.name}
 									</span>
+									<label
+										style={{ display: "flex", gap: "4px" }}
+										title="use only this provider's free models"
+									>
+										<input
+											checked={entry.freeOnly}
+											onChange={(event) =>
+												void run(() =>
+													rpc().setFreeOnly({
+														enabled: event.currentTarget.checked,
+														providerID: entry.providerID,
+													}),
+												)
+											}
+											type="checkbox"
+										/>
+										{ctx.t("free")}
+									</label>
 									<button
 										disabled={index() === 0}
 										onClick={() =>

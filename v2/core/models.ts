@@ -81,3 +81,19 @@ export function matchModel<T extends ModelCandidate>(
 		? { model: winner.model, score: winner.score, ties }
 		: undefined;
 }
+
+type CostTier = { input?: number; output?: number };
+
+/**
+ * Whether a model costs nothing to use. Connectors express this either as a
+ * zero-priced tier or as a name marker (`-free`, `:free`), and the two do not
+ * always agree, so both are accepted.
+ */
+export function isFreeModel(model: { cost?: unknown; modelID: string }) {
+	if (/(^|[/:_-])free$/i.test(model.modelID)) return true;
+	const tiers = Array.isArray(model.cost) ? (model.cost as CostTier[]) : [];
+	if (tiers.length === 0) return true;
+	return tiers.every(
+		(tier) => (tier.input ?? 0) <= 0 && (tier.output ?? 0) <= 0,
+	);
+}

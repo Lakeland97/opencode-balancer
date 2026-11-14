@@ -78,6 +78,18 @@ target would never be reached.
 /balancer chain deepseek-v4.1-flash reset                  # back to provider priority
 ```
 
+A provider can also be told to serve **free models only** — useful when you keep no
+credits on an account. The balancer then points that provider at its own free spelling
+of the model the chain matched (`deepseek-v4.1-flash` becomes
+`deepseek-v4.1-flash-free` where the provider offers one) and skips the target when it
+has none. A model counts as free when it is priced at zero or its id carries a `free`
+marker.
+
+```sh
+/balancer free opencode on           # paid models are never sent to this provider
+/balancer free opencode off
+```
+
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
 pickers, and a `reset` on any customised row. It also lists providers, with an enabled checkbox and
 the same `↑ ↓` ordering controls.
@@ -121,6 +133,7 @@ conversation, so routing also skips targets smaller than the request's estimated
 /balancer chain <model> remove|up|down <provider>
 /balancer chain <model> reset          hand the row back to provider priority
 /balancer enable <provider> | disable <provider>
+/balancer free <provider> on | off     use only that provider's free models
 /balancer up <provider> | down <provider>
 ```
 

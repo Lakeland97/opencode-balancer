@@ -7,7 +7,7 @@ import {
 	declaredContext,
 	rowWindow,
 } from "../core/context";
-import { modelFamily, normalizeModel } from "../core/models";
+import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
 import { listProviderPriority } from "../core/priority";
 import { readCompactionBuffer } from "./compaction-config";
 
@@ -33,6 +33,15 @@ export type FamilyRoute = {
 	output?: number;
 	/** False when the connector no longer offers this model. */
 	available?: boolean;
+	/** True when the model costs nothing, which free-only providers require. */
+	free?: boolean;
+	/** This provider's free spelling of the same model, when it offers one. */
+	freeVariant?: {
+		baseURL: string;
+		context?: number;
+		modelID: string;
+		output?: number;
+	};
 };
 
 export type ModelFamily = {
@@ -72,6 +81,11 @@ function packageTag(pkg: string) {
 	return (pkg.split("/").pop() ?? pkg).replace(/-compatible$/, "");
 }
 
+/** The family a model belongs to once a free marker is set aside. */
+function freeBase(modelID: string) {
+	return modelFamily(normalizeModel(modelID.replace(/([-_:])free$/i, "")));
+}
+
 /** Distinguishes rows that exist in more than one wire format. */
 function labelSuffix(pkg: string) {
 	return pkg === DEFAULT_PACKAGE ? "" : ` (${packageTag(pkg)})`;
@@ -99,6 +113,22 @@ export async function loadCatalog(
 		listAccounts(db).map((account) => account.providerID),
 	);
 	const models = await ctx.model.list();
+
+	// A provider often offers the same model twice, once paid and once with a
+	// free marker. Free-only providers are pointed at the free spelling of
+	// whatever the family matched, instead of being handed the paid one.
+	const freeSiblings = new Map<string, ModelRecord>();
+	for (const model of models.data) {
+		if (!connectorIDs.has(model.providerID)) continue;
+		if (typeof model.settings?.baseURL !== "string") continue;
+		if (!isFreeModel({ cost: model.cost, modelID: model.modelID })) continue;
+		const base = freeBase(model.modelID);
+		if (!base || base === modelFamily(model.modelID)) continue;
+		freeSiblings.set(
+			`${model.providerID}:${base}:${model.package ?? ""}`,
+			model,
+		);
+	}
 
 	const groups = new Map<
 		string,
@@ -137,10 +167,25 @@ export async function loadCatalog(
 			score: -1,
 		};
 
+		const free = isFreeModel({ cost: model.cost, modelID: model.modelID });
+		const sibling = free
+			? undefined
+			: freeSiblings.get(`${providerID}:${family}:${pkg}`);
 		const route: FamilyRoute = {
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
 			context: model.limit?.context,
+			free,
+			...(sibling && typeof sibling.settings?.baseURL === "string"
+				? {
+						freeVariant: {
+							baseURL: stripTrailingSlash(sibling.settings.baseURL),
+							context: sibling.limit?.context,
+							modelID: sibling.modelID,
+							output: sibling.limit?.output,
+						},
+					}
+				: {}),
 			modelID: model.modelID,
 			output: model.limit?.output,
 			package: pkg,
@@ -202,6 +247,9 @@ export async function loadCatalog(
 				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
 				context: record?.limit?.context,
+				free: record
+					? isFreeModel({ cost: record.cost, modelID: target.modelID })
+					: undefined,
 				modelID: target.modelID,
 				output: record?.limit?.output,
 				package: chain.package,

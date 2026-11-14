@@ -156,7 +156,7 @@ const definition = {
 								position: num,
 								providerID: str,
 							},
-							["providerID", "position", "enabled", "name"],
+							["providerID", "position", "enabled", "freeOnly", "name"],
 						),
 						type: "array",
 					},
@@ -178,6 +178,13 @@ const definition = {
 			output: result,
 		},
 		setEnabled: {
+			input: object({ enabled: bool, providerID: str }, [
+				"providerID",
+				"enabled",
+			]),
+			output: result,
+		},
+		setFreeOnly: {
 			input: object({ enabled: bool, providerID: str }, [
 				"providerID",
 				"enabled",

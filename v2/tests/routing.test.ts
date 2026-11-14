@@ -3,7 +3,8 @@ import { describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { saveChain } from "../core/chains";
-import { setProviderEnabled } from "../core/priority";
+import { isFreeModel } from "../core/models";
+import { setFreeOnly, setProviderEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
 	invalidateCatalog,
@@ -39,6 +40,16 @@ function model(providerID: string, modelID: string, context: number) {
 		settings: { baseURL: `https://${providerID}.invalid/v1` },
 		type: "chat",
 	};
+}
+
+function paid(providerID: string, modelID: string) {
+	const record = model(providerID, modelID, 1_000_000);
+	return { ...record, cost: [{ input: 0.5, output: 1 }] };
+}
+
+function free(providerID: string, modelID: string) {
+	const record = model(providerID, modelID, 200_000);
+	return { ...record, cost: [{ input: 0, output: 0 }] };
 }
 
 const ordinary = [
@@ -133,6 +144,57 @@ describe("chain routing", () => {
 		const family = await familyFor(db, ordinary);
 
 		expect(chooseRoute(db, family, new Set(["p1"]))?.providerID).toBe("p2");
+	});
+});
+
+describe("free-only providers", () => {
+	test("free variants are recognised by id or zero cost", () => {
+		expect(isFreeModel({ cost: [], modelID: "openai/gpt-5" })).toBe(true);
+		expect(
+			isFreeModel({
+				cost: [{ input: 0, output: 0 }],
+				modelID: "deepseek-v4.1",
+			}),
+		).toBe(true);
+		expect(
+			isFreeModel({
+				cost: [{ input: 0.5, output: 1 }],
+				modelID: "deepseek-v4.1-flash",
+			}),
+		).toBe(false);
+		expect(
+			isFreeModel({
+				cost: [{ input: 0.5, output: 1 }],
+				modelID: "opencode/deepseek-v4.1-flash-free",
+			}),
+		).toBe(true);
+		expect(
+			isFreeModel({ cost: [{ input: 0.5, output: 1 }], modelID: "ling:free" }),
+		).toBe(true);
+	});
+
+	test("a free-only provider is skipped for a paid target", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, [
+			paid("p1", "deepseek-v4.1-flash"),
+			paid("p2", "deepseek-v4.1-flash"),
+		]);
+		setFreeOnly(db, "p1", true);
+
+		expect(chooseRoute(db, family)?.providerID).toBe("p2");
+	});
+
+	test("a free-only provider serves its own free spelling instead", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, [
+			paid("p1", "deepseek-v4.1-flash"),
+			free("p1", "deepseek-v4.1-flash-free"),
+			paid("p2", "deepseek-v4.1-flash"),
+		]);
+		setFreeOnly(db, "p1", true);
+
+		expect(chooseRoute(db, family)?.modelID).toBe("deepseek-v4.1-flash-free");
+		expect(chooseRoute(db, family)?.providerID).toBe("p1");
 	});
 });
 

@@ -15,6 +15,7 @@ import {
 	listProviderPriority,
 	moveProvider,
 	setBalancingEnabled,
+	setFreeOnly,
 	setProviderEnabled,
 } from "../core/priority";
 import { now } from "../core/time";
@@ -244,6 +245,7 @@ export async function registerBalancerRpc({
 			return {
 				entries: listProviderPriority(db).map((entry) => ({
 					enabled: entry.enabled,
+					freeOnly: entry.freeOnly,
 					name: names.get(entry.providerID) ?? entry.providerID,
 					position: entry.position,
 					providerID: entry.providerID,
@@ -299,6 +301,18 @@ export async function registerBalancerRpc({
 			setProviderEnabled(db, providerID, enabled);
 			return {
 				message: `${providerID} ${enabled ? "enabled" : "disabled"}.`,
+				ok: true,
+			};
+		},
+
+		setFreeOnly: async (input) => {
+			const { providerID, enabled } = input as {
+				providerID: string;
+				enabled: boolean;
+			};
+			setFreeOnly(db, providerID, enabled);
+			return {
+				message: `${providerID} uses ${enabled ? "free models only" : "paid models too"}.`,
 				ok: true,
 			};
 		},

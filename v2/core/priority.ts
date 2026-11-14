@@ -8,6 +8,8 @@ export type PriorityEntry = {
 	position: number;
 	modelID?: string;
 	enabled: boolean;
+	/** When set, only models that cost nothing may serve this provider. */
+	freeOnly: boolean;
 };
 
 export type ActiveSelection = {
@@ -70,6 +72,32 @@ function upsert(
 	).run(providerID, position, modelID, enabled, now());
 }
 
+const freeOnlyKey = (providerID: string) => `free_only:${providerID}`;
+
+function settingValue(db: Database, key: string): string | undefined {
+	return db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(key)?.value;
+}
+
+/** Whether this provider may serve only free models. Absent means no. */
+export function isFreeOnly(db: Database, providerID: string): boolean {
+	return settingValue(db, freeOnlyKey(providerID)) === "1";
+}
+
+export function setFreeOnly(
+	db: Database,
+	providerID: string,
+	enabled: boolean,
+): void {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(freeOnlyKey(providerID), enabled ? "1" : "0");
+}
+
 export function listProviderPriority(db: Database): PriorityEntry[] {
 	const stored = storedRows(db);
 	const providers = providersWithAccounts(db);
@@ -87,6 +115,7 @@ export function listProviderPriority(db: Database): PriorityEntry[] {
 		const row = stored.get(providerID);
 		return {
 			enabled: row ? row.enabled === 1 : true,
+			freeOnly: isFreeOnly(db, providerID),
 			modelID: row?.model_id ?? undefined,
 			position: index,
 			providerID,

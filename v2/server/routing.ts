@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { listProviderPriority } from "../core/priority";
+import { isFreeOnly, listProviderPriority } from "../core/priority";
 import type { Account } from "../core/types";
 import {
 	BALANCER_BASE_URL,
@@ -10,6 +10,21 @@ import {
 import { selectHealthyAccount } from "./selection";
 
 export type ChosenRoute = FamilyRoute & { account: Account };
+
+/** This provider's free spelling of the same model, or undefined if it has none. */
+function freeVariantOf(route: FamilyRoute): FamilyRoute | undefined {
+	const variant = route.freeVariant;
+	if (!variant) return undefined;
+	return {
+		...route,
+		available: true,
+		baseURL: variant.baseURL,
+		context: variant.context,
+		free: true,
+		modelID: variant.modelID,
+		output: variant.output,
+	};
+}
 
 /** Whether the user has switched this provider off in the balancer. */
 export function isProviderEnabled(db: Database, providerID: string): boolean {
@@ -47,11 +62,19 @@ export function chooseRouteForRequest(
 		if (options.exclude?.has(route.providerID)) continue;
 		if (route.available === false) continue;
 		if (!isProviderEnabled(db, route.providerID)) continue;
-		if (tokens > 0 && route.context && tokens > route.context) continue;
+		// A provider whose credits the user does not top up must not be handed a
+		// paid model just because the family matched by name. Its own free
+		// spelling of the model takes over when it has one.
+		const target =
+			route.free === false && isFreeOnly(db, route.providerID)
+				? freeVariantOf(route)
+				: route;
+		if (!target) continue;
 
+		if (target.context && tokens > 0 && tokens > target.context) continue;
 		const account = selectHealthyAccount(db, route.providerID);
 		if (!account) continue;
-		return { ...route, account };
+		return { ...target, account };
 	}
 	return undefined;
 }
