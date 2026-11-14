@@ -11,23 +11,28 @@ export type CompactionBuffer =
  * makes the host compact at `declared × (1 − p)`. Declaring `real / (1 − p)`
  * puts that trigger back on the real limit.
  *
- * The declared number is a lever, not a claim about the model: it is meant to
- * be larger than the row's real window, and it is deliberately *not* capped at
- * the largest real window, because that cap would put the trigger back at a
- * fraction of one. The host displays this same number in its picker, which is
- * why the panel reports the usable share instead of the declaration.
+ * `ceiling` is the largest real window in the row, and the declaration stops
+ * there. The panel's `context limit` is a share of the model's own window — 20%
+ * means "compact at 20% of what this model holds" — so a declaration past the
+ * real window would have the host display a number no target in the row
+ * actually has. A smaller target still compensates up to the ceiling, because
+ * the row is allowed to route to the larger one.
  */
 export function declaredContext(
 	realContext: number,
 	buffer: CompactionBuffer,
+	ceiling: number,
 ): number {
-	if (buffer.kind === "tokens") return realContext + buffer.tokens;
-	if (buffer.kind === "percent") {
-		const percent = Math.min(Math.max(buffer.percent, 0), 0.99);
-		if (percent <= 0) return realContext;
-		return Math.ceil(realContext / (1 - percent));
-	}
-	return realContext;
+	const declared = (() => {
+		if (buffer.kind === "tokens") return realContext + buffer.tokens;
+		if (buffer.kind === "percent") {
+			const percent = Math.min(Math.max(buffer.percent, 0), 0.99);
+			if (percent <= 0) return realContext;
+			return Math.ceil(realContext / (1 - percent));
+		}
+		return realContext;
+	})();
+	return ceiling > 0 ? Math.min(declared, ceiling) : declared;
 }
 
 function formatShare(fraction: number): string {

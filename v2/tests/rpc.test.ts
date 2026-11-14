@@ -112,6 +112,10 @@ async function handlers(
 
 	return (await registerBalancerRpc({
 		buffer: { kind: "percent", percent: 0.75 },
+		// A file of our own: the panel reads the buffer at call time, so without
+		// one these tests would read the machine's real config.
+		configPath:
+			options.configPath ?? tempConfig('{"compaction":{"buffer":"75%"}}'),
 		...options,
 		ctx,
 		db,
@@ -147,6 +151,7 @@ async function handlersFailingProviderList(db: Database) {
 	} as never;
 	return (await registerBalancerRpc({
 		buffer: { kind: "percent", percent: 0.75 },
+		configPath: tempConfig('{"compaction":{"buffer":"75%"}}'),
 		ctx,
 		db,
 	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
@@ -167,9 +172,10 @@ describe("chain rpc", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// One 1M target at 75% declares 4M. The number is the lever the host
-		// compacts against, not a claim about what the model holds.
-		expect(row?.declaredContext).toBe(4_000_000);
+		// One 1M target at 75% would compensate to 4M, but the declaration is
+		// capped at the row's largest real window: 20% of a model means 20% of
+		// the window the model actually holds.
+		expect(row?.declaredContext).toBe(1_000_000);
 		expect(row?.targets.length).toBe(1);
 
 		await rpc.chainAdd({

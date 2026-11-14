@@ -118,16 +118,17 @@ window of 200k the row declares `200k / (1 − p)`, and the host compacts at 200
 target actually ends. The same applies to output limits, which use the smallest output limit in the
 chain.
 
-The declaration is deliberately **not** capped at the chain's largest real window. Capping it would
-put the trigger back at a fraction of that window — a uniform 1M row at 75% would compact at 250k,
-wasting three quarters of what the model holds. The declared number is a lever, not a claim about the
-model, so it grows with the buffer: 200k at 75% declares 800k, and a uniform 1M row at 75% declares
-4M. The host shows that same number in its own picker, which is why the panel reports the
-`context limit` — the usable share — rather than the declaration.
+The declaration follows the row and the buffer, and stops at the chain's largest real window. The
+panel's `context limit` is read as a share of the model's own window — `20%` means "compact at 20% of
+what this model holds" — so a declaration past the real window would have the host display a number no
+target in the row actually has. A smaller target still compensates up to that largest window, because
+the row is allowed to route to it: 200k beside a 1M model at a 75% reserve declares 800k, and a
+uniform 1M row declares 1M and compacts at 250k.
 
 The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
-re-read whenever the panel writes a new value. With `compaction.auto: false` nothing trims the
-conversation, so routing also skips targets smaller than the request's estimated token count.
+re-read on every read of the chain list and whenever the panel writes a new value, so the panel's
+numbers follow the file immediately. With `compaction.auto: false` nothing trims the conversation, so
+routing also skips targets smaller than the request's estimated token count.
 
 ### Limits
 

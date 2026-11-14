@@ -463,8 +463,8 @@ describe("provider re-declaration", () => {
 			db,
 		});
 
-		// The declaration follows the row and the buffer, with nothing capping
-		// it: one 1M target at 75% declares 4M.
-		expect(host.limitOf("deepseek-v4.1-flash")).toBe(4_000_000);
+		// The declaration follows the row and the buffer, capped at the row's
+		// largest real window: one 1M target at 75% declares 1M.
+		expect(host.limitOf("deepseek-v4.1-flash")).toBe(1_000_000);
 	});
 });

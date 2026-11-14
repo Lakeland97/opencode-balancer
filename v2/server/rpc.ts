@@ -230,13 +230,16 @@ export async function registerBalancerRpc({
 
 		chains: async () => {
 			const catalog = await loadCatalog(ctx, db);
+			// Read the buffer at call time: the panel redraws from here the
+			// moment after it writes a new value, and the captured one is stale.
+			const current = configPath ? readBufferAt(configPath) : buffer;
 			return {
 				rows: catalog.families.map((family) => {
 					const window = family.window;
 					return {
 						context: window?.context ?? 0,
 						declaredContext: window
-							? declaredContext(window.context, buffer)
+							? declaredContext(window.context, current, window.ceiling)
 							: 0,
 						key: family.key,
 						label: family.name,

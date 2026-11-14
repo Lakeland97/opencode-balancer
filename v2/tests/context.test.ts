@@ -9,43 +9,52 @@ import { parseBuffer } from "../server/compaction-config";
 
 describe("declared context", () => {
 	test("a percent buffer is compensated away", () => {
-		expect(declaredContext(200_000, { kind: "percent", percent: 0.75 })).toBe(
-			800_000,
-		);
+		expect(
+			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 1_000_000),
+		).toBe(800_000);
 	});
 
 	test("a buffer just under 100% cannot divide by zero", () => {
 		expect(
-			declaredContext(200_000, { kind: "percent", percent: 0.999 }),
+			declaredContext(200_000, { kind: "percent", percent: 0.999 }, 1_000_000),
 		).toBeGreaterThan(0);
 		expect(
-			Number.isFinite(declaredContext(1000, { kind: "percent", percent: 1 })),
+			Number.isFinite(
+				declaredContext(1000, { kind: "percent", percent: 1 }, 1_000_000),
+			),
 		).toBe(true);
 	});
 
 	test("an integer buffer is added, not divided", () => {
-		expect(declaredContext(200_000, { kind: "tokens", tokens: 20_000 })).toBe(
-			220_000,
-		);
+		expect(
+			declaredContext(200_000, { kind: "tokens", tokens: 20_000 }, 1_000_000),
+		).toBe(220_000);
 	});
 
 	test("no buffer leaves the window alone", () => {
-		expect(declaredContext(200_000, { kind: "none" })).toBe(200_000);
+		expect(declaredContext(200_000, { kind: "none" }, 1_000_000)).toBe(200_000);
 	});
 
-	test("the declaration is compensated however the row is sized", () => {
-		// A uniform 200k row at 75% must still declare 800k. Pulling the
-		// declaration back to the row's own 200k would make the host compact at
-		// 50k. The declared number is a lever, not a claim about the model.
-		expect(declaredContext(200_000, { kind: "percent", percent: 0.75 })).toBe(
-			800_000,
-		);
-		expect(declaredContext(1_000_000, { kind: "percent", percent: 0.75 })).toBe(
-			4_000_000,
-		);
-		expect(declaredContext(200_000, { kind: "tokens", tokens: 20_000 })).toBe(
-			220_000,
-		);
+	test("the declaration is capped at the largest real window", () => {
+		// The panel's `context limit` is a share of the model's own window — 20%
+		// means "compact at 20% of what this model holds" — and the host compacts
+		// at declared × (1 − reserve). Declaring more than the real window would
+		// make the host show a window no target in the row actually has, so the
+		// declaration stops at the largest one.
+		expect(
+			declaredContext(1_000_000, { kind: "percent", percent: 0.8 }, 1_000_000),
+		).toBe(1_000_000);
+		// A smaller target still compensates up to the largest window in the row,
+		// because the row is allowed to route there.
+		expect(
+			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 1_000_000),
+		).toBe(800_000);
+		expect(
+			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 250_000),
+		).toBe(250_000);
+		expect(
+			declaredContext(200_000, { kind: "tokens", tokens: 20_000 }, 210_000),
+		).toBe(210_000);
 	});
 });
 

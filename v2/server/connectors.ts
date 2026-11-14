@@ -416,7 +416,7 @@ function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
 			...(window
 				? {
 						limit: {
-							context: declaredContext(window.context, buffer),
+							context: declaredContext(window.context, buffer, window.ceiling),
 							...(window.output > 0 ? { output: window.output } : {}),
 						},
 					}
