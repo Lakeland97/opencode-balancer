@@ -448,7 +448,7 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="The limit the balancer compacts a conversation at, and what it cuts at after the buffer comes off — the number beside the field. A size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%. Empty keeps the built-in 20%. A model can override it with a limit of its own."
+							title="The limit the balancer compacts a conversation at, and what that works out to after the buffer comes off — the number at the end of the line. A size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%. Empty keeps the built-in 20%. A model can override it with a limit of its own."
 						>
 							{ctx.t("contextLimit")}
 						</span>
@@ -465,16 +465,6 @@ export default Plugin.define({
 							title="a size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%; empty restores the default"
 							value={globalLimitDraft()}
 						/>
-						{/* What the limit on screen actually cuts at, which is the
-						    number the buffer moves. */}
-						<Show when={cutTokens() > 0}>
-							<span
-								style={{ opacity: 0.6 }}
-								title="what this actually cuts at: the limit, less the buffer when the buffer is enforced here. A model whose real window is smaller is cut below this."
-							>
-								{formatTokens(cutTokens())}
-							</span>
-						</Show>
 						{/* The room to keep free: what makes a model whose real cap is
 						    below what it reports compact before it is refused, rather
 						    than on its last token. */}
@@ -540,6 +530,17 @@ export default Plugin.define({
 								<option value="necessary">{ctx.t("necessary")}</option>
 							</select>
 						</span>
+						{/* What the three fields to its left work out to, at the end
+						    of the line: a bare number between them read as belonging
+						    to neither. */}
+						<Show when={cutTokens() > 0}>
+							<span
+								style={{ opacity: 0.6 }}
+								title="what this cuts at: the limit, less the buffer where the buffer is enforced. A model whose real window is smaller is cut below this, and one whose window is unknown is measured against the declared 1M."
+							>
+								{formatTokens(cutTokens())}
+							</span>
+						</Show>
 					</div>
 
 					<Show when={message()}>
