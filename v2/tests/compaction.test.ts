@@ -97,11 +97,12 @@ describe("when a conversation is compacted", () => {
 	test("the share is clamped by the model that is actually serving", async () => {
 		const db = freshDb();
 		setGlobalPercent(db, 30);
-		// 30% of the declared 1M is 300k, but this connector holds 200k.
+		// 30% of the declared 1M is 300k, but this connector holds 200k, and the
+		// cut stays a reserve below it so the compaction request itself fits.
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
 
-		expect(await handle(step("s1", { input: 199_999 }))).toBe(false);
-		expect(await handle(step("s1", { input: 200_000 }))).toBe(true);
+		expect(await handle(step("s1", { input: 179_999 }))).toBe(false);
+		expect(await handle(step("s1", { input: 180_000 }))).toBe(true);
 		expect(compacted).toEqual(["s1"]);
 	});
 

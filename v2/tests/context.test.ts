@@ -26,10 +26,32 @@ describe("where the conversation is cut", () => {
 		).toBe(200_000);
 	});
 
-	test("a share past the model's own window is clamped to it", () => {
-		// 30% of the declared 1M is 300k, but this model only holds 200k.
+	test("a share past the model's own window is clamped below it", () => {
+		// 30% of the declared 1M is 300k, but this model only holds 200k, and the
+		// cut keeps a reserve free, so it lands at 180k.
 		expect(
 			effectiveThreshold({ globalPercent: 30, realContext: 200_000 }),
+		).toBe(180_000);
+	});
+
+	test("the ceiling leaves the compaction its own room", () => {
+		// The cut may not sit at the model's last token: compacting is another
+		// request against the same model, and it carries the conversation with it.
+		expect(
+			effectiveThreshold({ globalPercent: 100, realContext: 200_000 }),
+		).toBe(180_000);
+		// A tenth of a 1M window is the larger reserve, so the cut stops at 900k.
+		expect(
+			effectiveThreshold({ globalPercent: 100, realContext: 1_000_000 }),
+		).toBe(900_000);
+		// A window too small to give up 20k gives up a quarter instead, rather
+		// than being left with nowhere to hold a conversation.
+		expect(
+			effectiveThreshold({ globalPercent: 100, realContext: 32_000 }),
+		).toBe(24_000);
+		// A share that already lands below the ceiling is untouched by it.
+		expect(
+			effectiveThreshold({ globalPercent: 20, realContext: 1_000_000 }),
 		).toBe(200_000);
 	});
 

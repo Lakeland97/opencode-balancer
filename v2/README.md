@@ -156,9 +156,13 @@ Two shares decide where the conversation is cut, and they measure different wind
   on a 200k model is 100k. It *overrides* the global rather than being capped against it.
 
 The serving model's real window is the hard ceiling under either one, so a global `30%` means 300k
-on a 1M model but is clamped to 200k when a 200k model is serving — you cannot tell the host to cut
-past what the connector can hold. A model whose window the provider does not report has no ceiling to
-clamp against, so the share stands alone.
+on a 1M model but is clamped when a 200k model is serving — you cannot tell the host to cut past what
+the connector can hold. The ceiling sits a reserve *below* the window, because compacting is itself a
+request against the same model and carries the conversation with it: triggering at the model's last
+token is how a compaction trips the very overflow failure it exists to prevent. The reserve is a tenth
+of the window or 20k, whichever is larger — the two agree at 200k — and never more than a quarter of a
+window so small that 20k would swallow it. A model whose window the provider does not report has no
+ceiling to clamp against, so the share stands alone.
 
 The balancer watches `session.step.ended`, whose token counts are the same per-request figure the host
 shows against the model's limit, and sums input, output, reasoning, and both cache fields. A session

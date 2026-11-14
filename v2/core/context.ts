@@ -86,6 +86,24 @@ export function setTargetPercent(
 }
 
 /**
+ * The room the compaction itself needs.
+ *
+ * Compacting is another request against the same model, and it carries the
+ * conversation with it, so triggering at the model's very last token leaves that
+ * request nowhere to go — which is how a compaction trips the overflow failure it
+ * was meant to prevent. The reserve is a tenth of the window or 20k, whichever is
+ * larger: the two agree at 200k, and the fixed floor is what a small window
+ * needs. It is capped at a quarter of the window, so a model that reports very
+ * little is still left something to hold a conversation in.
+ */
+export function compactionReserve(realContext: number): number {
+	return Math.min(
+		Math.max(Math.round(realContext / 10), 20_000),
+		Math.round(realContext / 4),
+	);
+}
+
+/**
  * The token count the balancer compacts a conversation at.
  *
  * The two shares measure different windows on purpose: the global one is a
@@ -96,9 +114,10 @@ export function setTargetPercent(
  *
  * The model's real window is the hard ceiling underneath either one: a share of
  * the declared window that lands past what the model can actually hold is
- * clamped to it, which is what makes "30%" mean 300k on a 1M model and 200k on
- * a 200k one. A model whose window is unknown has no ceiling to clamp against,
- * so the share stands alone rather than the conversation being cut at nothing.
+ * clamped to sit a reserve below it, which is what makes "30%" mean 300k on a 1M
+ * model and 180k on a 200k one. A model whose window is unknown has no ceiling to
+ * clamp against, so the share stands alone rather than the conversation being cut
+ * at nothing.
  */
 export function effectiveThreshold(input: {
 	globalPercent: number;
@@ -118,5 +137,7 @@ export function effectiveThreshold(input: {
 	const percent = override === undefined ? input.globalPercent : override;
 
 	const chosen = Math.round((base * percent) / 100);
-	return real === undefined ? chosen : Math.min(chosen, real);
+	if (real === undefined) return chosen;
+	// The ceiling is the window less what compacting the conversation will need.
+	return Math.min(chosen, real - compactionReserve(real));
 }

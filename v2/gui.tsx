@@ -429,7 +429,7 @@ export default Plugin.define({
 							<Show when={draftTokens() > 0}>
 								<span
 									style={{ opacity: 0.6 }}
-									title="what this share works out to: the share of the declared 1M the balancer compacts at. A model whose real window is smaller is compacted at that smaller window instead."
+									title="what this share works out to: the share of the declared 1M the balancer compacts at. A model whose real window is smaller is compacted below it, with the room compaction needs kept free."
 								>
 									= {size(draftTokens())}
 								</span>
