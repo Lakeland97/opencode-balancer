@@ -196,7 +196,7 @@ thousands (`20` is 20k, `0.5` is five hundred) or a share of the limit — and e
 rule: a tenth of the limit or 20k, whichever is larger. Either way it is capped at a quarter of what the
 model can take, so a small window still has room to hold a conversation.
 
-The **enforce buffer** choice next to it says when that reserve is taken. `always` takes it off every cut.
+The **enforce** choice beside it says when that reserve is taken. `always` takes it off every cut.
 `when necessary` takes it only where the limit has reached what the model can hold — where there is no
 longer room to give — so a limit that already leaves plenty stands alone. At or past the model's own
 window the reserve is kept whatever the setting, because that is the one place a cut with nothing left

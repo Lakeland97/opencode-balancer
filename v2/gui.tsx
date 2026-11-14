@@ -113,7 +113,7 @@ export default Plugin.define({
 			collapse: "collapse all",
 			contextLimit: "context limit",
 			diagnostics: "diagnostics",
-			enforceBuffer: "enforce buffer",
+			enforce: "enforce",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
@@ -507,27 +507,39 @@ export default Plugin.define({
 						</Show>
 						{/* Whether that room comes off a limit that already leaves
 						    plenty: the user's call, since only a limit that has run
-						    into the model needs it. */}
+						    into the model needs it. The label and its dropdown are one
+						    item so a wrap can never strand one on the line above the
+						    other. */}
 						<span
-							style={{ opacity: 0.7 }}
-							title="when the buffer is enforced. `always` takes it off every cut; `when necessary` takes it only where the limit has reached what the model can hold, so a limit that already leaves room stands alone. At least that much is always kept, so a cut never lands on the model's last token."
+							style={{
+								"align-items": "center",
+								display: "flex",
+								gap: "4px",
+								"white-space": "nowrap",
+							}}
 						>
-							{ctx.t("enforceBuffer")}
+							<span
+								style={{ opacity: 0.7 }}
+								title="when the buffer is enforced. `always` takes it off every cut; `when necessary` takes it only where the limit has reached what the model can hold, so a limit that already leaves room stands alone. At least that much is always kept, so a cut never lands on the model's last token."
+							>
+								{ctx.t("enforce")}
+							</span>
+							<select
+								onChange={(event) =>
+									void run(() =>
+										rpc().setBufferEnforce({
+											value: event.currentTarget.value,
+										}),
+									)
+								}
+								style={{ "font-size": "inherit", width: "10.5em" }}
+								title="when the buffer is enforced: always takes it off every cut, when necessary only where the limit has reached what the model can hold"
+								value={bufferEnforce()}
+							>
+								<option value="always">{ctx.t("always")}</option>
+								<option value="necessary">{ctx.t("necessary")}</option>
+							</select>
 						</span>
-						<select
-							onChange={(event) =>
-								void run(() =>
-									rpc().setBufferEnforce({
-										value: event.currentTarget.value,
-									}),
-								)
-							}
-							title="when the buffer is enforced: always takes it off every cut, when necessary only where the limit has reached what the model can hold"
-							value={bufferEnforce()}
-						>
-							<option value="always">{ctx.t("always")}</option>
-							<option value="necessary">{ctx.t("necessary")}</option>
-						</select>
 					</div>
 
 					<Show when={message()}>

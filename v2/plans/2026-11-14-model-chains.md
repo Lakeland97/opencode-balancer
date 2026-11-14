@@ -89,7 +89,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
 - **The buffer is subtracted from the limit, not used as a ceiling below the window.** It was a slice of
   the model's window that lowered the window; it is now a slice of the *limit* — or a size — taken off
   the cut, so the live `25%` limit with a `5%` buffer cuts at 237.5k on any model that can hold 250k,
-  and the same limit on a 200k model cuts at 187.5k. A new `enforce buffer` choice
+  and the same limit on a 200k model cuts at 187.5k. A new `enforce` choice
   (`context_buffer_enforce`, `always` or `when necessary`) says whether the reserve comes off every cut
   or only where the limit has reached what the model holds; it defaults to `always`, which is what the
   rule was before the choice existed, and a reserve is kept regardless at or past the model's window.
