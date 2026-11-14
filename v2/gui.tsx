@@ -89,6 +89,7 @@ export default Plugin.define({
 			collapse: "collapse all",
 			declares: "declares",
 			disabled: "disabled",
+			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
 			inUse: "in use",
@@ -96,6 +97,7 @@ export default Plugin.define({
 			models: "models",
 			newChain: "new chain",
 			open: "Open Balancer",
+			pickProvider: "pick a provider first",
 			provider: "provider",
 			providers: "providers",
 			refresh: "refresh",
@@ -196,6 +198,16 @@ export default Plugin.define({
 				.sort((a, b) =>
 					a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
 				);
+
+		// A row holds one target per provider, so a provider it already routes to
+		// cannot be added again.
+		const addableProviders = (chain: Chain) =>
+			providers().filter(
+				(entry) =>
+					!chain.targets.some(
+						(target) => target.providerID === entry.providerID,
+					),
+			);
 
 		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
 		const toggleCollapsed = (key: string) =>
@@ -518,59 +530,83 @@ export default Plugin.define({
 
 									<Show
 										fallback={
-											<button onClick={() => void startAdd(chain.key)}>
+											<button
+												disabled={addableProviders(chain).length === 0}
+												onClick={() => void startAdd(chain.key)}
+												title={
+													addableProviders(chain).length === 0
+														? ctx.t("everyProviderUsed")
+														: undefined
+												}
+											>
 												+ {ctx.t("addTarget")}
 											</button>
 										}
 										when={adding() === chain.key}
 									>
-										<div style={row}>
-											<select
-												onChange={(event) =>
-													void chooseProvider(event.currentTarget.value)
-												}
-												style={field}
-												value={addProvider()}
-											>
-												<option value="">provider</option>
-												<For
-													each={providers().filter(
-														(entry) =>
-															!chain.targets.some(
-																(target) =>
-																	target.providerID === entry.providerID,
-															),
-													)}
+										<Show
+											fallback={
+												<div style={row}>
+													<span style={{ opacity: 0.6 }}>
+														{ctx.t("everyProviderUsed")}
+													</span>
+													<button onClick={() => setAdding("")}>cancel</button>
+												</div>
+											}
+											when={addableProviders(chain).length > 0}
+										>
+											<div style={row}>
+												<select
+													onChange={(event) =>
+														void chooseProvider(event.currentTarget.value)
+													}
+													style={field}
+													value={addProvider()}
 												>
-													{(entry) => (
-														<option value={entry.providerID}>
-															{entry.name}
-														</option>
-													)}
-												</For>
-											</select>
-											<select
-												onChange={(event) =>
-													void run(() =>
-														rpc().chainAdd({
-															key: chain.key,
-															modelID: event.currentTarget.value,
-															providerID: addProvider(),
-														}),
-													).then(() => setAdding(""))
-												}
-												style={field}
-												value=""
-											>
-												<option value="">model</option>
-												<For each={addModels()}>
-													{(model) => (
-														<option value={model.modelID}>{model.name}</option>
-													)}
-												</For>
-											</select>
-											<button onClick={() => setAdding("")}>cancel</button>
-										</div>
+													<option value="">provider</option>
+													<For each={addableProviders(chain)}>
+														{(entry) => (
+															<option value={entry.providerID}>
+																{entry.name}
+															</option>
+														)}
+													</For>
+												</select>
+												<select
+													disabled={!addProvider()}
+													onChange={(event) =>
+														void (async () => {
+															await run(() =>
+																rpc().chainAdd({
+																	key: chain.key,
+																	modelID: event.currentTarget.value,
+																	providerID: addProvider(),
+																}),
+															);
+															setAdding("");
+														})()
+													}
+													style={field}
+													value=""
+												>
+													<option value="">
+														{addProvider()
+															? addModels().length > 0
+																? "model"
+																: "no models to add"
+															: ctx.t("pickProvider")}
+													</option>
+													<For each={addModels()}>
+														{(model) => (
+															<option value={model.modelID}>
+																{model.name}
+															</option>
+														)}
+													</For>
+												</select>
+												<button onClick={() => setAdding("")}>cancel</button>
+											</div>
+										</Show>
 									</Show>
 								</Show>
 							</div>
