@@ -94,6 +94,7 @@ export default Plugin.define({
 		const [adding, setAdding] = createSignal("");
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
+		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
 		const [creating, setCreating] = createSignal(false);
 		const [createProvider, setCreateProvider] = createSignal("");
 		const [createModels, setCreateModels] = createSignal<Models["models"]>([]);
@@ -165,6 +166,10 @@ export default Plugin.define({
 		// row the user built by hand. Everything else is noise.
 		const visibleChains = () =>
 			chains().filter((chain) => chain.stored || chain.targets.length > 1);
+
+		const isCollapsed = (key: string) => Boolean(collapsed()[key]);
+		const toggleCollapsed = (key: string) =>
+			setCollapsed({ ...collapsed(), [key]: !collapsed()[key] });
 
 		const row = {
 			"align-items": "center",
@@ -353,6 +358,13 @@ export default Plugin.define({
 								}}
 							>
 								<div style={row}>
+									<button
+										onClick={() => toggleCollapsed(chain.key)}
+										style={{ "min-width": "1.4em" }}
+										title={isCollapsed(chain.key) ? "expand" : "collapse"}
+									>
+										{isCollapsed(chain.key) ? "▸" : "▾"}
+									</button>
 									<span
 										style={{
 											flex: "1 1 140px",
@@ -363,6 +375,7 @@ export default Plugin.define({
 										{chain.label}
 									</span>
 									<span style={{ opacity: 0.6 }}>
+										{chain.targets.length} ·{" "}
 										{chain.stored ? "custom" : "automatic"}
 									</span>
 									<Show when={chain.stored}>
@@ -376,137 +389,141 @@ export default Plugin.define({
 									</Show>
 								</div>
 
-								<For each={chain.targets}>
-									{(target, index) => (
-										<div style={row}>
-											<span
-												style={{
-													flex: "1 1 140px",
-													"min-width": 0,
-													"overflow-wrap": "anywhere",
-												}}
-											>
-												{index() + 1}. {target.providerID} · {target.modelID}
-												<Show when={target.state === "in use"}>
-													<span style={{ opacity: 0.6 }}> · in use</span>
-												</Show>
-												<Show
-													when={
-														target.state !== "in use" &&
-														target.state !== "available"
-													}
+								<Show when={!isCollapsed(chain.key)}>
+									<For each={chain.targets}>
+										{(target, index) => (
+											<div style={row}>
+												<span
+													style={{
+														flex: "1 1 140px",
+														"min-width": 0,
+														"overflow-wrap": "anywhere",
+													}}
 												>
-													<span style={{ opacity: 0.6 }}>
-														{" "}
-														· {target.state}
-													</span>
-												</Show>
-											</span>
-											<button
-												disabled={index() === 0}
-												onClick={() =>
-													void run(() =>
-														rpc().chainMove({
-															direction: "up",
-															key: chain.key,
-															providerID: target.providerID,
-														}),
-													)
-												}
-												title="move up"
-											>
-												↑
-											</button>
-											<button
-												disabled={index() === chain.targets.length - 1}
-												onClick={() =>
-													void run(() =>
-														rpc().chainMove({
-															direction: "down",
-															key: chain.key,
-															providerID: target.providerID,
-														}),
-													)
-												}
-												title="move down"
-											>
-												↓
-											</button>
-											<button
-												onClick={() =>
-													void run(() =>
-														rpc().chainRemove({
-															key: chain.key,
-															providerID: target.providerID,
-														}),
-													)
-												}
-												title="remove target"
-											>
-												×
-											</button>
-										</div>
-									)}
-								</For>
+													{index() + 1}. {target.providerID} · {target.modelID}
+													<Show when={target.state === "in use"}>
+														<span style={{ opacity: 0.6 }}> · in use</span>
+													</Show>
+													<Show
+														when={
+															target.state !== "in use" &&
+															target.state !== "available"
+														}
+													>
+														<span style={{ opacity: 0.6 }}>
+															{" "}
+															· {target.state}
+														</span>
+													</Show>
+												</span>
+												<button
+													disabled={index() === 0}
+													onClick={() =>
+														void run(() =>
+															rpc().chainMove({
+																direction: "up",
+																key: chain.key,
+																providerID: target.providerID,
+															}),
+														)
+													}
+													title="move up"
+												>
+													↑
+												</button>
+												<button
+													disabled={index() === chain.targets.length - 1}
+													onClick={() =>
+														void run(() =>
+															rpc().chainMove({
+																direction: "down",
+																key: chain.key,
+																providerID: target.providerID,
+															}),
+														)
+													}
+													title="move down"
+												>
+													↓
+												</button>
+												<button
+													onClick={() =>
+														void run(() =>
+															rpc().chainRemove({
+																key: chain.key,
+																providerID: target.providerID,
+															}),
+														)
+													}
+													title="remove target"
+												>
+													×
+												</button>
+											</div>
+										)}
+									</For>
 
-								<div style={{ opacity: 0.6 }}>
-									{ctx.t("window")} {size(chain.context)} · {ctx.t("declares")}{" "}
-									{size(chain.declaredContext)}
-								</div>
-
-								<Show
-									fallback={
-										<button onClick={() => void startAdd(chain.key)}>
-											+ {ctx.t("addTarget")}
-										</button>
-									}
-									when={adding() === chain.key}
-								>
-									<div style={row}>
-										<select
-											onChange={(event) =>
-												void chooseProvider(event.currentTarget.value)
-											}
-											style={field}
-											value={addProvider()}
-										>
-											<option value="">provider</option>
-											<For
-												each={providers().filter(
-													(entry) =>
-														!chain.targets.some(
-															(target) =>
-																target.providerID === entry.providerID,
-														),
-												)}
-											>
-												{(entry) => (
-													<option value={entry.providerID}>{entry.name}</option>
-												)}
-											</For>
-										</select>
-										<select
-											onChange={(event) =>
-												void run(() =>
-													rpc().chainAdd({
-														key: chain.key,
-														modelID: event.currentTarget.value,
-														providerID: addProvider(),
-													}),
-												).then(() => setAdding(""))
-											}
-											style={field}
-											value=""
-										>
-											<option value="">model</option>
-											<For each={addModels()}>
-												{(model) => (
-													<option value={model.modelID}>{model.name}</option>
-												)}
-											</For>
-										</select>
-										<button onClick={() => setAdding("")}>cancel</button>
+									<div style={{ opacity: 0.6 }}>
+										{ctx.t("window")} {size(chain.context)} ·{" "}
+										{ctx.t("declares")} {size(chain.declaredContext)}
 									</div>
+
+									<Show
+										fallback={
+											<button onClick={() => void startAdd(chain.key)}>
+												+ {ctx.t("addTarget")}
+											</button>
+										}
+										when={adding() === chain.key}
+									>
+										<div style={row}>
+											<select
+												onChange={(event) =>
+													void chooseProvider(event.currentTarget.value)
+												}
+												style={field}
+												value={addProvider()}
+											>
+												<option value="">provider</option>
+												<For
+													each={providers().filter(
+														(entry) =>
+															!chain.targets.some(
+																(target) =>
+																	target.providerID === entry.providerID,
+															),
+													)}
+												>
+													{(entry) => (
+														<option value={entry.providerID}>
+															{entry.name}
+														</option>
+													)}
+												</For>
+											</select>
+											<select
+												onChange={(event) =>
+													void run(() =>
+														rpc().chainAdd({
+															key: chain.key,
+															modelID: event.currentTarget.value,
+															providerID: addProvider(),
+														}),
+													).then(() => setAdding(""))
+												}
+												style={field}
+												value=""
+											>
+												<option value="">model</option>
+												<For each={addModels()}>
+													{(model) => (
+														<option value={model.modelID}>{model.name}</option>
+													)}
+												</For>
+											</select>
+											<button onClick={() => setAdding("")}>cancel</button>
+										</div>
+									</Show>
 								</Show>
 							</div>
 						)}
