@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import { getActiveAccount } from "../core/accounts";
+import { getActiveAccount, markAccountUsed } from "../core/accounts";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
@@ -12,8 +12,8 @@ import {
 	resolveChain,
 } from "./connectors";
 import {
+	isRetryableFailure,
 	markRateLimited,
-	RETRYABLE_STATUS,
 	retryAfterMs,
 } from "./request-state";
 import {
@@ -95,6 +95,7 @@ export async function registerHooks({
 		applyAuthToHeaders(headers, route.account.auth);
 		event.headers = Object.fromEntries(headers);
 
+		markAccountUsed(db, route.providerID, route.account.alias);
 		track(event.sessionID, {
 			alias: route.account.alias,
 			at: now(),
@@ -142,6 +143,7 @@ export async function registerHooks({
 			request = new Request(request, { headers });
 
 			event.request = request;
+			markAccountUsed(db, route.providerID, route.account.alias);
 			byRequest.set(request, {
 				alias: route.account.alias,
 				at: now(),
@@ -167,13 +169,14 @@ export async function registerHooks({
 			preserveExistingOAuth: !isFailover,
 		});
 
+		markAccountUsed(db, account.providerID, account.alias);
 		const tracked = { alias: account.alias, at: now(), providerID };
 		byRequest.set(event.request, tracked);
 		bySession.set(sessionKey(event.sessionID, providerID), tracked);
 	});
 
 	await ctx.session.hook("http.response", (event) => {
-		if (!RETRYABLE_STATUS.has(event.response.status)) return;
+		if (!isRetryableFailure({ status: event.response.status })) return;
 		const tracked = lookupTracked({
 			providerID: event.model.providerID,
 			request: event.request,
@@ -189,8 +192,8 @@ export async function registerHooks({
 	});
 
 	await ctx.session.hook("retry", async (event) => {
-		const status = (event.error as { status?: number }).status;
-		if (!status || !RETRYABLE_STATUS.has(status)) return;
+		const status = (event.error as { status?: number } | undefined)?.status;
+		if (!isRetryableFailure({ error: event.error, status })) return;
 
 		const tracked = lookupTracked({
 			providerID: event.model.providerID,

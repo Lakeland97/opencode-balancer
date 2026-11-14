@@ -3,10 +3,12 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	getActiveAccount,
 	listAccounts,
+	mostRecentlyUsed,
 	removeAccount,
 	renameAccount,
 	saveAccount,
 	setActiveAccount,
+	type UsedAccount,
 } from "../core/accounts";
 import { matchModel } from "../core/models";
 import {
@@ -38,13 +40,31 @@ function parseArgs(input: string) {
 	);
 }
 
-function accountLine(db: Database, account: Account) {
+function accountLine(db: Database, account: Account, used?: UsedAccount) {
 	const marks: string[] = [];
-	const active = getActiveAccount(db, account.providerID);
-	if (active?.alias === account.alias) marks.push("active");
+	const limited = Boolean(
+		account.rateLimitedUntil && account.rateLimitedUntil > now(),
+	);
+	// Only one account served the most recent request; the rest are merely
+	// configured. A limited or disabled account is not also "active", which
+	// reads as a contradiction next to the parked marker.
+	if (
+		!account.disabled &&
+		used?.providerID === account.providerID &&
+		used.alias === account.alias
+	) {
+		marks.push("in use");
+	}
+	if (
+		!account.disabled &&
+		!limited &&
+		getActiveAccount(db, account.providerID)?.alias === account.alias
+	) {
+		marks.push("active");
+	}
 	if (account.disabled) marks.push("disabled");
-	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
-		const seconds = Math.ceil((account.rateLimitedUntil - now()) / 1000);
+	if (limited) {
+		const seconds = Math.ceil(((account.rateLimitedUntil ?? 0) - now()) / 1000);
 		marks.push(`limited ${seconds}s`);
 	}
 	const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
@@ -68,7 +88,8 @@ function statusSummary(db: Database) {
 function accountList(db: Database, providerID?: string) {
 	const accounts = providerID ? listAccounts(db, providerID) : listAccounts(db);
 	if (accounts.length === 0) return "No accounts saved.";
-	return accounts.map((account) => accountLine(db, account)).join("\n");
+	const used = mostRecentlyUsed(db);
+	return accounts.map((account) => accountLine(db, account, used)).join("\n");
 }
 
 type ResolvedModel = { modelID: string; name?: string } | { error: string };

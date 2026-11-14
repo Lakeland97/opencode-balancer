@@ -3,6 +3,7 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	getActiveAccount,
 	listAccounts,
+	mostRecentlyUsed,
 	removeAccount,
 	renameAccount,
 	saveAccount,
@@ -188,24 +189,32 @@ export async function registerBalancerRpc({
 			const accounts = providerID
 				? listAccounts(db, providerID)
 				: listAccounts(db);
+			// Exactly one account is "in use": the one that served the most
+			// recent request. A limited or disabled account is never also
+			// reported as the active default, which reads as a contradiction.
+			const used = mostRecentlyUsed(db);
 			return {
-				accounts: accounts.map((account) => ({
-					// The stored default, which is what the user chose.
-					active:
-						getActiveAccount(db, account.providerID)?.alias === account.alias,
-					alias: account.alias,
-					disabled: account.disabled,
-					failures: account.failures,
-					// What would actually authorise the next request: the default
-					// unless it is limited or disabled, then the fallback.
-					inUse:
-						selectHealthyAccount(db, account.providerID)?.alias ===
-						account.alias,
-					limited: Boolean(
+				accounts: accounts.map((account) => {
+					const limited = Boolean(
 						account.rateLimitedUntil && account.rateLimitedUntil > now(),
-					),
-					providerID: account.providerID,
-				})),
+					);
+					return {
+						active:
+							!account.disabled &&
+							!limited &&
+							getActiveAccount(db, account.providerID)?.alias === account.alias,
+						alias: account.alias,
+						disabled: account.disabled,
+						failures: account.failures,
+						inUse:
+							!account.disabled &&
+							used?.providerID === account.providerID &&
+							used.alias === account.alias,
+						lastUsedAt: account.lastUsedAt ?? 0,
+						limited,
+						providerID: account.providerID,
+					};
+				}),
 			};
 		},
 

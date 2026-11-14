@@ -53,6 +53,7 @@ const account = object(
 		disabled: bool,
 		failures: num,
 		inUse: bool,
+		lastUsedAt: num,
 		limited: bool,
 		providerID: str,
 	},

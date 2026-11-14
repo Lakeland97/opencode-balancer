@@ -17,6 +17,39 @@ type AccountRow = {
 
 const authTypes = ["api", "oauth", "wellknown"] as const;
 
+export type UsedAccount = { providerID: string; alias: string; at: number };
+
+/** Record that an account served a request, which is what "in use" reads. */
+export function markAccountUsed(
+	db: Database,
+	providerID: string,
+	alias: string,
+	at: number = now(),
+) {
+	db.query<unknown, [number, string, string]>(
+		"UPDATE accounts SET last_used_at = ? WHERE provider_id = ? AND alias = ?",
+	).run(at, providerID, alias);
+}
+
+/**
+ * The single account that served the most recent request anywhere. The panel
+ * shows exactly one account as "in use", so this is provider-independent.
+ */
+export function mostRecentlyUsed(
+	db: Database,
+): { providerID: string; alias: string; at: number } | undefined {
+	const row = db
+		.query<{ provider_id: string; alias: string; last_used_at: number }, []>(
+			`SELECT provider_id, alias, last_used_at FROM accounts
+             WHERE last_used_at IS NOT NULL
+             ORDER BY last_used_at DESC LIMIT 1`,
+		)
+		.get();
+	return row
+		? { alias: row.alias, at: row.last_used_at, providerID: row.provider_id }
+		: undefined;
+}
+
 export function normalizeAlias(alias: string) {
 	return alias
 		.trim()
