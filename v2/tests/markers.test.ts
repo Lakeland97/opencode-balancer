@@ -7,6 +7,7 @@ import {
 	listAccounts,
 	markAccountUsed,
 	mostRecentlyUsed,
+	readLimitedReason,
 	saveAccount,
 	setHostActiveSource,
 } from "../core/accounts";
@@ -168,6 +169,37 @@ describe("account markers", () => {
 
 		expect(account?.limited).toBe(true);
 		expect(account?.limitedReason).toBe("no reason was recorded for this park");
+	});
+
+	test("choosing a parked account puts it back in play", async () => {
+		const db = freshDb();
+		// The account the row is pointed at has hit its limit. The user picks it
+		// to see whether the cooldown has passed, so the pick itself must clear
+		// the park — otherwise the row looks exactly as it did and nothing is
+		// ever tried again.
+		markRateLimited(db, "p1", "a", 600_000, "HTTP 429");
+		const rpc = await handlers(db);
+
+		const reply = (await rpc.use({ alias: "a", providerID: "p1" })) as {
+			ok: boolean;
+		};
+		expect(reply.ok).toBe(true);
+
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
+		expect(readLimitedReason(db, "p1", "a")).toBeUndefined();
+		const listed = (await rpc.list({})) as {
+			accounts: {
+				active: boolean;
+				alias: string;
+				limited: boolean;
+				providerID: string;
+			}[];
+		};
+		const account = listed.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "a",
+		);
+		expect(account?.limited).toBe(false);
+		expect(account?.active).toBe(true);
 	});
 
 	test("the account OpenCode is pointed at is marked as such", async () => {

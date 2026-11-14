@@ -73,7 +73,8 @@ own line in the log. The account's name is the credential's own label, so nothin
 Deleting a credential in OpenCode removes the account on the next sync; renaming one renames the
 account, because the two are matched by the credential's id rather than its text. `use` picks which
 of a provider's accounts the balancer sends to, and the panel marks the one OpenCode itself is pointed
-at (`in opencode`) when the two differ.
+at (`in opencode`) when the two differ. Picking an account is also the retry a park was waiting for,
+so `use` clears that account's cooldown — it is how you test whether a limit has lifted.
 
 ## Model chains
 
@@ -117,8 +118,8 @@ rather than restarting at the top of the chain and parking every provider on the
 everything has been tried, the chain wraps back to the head.
 
 `limited` therefore means **failed, and not yet tried again** — it is cleared by the next routing
-attempt, not by a clock. Hovering the marker shows what the endpoint actually reported: the HTTP
-status, or the host's typed error when it raised one.
+attempt, or by picking the account again, not by a clock. Hovering the marker shows what the endpoint
+actually reported: the HTTP status, or the host's typed error when it raised one.
 
 The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
 `models`, `log`.

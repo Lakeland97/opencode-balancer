@@ -38,6 +38,23 @@ export function markAccountUsed(
 	clearLimitedReason(db, providerID, alias);
 }
 
+/**
+ * Take the park off an account without pretending it has served anything.
+ * Picking an account to use is itself an attempt at it, so it is what "limited"
+ * has been waiting for: the user asking for this account again is how a
+ * cooldown is tested, and it must not leave the row looking untouched.
+ */
+export function clearAccountPark(
+	db: Database,
+	providerID: string,
+	alias: string,
+) {
+	db.query<unknown, [string, string]>(
+		"UPDATE accounts SET rate_limited_until = NULL WHERE provider_id = ? AND alias = ?",
+	).run(providerID, alias);
+	clearLimitedReason(db, providerID, alias);
+}
+
 /** Where the reason an account was parked is kept, next to the other settings. */
 function limitedReasonKey(providerID: string, alias: string) {
 	return `limited_reason:${providerID}:${alias}`;

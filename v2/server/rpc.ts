@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
+	clearAccountPark,
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
@@ -506,6 +507,10 @@ export async function registerBalancerRpc({
 			const { providerID, alias } = input as Pair;
 			try {
 				const account = setActiveAccount(db, providerID, alias);
+				// Picking an account is the retry it was waiting for: a parked
+				// one becomes eligible again, so the marker moves and the next
+				// call actually goes there.
+				clearAccountPark(db, account.providerID, account.alias);
 				recordLog("config", `active account ${providerID}/${account.alias}`);
 				return {
 					message: `Active account is ${providerID}/${account.alias}.`,

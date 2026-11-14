@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
+	clearAccountPark,
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
@@ -202,6 +203,8 @@ export async function runCommand({
 		if (!providerID || !alias) return "Usage: /balancer use <provider> <alias>";
 		try {
 			const account = setActiveAccount(db, providerID, alias);
+			// Choosing an account is the retry a park was waiting for.
+			clearAccountPark(db, account.providerID, account.alias);
 			return `Active account changed to ${providerID}/${account.alias}`;
 		} catch (error) {
 			return error instanceof Error ? error.message : "Account not found.";

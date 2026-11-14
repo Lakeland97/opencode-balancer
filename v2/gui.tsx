@@ -536,20 +536,19 @@ export default Plugin.define({
 												</Show>
 												{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
 											</span>
-											<Show when={!account.active}>
-												<button
-													onClick={() =>
-														void run(() =>
-															rpc().use({
-																alias: account.alias,
-																providerID: account.providerID,
-															}),
-														)
-													}
-												>
-													{ctx.t("use")}
-												</button>
-											</Show>
+											<button
+												onClick={() =>
+													void run(() =>
+														rpc().use({
+															alias: account.alias,
+															providerID: account.providerID,
+														}),
+													)
+												}
+												title="send this provider's calls here; picking a parked account clears its cooldown"
+											>
+												{ctx.t("use")}
+											</button>
 										</div>
 									)}
 								</For>
