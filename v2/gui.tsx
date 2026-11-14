@@ -27,6 +27,31 @@ type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
 
+type Target = { modelID: string; providerID: string; state: string };
+type Chain = {
+	context: number;
+	declaredContext: number;
+	key: string;
+	label: string;
+	package: string;
+	stored: boolean;
+	targets: Target[];
+};
+type Chains = { rows: Chain[] };
+type Provider = { enabled: boolean; name: string; position: number; providerID: string };
+type Providers = { entries: Provider[] };
+type Models = { models: { modelID: string; name: string }[] };
+
+/** Compact window size: 200000 becomes 200k, 1000000 becomes 1m. */
+function size(value: number) {
+	if (!value) return "?";
+	if (value >= 1_000_000) {
+		const millions = value / 1_000_000;
+		return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}m`;
+	}
+	return `${Math.round(value / 1000)}k`;
+}
+
 export default Plugin.define({
 	i18n: {
 		en: {
@@ -34,8 +59,14 @@ export default Plugin.define({
 			add: "add",
 			alias: "alias",
 			balancing: "balancing",
+			declares: "declares",
 			disabled: "disabled",
 			inUse: "in use",
+			addTarget: "add target",
+			models: "models",
+			providers: "providers",
+			reset: "reset",
+			window: "window",
 			limited: "limited",
 			open: "Open Balancer",
 			provider: "provider",
@@ -51,16 +82,26 @@ export default Plugin.define({
 		const [message, setMessage] = createSignal("");
 		const [provider, setProvider] = createSignal("");
 		const [alias, setAlias] = createSignal("");
+		const [chains, setChains] = createSignal<Chain[]>([]);
+		const [providers, setProviders] = createSignal<Provider[]>([]);
+		// The row whose add form is open, plus what the user has picked in it.
+		const [adding, setAdding] = createSignal("");
+		const [addProvider, setAddProvider] = createSignal("");
+		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list] = await Promise.all([
+				const [status, list, rows, order] = await Promise.all([
 					rpc.status({}),
 					rpc.list({}),
+					rpc.chains({}),
+					rpc.priority({}),
 				]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
+				setChains([...(rows as Chains).rows]);
+				setProviders([...(order as Providers).entries]);
 			} catch (error) {
 				setMessage(error instanceof Error ? error.message : String(error));
 			}
@@ -78,6 +119,26 @@ export default Plugin.define({
 		};
 
 		const rpc = () => ctx.client.rpc(Balancer);
+
+		const startAdd = async (key: string) => {
+			setAdding(key);
+			setAddProvider("");
+			setAddModels([]);
+		};
+
+		// The picker's model list comes from the server, which only offers models
+		// the provider can actually route.
+		const chooseProvider = async (chain: Chain, providerID: string) => {
+			setAddProvider(providerID);
+			setAddModels([]);
+			if (!providerID) return;
+			try {
+				const reply = (await rpc().chainModels({ providerID })) as Models;
+				setAddModels(reply.models);
+			} catch (error) {
+				setMessage(error instanceof Error ? error.message : String(error));
+			}
+		};
 
 		const row = {
 			"align-items": "center",
@@ -197,6 +258,239 @@ export default Plugin.define({
 							{ctx.t("add")}
 						</button>
 					</div>
+
+					<div style={{ ...row, "margin-top": "4px" }}>
+						<strong>{ctx.t("models")}</strong>
+					</div>
+					<For each={chains()}>
+						{(chain) => (
+							<div
+								style={{
+									"border-top": "1px solid rgba(128,128,128,0.25)",
+									display: "flex",
+									"flex-direction": "column",
+									gap: "4px",
+									"padding-top": "6px",
+								}}
+							>
+								<div style={row}>
+									<span
+										style={{
+											flex: "1 1 140px",
+											"min-width": 0,
+											"overflow-wrap": "anywhere",
+										}}
+									>
+										{chain.label}
+									</span>
+									<span style={{ opacity: 0.6 }}>
+										{chain.stored ? "custom" : "automatic"}
+									</span>
+									<Show when={chain.stored}>
+										<button
+											onClick={() =>
+												void run(() => rpc().chainReset({ key: chain.key }))
+											}
+										>
+											{ctx.t("reset")}
+										</button>
+									</Show>
+								</div>
+
+								<For each={chain.targets}>
+									{(target, index) => (
+										<div style={row}>
+											<span
+												style={{
+													flex: "1 1 140px",
+													"min-width": 0,
+													"overflow-wrap": "anywhere",
+												}}
+											>
+												{index() + 1}. {target.providerID} · {target.modelID}
+												<Show when={target.state === "in use"}>
+													<span style={{ opacity: 0.6 }}> · in use</span>
+												</Show>
+												<Show
+													when={
+														target.state !== "in use" &&
+														target.state !== "available"
+													}
+												>
+													<span style={{ opacity: 0.6 }}>
+														{" "}
+														· {target.state}
+													</span>
+												</Show>
+											</span>
+											<button
+												disabled={index() === 0}
+												onClick={() =>
+													void run(() =>
+														rpc().chainMove({
+															direction: "up",
+															key: chain.key,
+															providerID: target.providerID,
+														}),
+													)
+												}
+												title="move up"
+											>
+												↑
+											</button>
+											<button
+												disabled={index() === chain.targets.length - 1}
+												onClick={() =>
+													void run(() =>
+														rpc().chainMove({
+															direction: "down",
+															key: chain.key,
+															providerID: target.providerID,
+														}),
+													)
+												}
+												title="move down"
+											>
+												↓
+											</button>
+											<button
+												onClick={() =>
+													void run(() =>
+														rpc().chainRemove({
+															key: chain.key,
+															providerID: target.providerID,
+														}),
+													)
+												}
+												title="remove target"
+											>
+												×
+											</button>
+										</div>
+									)}
+								</For>
+
+								<div style={{ opacity: 0.6 }}>
+									{ctx.t("window")} {size(chain.context)} · {ctx.t("declares")}{" "}
+									{size(chain.declaredContext)}
+								</div>
+
+								<Show
+									when={adding() === chain.key}
+									fallback={
+										<button onClick={() => void startAdd(chain.key)}>
+											+ {ctx.t("addTarget")}
+										</button>
+									}
+								>
+									<div style={row}>
+										<select
+											onChange={(event) =>
+												void chooseProvider(chain, event.currentTarget.value)
+											}
+											style={field}
+											value={addProvider()}
+										>
+											<option value="">provider</option>
+											<For
+												each={providers().filter(
+													(entry) =>
+														!chain.targets.some(
+															(target) =>
+																target.providerID === entry.providerID,
+														),
+												)}
+											>
+												{(entry) => (
+													<option value={entry.providerID}>{entry.name}</option>
+												)}
+											</For>
+										</select>
+										<select
+											onChange={(event) =>
+												void run(() =>
+													rpc().chainAdd({
+														key: chain.key,
+														modelID: event.currentTarget.value,
+														providerID: addProvider(),
+													}),
+												).then(() => setAdding(""))
+											}
+											style={field}
+											value=""
+										>
+											<option value="">model</option>
+											<For each={addModels()}>
+												{(model) => (
+													<option value={model.modelID}>{model.name}</option>
+												)}
+											</For>
+										</select>
+										<button onClick={() => setAdding("")}>cancel</button>
+									</div>
+								</Show>
+							</div>
+						)}
+					</For>
+
+					<Show when={providers().length > 0}>
+						<div style={{ ...row, "margin-top": "4px" }}>
+							<strong>{ctx.t("providers")}</strong>
+						</div>
+						<For each={providers()}>
+							{(entry, index) => (
+								<div style={row}>
+									<input
+										checked={entry.enabled}
+										onChange={(event) =>
+											void run(() =>
+												rpc().setEnabled({
+													enabled: event.currentTarget.checked,
+													providerID: entry.providerID,
+												}),
+											)
+										}
+										type="checkbox"
+									/>
+									<span
+										style={{
+											flex: "1 1 140px",
+											"min-width": 0,
+											"overflow-wrap": "anywhere",
+										}}
+									>
+										{entry.name}
+									</span>
+									<button
+										disabled={index() === 0}
+										onClick={() =>
+											void run(() =>
+												rpc().move({
+													direction: "up",
+													providerID: entry.providerID,
+												}),
+											)
+										}
+									>
+										↑
+									</button>
+									<button
+										disabled={index() === providers().length - 1}
+										onClick={() =>
+											void run(() =>
+												rpc().move({
+													direction: "down",
+													providerID: entry.providerID,
+												}),
+											)
+										}
+									>
+										↓
+									</button>
+								</div>
+							)}
+						</For>
+					</Show>
 				</div>
 			);
 		};

@@ -60,6 +60,41 @@ Families never mix wire formats: a model offered as `anthropic-compatible` gets 
 because routing only rewrites the `model` field and the request shape stays whatever the package
 built.
 
+## Model chains
+
+Each row is an ordered list of **targets**, one per provider. A row starts in **automatic** order,
+which is just the provider priority. Editing the order — by adding, moving or removing a target —
+stores the list, and from then on the row routes exactly as written until you `reset` it.
+
+A target is any model the provider can actually route, so a chain may hold unrelated models.
+Providers are still the unit of health: the same provider cannot appear twice, because the second
+target would never be reached.
+
+```sh
+/balancer chain deepseek-v4.1-flash                        # targets, in the order they are tried
+/balancer chain deepseek-v4.1-flash add commandcode deepseek-v4.1-flash
+/balancer chain deepseek-v4.1-flash up commandcode
+/balancer chain deepseek-v4.1-flash remove commandcode
+/balancer chain deepseek-v4.1-flash reset                  # back to provider priority
+```
+
+The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
+pickers, and a `reset` on any customised row. It also lists providers, with an enabled checkbox and
+the same `↑ ↓` ordering controls.
+
+### Context windows
+
+A row declares the **smallest** context window in its chain, because every target must be able to
+take over the same conversation. `compaction.buffer` is a share of the declared window, so the host
+would compact early if the declared window were the real one. The plugin compensates: with a real
+window of 200k and a 75% buffer, the row declares `200k / (1 − 0.75) = 800k`, and the host compacts
+at 200k — where the smallest target actually ends. The same applies to output limits, which use the
+smallest output limit in the chain.
+
+The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, since
+the plugin API exposes no config accessor. With `compaction.auto: false` nothing trims the
+conversation, so routing also skips targets smaller than the request's estimated token count.
+
 ## Deliberate limits
 
 - **One model at a time.** The session is pinned to a family; the connector behind it changes,
@@ -80,9 +115,11 @@ built.
 /balancer remove <provider> <alias>
 /balancer rename <provider> <alias> <new>
 /balancer on | off                    toggle automatic failover
-/balancer priority
-/balancer model <provider|all> <name>   like-for-like model; accepts the picker's label
-/balancer equivalents [name]            which model each connector uses for a family
+/balancer priority                     provider order and on/off state
+/balancer chain <model>                targets for a row, in the order they are tried
+/balancer chain <model> add <provider> <model>
+/balancer chain <model> remove|up|down <provider>
+/balancer chain <model> reset          hand the row back to provider priority
 /balancer enable <provider> | disable <provider>
 /balancer up <provider> | down <provider>
 ```
@@ -111,7 +148,8 @@ npx --yes bun test        # unit tests: account store, selection, failover marki
 ## Desktop GUI
 
 OpenCode Desktop 2.2+ loads the `./gui-experimental` part automatically, giving a Balancer side
-panel with account actions, a balancing toggle, and an add form. The bundle is build output, and
+panel with account actions, a balancing toggle, an add form, a chain editor per model, and the
+provider order. The bundle is build output, and
 upstream's `.gitignore` excludes `dist`, so build it once after cloning:
 
 ```sh
