@@ -11,28 +11,59 @@ export type CompactionBuffer =
  * makes the host compact at `declared × (1 − p)`. Declaring `real / (1 − p)`
  * puts that trigger back on the real limit.
  *
- * `ceiling` is the largest real window in the chain. Compensating a small
- * window can claim more than any target actually holds, which misreports the
- * row's reach in the picker and the context meter, so the declaration is capped
- * there. Compaction then fires slightly early, which is harmless.
+ * The declared number is a lever, not a claim about the model: it is meant to
+ * be larger than the row's real window, and it is deliberately *not* capped at
+ * the largest real window, because that cap would put the trigger back at a
+ * fraction of one. The host displays this same number in its picker, which is
+ * why the panel reports the usable share instead of the declaration.
  */
 export function declaredContext(
 	realContext: number,
 	buffer: CompactionBuffer,
-	ceiling?: number,
 ): number {
-	const declared = (() => {
-		if (buffer.kind === "tokens") return realContext + buffer.tokens;
-		if (buffer.kind === "percent") {
-			const percent = Math.min(Math.max(buffer.percent, 0), 0.99);
-			if (percent <= 0) return realContext;
-			return Math.ceil(realContext / (1 - percent));
-		}
-		return realContext;
-	})();
-	return typeof ceiling === "number" && ceiling > 0
-		? Math.min(declared, ceiling)
-		: declared;
+	if (buffer.kind === "tokens") return realContext + buffer.tokens;
+	if (buffer.kind === "percent") {
+		const percent = Math.min(Math.max(buffer.percent, 0), 0.99);
+		if (percent <= 0) return realContext;
+		return Math.ceil(realContext / (1 - percent));
+	}
+	return realContext;
+}
+
+function formatShare(fraction: number): string {
+	return `${Number((fraction * 100).toFixed(2))}%`;
+}
+
+/**
+ * The share of a window left to use, which is what the panel shows: the host's
+ * buffer is the part kept free, so a 20% buffer is an 80% limit. A token
+ * reserve has no share to show and is reported as the token count it is.
+ */
+export function usableShare(buffer: CompactionBuffer): string {
+	if (buffer.kind === "percent") return formatShare(1 - buffer.percent);
+	if (buffer.kind === "tokens") return String(buffer.tokens);
+	return "";
+}
+
+/**
+ * The value to write for a share the user typed. A percentage becomes the
+ * reserve the host wants — `80%` becomes `20%` — while a bare number over 99 is
+ * a token count and is written as one.
+ */
+export function bufferFromShare(input: string): string {
+	const typed = /^(\d+(?:\.\d+)?)(%?)$/.exec(input.trim());
+	if (!typed) throw new Error(`"${input}" is not a share or a token count`);
+
+	const value = Number(typed[1]);
+	if (!typed[2] && value > 99) return String(value);
+
+	const reserve = 100 - value;
+	if (reserve < 1 || reserve > 99) {
+		throw new Error(
+			`the host keeps between 1% and 99% of a window free, so a share of "${input}" cannot be stored`,
+		);
+	}
+	return formatShare(reserve / 100);
 }
 
 /**

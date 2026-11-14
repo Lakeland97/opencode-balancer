@@ -98,10 +98,11 @@ The panel lists only rows that route between providers, or that you built by han
 under their brand where a brand has more than one, and every row, group and the whole section can be
 folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
 
-The `buffer` field at the top edits `compaction.buffer` in the config file directly — in place, so
-comments and every other setting survive — then asks the host to rebuild its models, so the change
-reaches the declared windows without restarting OpenCode. It accepts a percentage from `1%` to `99%`
-or a token count; `0%` is not a value the host accepts.
+The `context limit` field at the top edits `compaction.buffer` in the config file directly — in place,
+so comments and every other setting survive — then asks the host to rebuild its models, so the change
+reaches the declared windows without restarting OpenCode. It shows the share of a window left to use,
+while the file stores the part kept free, so a limit of `80%` is written as `"buffer": "20%"`. Enter a
+percentage from `1%` to `99%`, or a bare token count.
 
 ### Context windows
 
@@ -112,11 +113,12 @@ window of 200k the row declares `200k / (1 − p)`, and the host compacts at 200
 target actually ends. The same applies to output limits, which use the smallest output limit in the
 chain.
 
-That declaration is capped at the chain's largest real window, so a row of similarly sized models
-cannot claim more than any target holds. The cap costs at most `p` in earlier compaction, which is why
-a **small** buffer is what the design wants: at `1%` a 200k row declares 202k and compacts at 200k,
-while at `75%` a uniform 1M row would declare 1M and compact at 250k, leaving three quarters of its
-window unused.
+The declaration is deliberately **not** capped at the chain's largest real window. Capping it would
+put the trigger back at a fraction of that window — a uniform 1M row at 75% would compact at 250k,
+wasting three quarters of what the model holds. The declared number is a lever, not a claim about the
+model, so it grows with the buffer: 200k at 75% declares 800k, and a uniform 1M row at 75% declares
+4M. The host shows that same number in its own picker, which is why the panel reports the
+`context limit` — the usable share — rather than the declaration.
 
 The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
 re-read whenever the panel writes a new value. With `compaction.auto: false` nothing trims the

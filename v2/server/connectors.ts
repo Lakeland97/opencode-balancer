@@ -360,7 +360,7 @@ function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
 			...(window
 				? {
 						limit: {
-							context: declaredContext(window.context, buffer, window.ceiling),
+							context: declaredContext(window.context, buffer),
 							...(window.output > 0 ? { output: window.output } : {}),
 						},
 					}
@@ -419,12 +419,14 @@ export async function registerBalancerProvider({
 export async function refreshBalancerProvider({
 	ctx,
 	db,
+	buffer = readCompactionBuffer(),
 }: {
 	ctx: Context;
 	db: Database;
+	buffer?: CompactionBuffer;
 }) {
 	invalidateCatalog();
 	const catalog = await loadCatalog(ctx, db);
-	declarations = { buffer: readCompactionBuffer(), catalog };
+	declarations = { buffer, catalog };
 	await ctx.provider.reload();
 }

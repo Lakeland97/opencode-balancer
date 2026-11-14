@@ -9,7 +9,12 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
-import { type CompactionBuffer, declaredContext } from "../core/context";
+import {
+	bufferFromShare,
+	type CompactionBuffer,
+	declaredContext,
+	usableShare,
+} from "../core/context";
 import {
 	getBalancingEnabled,
 	isFreeOnly,
@@ -84,14 +89,6 @@ function targetState(
  * Typed RPC surface so clients (a GUI part, the TUI, or any SDK client) can
  * manage accounts without parsing command output.
  */
-/** A buffer as the panel shows it: `75%`, `150000`, or blank for none. */
-function bufferText(buffer: CompactionBuffer): string {
-	if (buffer.kind === "percent")
-		return `${Number((buffer.percent * 100).toFixed(2))}%`;
-	if (buffer.kind === "tokens") return String(buffer.tokens);
-	return "";
-}
-
 export async function registerBalancerRpc({
 	ctx,
 	db,
@@ -134,7 +131,7 @@ export async function registerBalancerRpc({
 
 		buffer: async () => ({
 			path: configPath ?? "",
-			value: bufferText(configPath ? readBufferAt(configPath) : buffer),
+			value: usableShare(configPath ? readBufferAt(configPath) : buffer),
 		}),
 
 		chainAdd: async (input) => {
@@ -218,7 +215,7 @@ export async function registerBalancerRpc({
 					return {
 						context: window?.context ?? 0,
 						declaredContext: window
-							? declaredContext(window.context, buffer, window.ceiling)
+							? declaredContext(window.context, buffer)
 							: 0,
 						key: family.key,
 						label: family.name,
@@ -350,7 +347,7 @@ export async function registerBalancerRpc({
 				};
 			}
 			try {
-				writeCompactionBuffer(configPath, value);
+				writeCompactionBuffer(configPath, bufferFromShare(value));
 			} catch (error) {
 				return {
 					message:
@@ -360,7 +357,7 @@ export async function registerBalancerRpc({
 			}
 			await refresh?.();
 			return {
-				message: `Compaction buffer set to ${bufferText(readBufferAt(configPath))}.`,
+				message: `Context limit set to ${usableShare(readBufferAt(configPath))}.`,
 				ok: true,
 			};
 		},

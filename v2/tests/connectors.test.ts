@@ -402,9 +402,14 @@ describe("provider re-declaration", () => {
 				},
 			],
 		});
-		await refreshBalancerProvider({ ctx: host.ctx, db });
+		await refreshBalancerProvider({
+			buffer: { kind: "percent", percent: 0.75 },
+			ctx: host.ctx,
+			db,
+		});
 
-		// Nothing tiny caps the row any more, so it can declare the 1M window.
-		expect(host.limitOf("deepseek-v4.1-flash")).toBe(1_000_000);
+		// The declaration follows the row and the buffer, with nothing capping
+		// it: one 1M target at 75% declares 4M.
+		expect(host.limitOf("deepseek-v4.1-flash")).toBe(4_000_000);
 	});
 });

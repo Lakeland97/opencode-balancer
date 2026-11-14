@@ -98,8 +98,8 @@ export default Plugin.define({
 			alias: "alias",
 			apply: "apply",
 			balancing: "balancing",
-			buffer: "buffer",
 			collapse: "collapse all",
+			contextLimit: "context limit",
 			declares: "declares",
 			disabled: "disabled",
 			everyProviderUsed: "every provider is already in this chain",
@@ -326,13 +326,13 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="Share of each model's window the host keeps free before compacting. 1% to 99%, or a token count."
+							title="How full a model's window may get before it compacts; the rest is kept free for the compaction itself. 1% to 99%, or a token count."
 						>
-							{ctx.t("buffer")}
+							{ctx.t("contextLimit")}
 						</span>
 						<input
 							onChange={(event) => setBufferDraft(event.currentTarget.value)}
-							placeholder="75% or 150000"
+							placeholder="80%"
 							style={{ width: "9em" }}
 							title={bufferPath()}
 							value={bufferDraft()}

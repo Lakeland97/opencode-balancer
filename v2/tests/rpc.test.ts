@@ -167,9 +167,9 @@ describe("chain rpc", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// One 1M target at 75% would compensate to 4M, but nothing holds more
-		// than 1M, so the declaration is capped at the ceiling.
-		expect(row?.declaredContext).toBe(1_000_000);
+		// One 1M target at 75% declares 4M. The number is the lever the host
+		// compacts against, not a claim about what the model holds.
+		expect(row?.declaredContext).toBe(4_000_000);
 		expect(row?.targets.length).toBe(1);
 
 		await rpc.chainAdd({
@@ -331,30 +331,30 @@ describe("chain rpc", () => {
 });
 
 describe("buffer rpc", () => {
-	test("reports the value and the file it comes from", async () => {
+	test("reports the usable share, not the host's reserve", async () => {
 		const file = tempConfig(
 			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
 		);
 		const rpc = await handlers(freshDb(), connectors, { configPath: file });
 
 		const state = (await rpc.buffer({})) as { path: string; value: string };
-		expect(state.value).toBe("75%");
+		expect(state.value).toBe("25%");
 		expect(state.path).toBe(file);
 	});
 
-	test("setBuffer rewrites the file, keeps its comments, and reports the new value", async () => {
+	test("setBuffer stores the reserve that leaves the share asked for", async () => {
 		const file = tempConfig(
 			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
 		);
 		const rpc = await handlers(freshDb(), connectors, { configPath: file });
 
-		const result = (await rpc.setBuffer({ value: "1%" })) as { ok: boolean };
+		const result = (await rpc.setBuffer({ value: "5%" })) as { ok: boolean };
 		expect(result.ok).toBe(true);
 
 		const text = readFileSync(file, "utf8");
 		expect(text).toContain("// keep this");
-		expect(text).toContain('"buffer": "1%"');
-		expect(((await rpc.buffer({})) as { value: string }).value).toBe("1%");
+		expect(text).toContain('"buffer": "95%"');
+		expect(((await rpc.buffer({})) as { value: string }).value).toBe("5%");
 	});
 
 	test("setBuffer refuses a value the host would reject", async () => {
