@@ -91,8 +91,12 @@ marker.
 ```
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
-pickers, and a `reset` on any customised row. It also lists providers, with an enabled checkbox and
-the same `↑ ↓` ordering controls.
+pickers, and a `reset` on any customised row. It also lists providers, with an enabled checkbox, a
+`free` checkbox, and the same `↑ ↓` ordering controls.
+
+The panel lists only rows that route between providers, or that you built by hand. Rows are grouped
+under their brand where a brand has more than one, and every row, group and the whole section can be
+folded away; `collapse all` / `expand all` folds the lot at once.
 
 ### Context windows
 
