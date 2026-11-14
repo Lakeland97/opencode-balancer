@@ -34,7 +34,7 @@ export async function registerBalancerRpc({
 	ctx: Context;
 	db: Database;
 }) {
-	await ctx.rpc.register(Balancer, {
+	const registration = await ctx.rpc.register(Balancer, {
 		add: async (input) => {
 			const { providerID, alias } = input as Pair;
 			try {
@@ -184,4 +184,6 @@ export async function registerBalancerRpc({
 			}
 		},
 	});
+
+	return registration;
 }

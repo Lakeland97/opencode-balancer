@@ -85,7 +85,8 @@ upstream's `.gitignore` excludes `dist`, so build it once after cloning:
 npx --yes bun run build:gui    # vite build → v2/dist/gui-experimental.cjs
 ```
 
-Open it from the command palette (**Open Balancer**) or the Balancer panel in the side region.
+Open it from the command palette (**Open Balancer**), the **Balancer** pill in the titlebar, the
+**Balancer** tab in the side region, the side region's **+** menu, or by running `/balancer gui`.
 
 ## Upstream sync
 

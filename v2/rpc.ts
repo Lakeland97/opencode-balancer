@@ -5,10 +5,13 @@ const str: JsonSchema.JsonSchema = { type: "string" };
 const bool: JsonSchema.JsonSchema = { type: "boolean" };
 const num: JsonSchema.JsonSchema = { type: "number" };
 
+/** A JSON schema that is known to describe an object, as events require. */
+type ObjectSchema = JsonSchema.JsonSchema & { readonly type: "object" };
+
 function object(
 	properties: Record<string, JsonSchema.JsonSchema>,
 	required: string[] = [],
-): JsonSchema.JsonSchema {
+): ObjectSchema {
 	return { additionalProperties: false, properties, required, type: "object" };
 }
 
@@ -31,8 +34,12 @@ const account = object(
  * Typed surface for clients (GUI part, TUI, SDK) to manage accounts without
  * parsing command output.
  */
-export const Balancer = Rpc.define({
-	events: {},
+const definition = {
+	events: {
+		// Lets the server-side command surface ask an open Desktop window to
+		// reveal the panel; a terminal-only session simply has no listener.
+		open: { schema: empty },
+	},
 	id: "balancer",
 	methods: {
 		add: { input: pair, output: result },
@@ -113,4 +120,6 @@ export const Balancer = Rpc.define({
 		},
 		use: { input: pair, output: result },
 	},
-});
+} satisfies Rpc.PortableDefinition;
+
+export const Balancer = Rpc.define(definition);

@@ -65,10 +65,12 @@ export async function runCommand({
 	ctx,
 	db,
 	raw,
+	openGui,
 }: {
 	ctx: Context;
 	db: Database;
 	raw: string;
+	openGui?: () => Promise<void>;
 }) {
 	const [action = "", ...args] = parseArgs(raw);
 
@@ -80,6 +82,7 @@ export async function runCommand({
 	if (["help", "--help", "-h"].includes(action)) {
 		return [
 			"Balancer commands:",
+			"  gui                          Open the Desktop panel",
 			"  list [provider]              Accounts, with active/limited markers",
 			"  status                       Balancing state and account totals",
 			"  add <provider> <alias>       Save the provider's current credential as an account",
@@ -92,6 +95,12 @@ export async function runCommand({
 			"  enable <provider> | disable <provider>",
 			"  up <provider> | down <provider>",
 		].join("\n");
+	}
+
+	if (action === "gui") {
+		if (!openGui) return "The Desktop panel is not available in this client.";
+		await openGui();
+		return "Opening the Balancer panel. If it stays closed, use the command palette: Open Balancer.";
 	}
 
 	if (action === "list") {

@@ -200,4 +200,19 @@ describe("commands", () => {
 		const reply = await runCommand({ ctx: {} as never, db, raw: "nonsense" });
 		expect(reply).toContain("Unknown command");
 	});
+
+	test("gui asks the desktop window to reveal the panel", async () => {
+		const db = freshDb();
+		let opened = 0;
+		const reply = await runCommand({
+			ctx: {} as never,
+			db,
+			openGui: async () => {
+				opened += 1;
+			},
+			raw: "gui",
+		});
+		expect(opened).toBe(1);
+		expect(reply).toContain("Balancer panel");
+	});
 });

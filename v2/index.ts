@@ -39,14 +39,22 @@ export default Plugin.define({
 		migrate(db);
 
 		await registerHooks({ ctx, db });
-		await registerBalancerRpc({ ctx, db });
+		const rpc = await registerBalancerRpc({ ctx, db });
+		const openGui = async () => {
+			await rpc.events.emit("open", {});
+		};
 
 		await ctx.command.transform((editor) => {
 			editor.add({
 				description:
 					"Manage balancer accounts, provider priority, and automatic failover.",
 				execute: async ({ prompt }) => {
-					const text = await runCommand({ ctx, db, raw: prompt.text });
+					const text = await runCommand({
+						ctx,
+						db,
+						openGui,
+						raw: prompt.text,
+					});
 					// Desktop does not render synthetic messages, so a synthetic
 					// reply is invisible to the user. Throwing carries the text to
 					// the client and also stops the command from becoming a model
@@ -64,6 +72,7 @@ export default Plugin.define({
 					content: await runCommand({
 						ctx,
 						db,
+						openGui,
 						raw: String((input as { command?: unknown }).command ?? ""),
 					}),
 				}),

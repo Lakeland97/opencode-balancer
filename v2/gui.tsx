@@ -1,6 +1,13 @@
 /** @jsxImportSource solid-js */
 
-import { Command, Panel, type PanelTab, Plugin } from "@opencode/plugin/gui";
+import {
+	Command,
+	MenuItem,
+	Panel,
+	type PanelTab,
+	Plugin,
+	TitlebarItem,
+} from "@opencode/plugin/gui";
 import { createSignal, For, onMount, Show } from "solid-js";
 import { Balancer } from "./rpc";
 
@@ -172,17 +179,24 @@ export default Plugin.define({
 		};
 
 		const tab: PanelTab = {
-			closable: "compact",
 			fallback: true,
 			id: "accounts",
+			pinned: true,
 			get title() {
 				return ctx.t("title");
 			},
 		};
 
+		const openPanel = () => {
+			const session = ctx.sessions.current() ?? ctx.sessions.list()[0];
+			if (session) ctx.layout.open(`${ctx.id}:accounts`, session);
+		};
+
+		// Always listed: the tab is pinned, so it shows in the side strip without
+		// the user having opened it first.
 		ctx.add(Panel, {
 			id: "accounts",
-			list: (input) => (input.open.includes("accounts") ? [tab] : []),
+			list: () => [tab],
 			mobile: {
 				kind: "menu",
 				order: 40,
@@ -194,13 +208,42 @@ export default Plugin.define({
 			render: () => <View />,
 		});
 
-		ctx.add(Command, () => ({
+		// The + menu and the tab strip only exist inside the side region, so the
+		// always-visible titlebar pill is the entry point that cannot be missed.
+		ctx.add(TitlebarItem, () => ({
+			icon: "sliders" as const,
 			id: "open",
-			run: () => {
-				const session = ctx.sessions.current();
-				if (session) ctx.layout.open(`${ctx.id}:accounts`, session);
-			},
+			label: ctx.t("title"),
+			run: openPanel,
 			title: ctx.t("open"),
 		}));
+
+		// The + menu before the side panel tabs, so the panel is reachable even
+		// when the side region is empty.
+		ctx.add(MenuItem, () => ({
+			icon: "sliders" as const,
+			id: "open",
+			menu: "session.panel" as const,
+			order: 40,
+			run: openPanel,
+			title: ctx.t("title"),
+		}));
+
+		ctx.add(Command, () => ({
+			featured: true as const,
+			group: ctx.t("title"),
+			id: "open",
+			keywords: "balancer accounts providers failover panel",
+			run: openPanel,
+			title: ctx.t("open"),
+		}));
+
+		// `/balancer gui` runs on the server, which cannot touch the layout, so
+		// it emits this event instead and the window opens the panel here.
+		const stop = ctx.client
+			.rpc(Balancer)
+			.events.on("open", openPanel, { signal: ctx.signal });
+
+		return () => stop();
 	},
 });
