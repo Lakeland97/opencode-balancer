@@ -1,0 +1,481 @@
+# Model chains Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Let a `Balancer · …` row route to an ordered list of provider+model targets, editable from the panel, sized to the smallest context window in that list.
+
+**Architecture:** A stored chain (two new SQLite tables) replaces the automatic family routes for a row once edited. `loadCatalog` continues to build automatic families and appends stored-only rows, attaching the effective target list and the smallest limits. Routing walks the resolved targets, skipping disabled providers, unavailable models, and unhealthy accounts. The declared context is the smallest real context divided by `1 − buffer`, read from the user's compaction config.
+
+**Tech Stack:** TypeScript, Bun (`bun:sqlite`, `bun:test`), SolidJS GUI bundle via Vite, OpenCode 2 plugin API (`@opencode/plugin`).
+
+**Spec:** `v2/design/model-chains.md`
+
+## Global Constraints
+
+- Bun is not global: every command runs as `npx --yes bun …` from the repo root; tests run `cd v2 && npx --yes bun test`.
+- Gates before a commit: `npx --yes bun run lint`, `npx --yes bun run checktypes`, `npx --yes bun test` (in `v2/`), `npx --yes bun run build`, `npx --yes bun run build:gui`.
+- Commits use `--no-verify` (the husky hook needs a global bun) after those gates pass manually.
+- No agent, vendor, or AI attribution anywhere in code, commits, or docs.
+- `docs/` and `dist/` are gitignored; never commit them.
+- Row package never mixes wire formats: a target must share the row's `package`.
+- One target per provider per chain.
+- Declared context formula: percent buffer `p` → `real / (1 − p)`; integer buffer `b` → `real + b`; no buffer → `real`.
+- Display labels: `in use`, `active`, `limited`, `disabled`, `unavailable`.
+
+## Review Focus
+
+- Every provider in a chain disabled or accountless: the request must not silently go to `balancer.invalid`, it must surface as a clear failure.
+- A stored chain with zero targets (edited to empty, or a partial write): registration and routing must skip it without throwing.
+- Buffer config changed while the app runs: the declared limit must be recomputed on reload, and the plugin must not crash on malformed JSONC.
+- Provider disabled then re-enabled: targets must come back without the user re-adding them.
+- A stored row whose family no longer exists in any catalogue: the picker row must still register and route.
+
+---
+
+### Task 1: Chain store and migration
+
+**Files:**
+- Create: `v2/core/chains.ts`
+- Modify: `v2/core/schema.ts` (requiredColumns map around line 414, and the `apply` transaction near line 491)
+- Test: `v2/tests/chains.test.ts`
+
+**Interfaces:**
+- Consumes: `Database` from `bun:sqlite`, `now()` from `../core/time`.
+- Produces:
+  ```ts
+  export type ChainTarget = { providerID: string; modelID: string; baseURL: string };
+  export type StoredChain = { familyKey: string; label: string; package: string; targets: ChainTarget[] };
+  export function getStoredChain(db: Database, familyKey: string): StoredChain | undefined;
+  export function listStoredChains(db: Database): StoredChain[];
+  export function saveChain(db: Database, chain: { familyKey: string; label: string; package: string; targets: readonly ChainTarget[] }): void;
+  export function deleteChain(db: Database, familyKey: string): boolean;
+  export function moveTarget(db: Database, familyKey: string, providerID: string, direction: -1 | 1): boolean;
+  ```
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `v2/tests/chains.test.ts` following the `freshDb()` pattern in `v2/tests/balancer.test.ts`:
+
+```ts
+test("saving a chain replaces its targets atomically", () => { … saveChain twice, expect the second list only … });
+test("targets come back in stored order", () => { … expect target providerIDs [b, a] in that order … });
+test("moveTarget swaps neighbours and ignores the edges", () => { … });
+test("deleteChain removes the row and reports whether it existed", () => { … });
+test("a chain with no targets is not returned by listStoredChains", () => { … });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/chains.test.ts`
+Expected: FAIL — `Cannot find module "../core/chains"`.
+
+- [ ] **Step 3: Create the tables in `v2/core/schema.ts`**
+
+Add to `requiredColumns`:
+
+```ts
+model_chains: ["family_key", "label", "package", "updated_at"],
+model_chain_targets: ["family_key", "position", "provider_id", "model_id", "base_url"],
+```
+
+Inside the `apply` transaction, before `recreateAccounts(db)`, add a plain `CREATE TABLE IF NOT EXISTS` for both, matching the spec's SQL exactly. Keep the existing `hasMigration(db, 1) && schemaIsCurrent(db)` guard working by including the new tables in `requiredColumns`.
+
+- [ ] **Step 4: Implement `v2/core/chains.ts`**
+
+Reads join both tables and order by `position`. `saveChain` runs in `db.transaction`: delete the key's targets, upsert the `model_chains` row, insert targets with `position = index`. `moveTarget` reads the current order, swaps, and rewrites positions in one transaction.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/chains.test.ts`
+Expected: PASS.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add v2/core/chains.ts v2/core/schema.ts v2/tests/chains.test.ts
+git commit --no-verify -m "Add a stored model chain table"
+```
+
+---
+
+### Task 2: Buffer reading and window compensation
+
+**Files:**
+- Create: `v2/core/context.ts`
+- Create: `v2/server/compaction-config.ts`
+- Test: `v2/tests/context.test.ts`
+- Test: `v2/tests/compaction-config.test.ts`
+
+**Interfaces:**
+- Produces, from `v2/core/context.ts`:
+  ```ts
+  export type CompactionBuffer =
+    | { kind: "percent"; percent: number }
+    | { kind: "tokens"; tokens: number }
+    | { kind: "none" };
+  export function declaredContext(realContext: number, buffer: CompactionBuffer): number;
+  export function rowWindow(
+    targets: readonly { context?: number; output?: number }[],
+    buffer: CompactionBuffer,
+  ): { context: number; output: number } | undefined;
+  ```
+- Produces, from `v2/server/compaction-config.ts`, which imports the type from `../core/context`:
+  ```ts
+  export function parseBuffer(value: unknown): CompactionBuffer;
+  export function readCompactionBuffer(paths?: { env?: Record<string, string | undefined>; cwd?: string }): CompactionBuffer;
+  export function invalidateBufferCache(): void;
+  ```
+
+- [ ] **Step 1: Write the failing context tests**
+
+Create `v2/tests/context.test.ts`:
+
+```ts
+test("a percent buffer is compensated away", () => {
+  expect(declaredContext(200_000, { kind: "percent", percent: 0.75 })).toBe(800_000);
+});
+test("the smallest target wins", () => {
+  expect(rowWindow([{ context: 1_000_000 }, { context: 200_000 }], { kind: "none" })).toEqual({ context: 200_000, output: 0 });
+});
+test("output is the smallest output limit", () => {
+  expect(rowWindow([{ context: 200_000, output: 32_000 }, { context: 1_000_000, output: 384_000 }], { kind: "none" })).toEqual({ context: 200_000, output: 32_000 });
+});
+test("an integer buffer is added, not divided", () => {
+  expect(declaredContext(200_000, { kind: "tokens", tokens: 20_000 })).toBe(220_000);
+});
+test("targets without limits are ignored", () => {
+  expect(rowWindow([{}, { context: 200_000 }], { kind: "none" })).toEqual({ context: 200_000, output: 0 });
+  expect(rowWindow([{}], { kind: "none" })).toBeUndefined();
+});
+```
+
+- [ ] **Step 2: Run them to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/context.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 3: Implement `v2/core/context.ts`**
+
+`declaredContext` rounds up with `Math.ceil`, and clamps `percent` to below `1` so a `99.9%` buffer cannot divide by almost zero.
+
+- [ ] **Step 4: Run them to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/context.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing config tests**
+
+Create `v2/tests/compaction-config.test.ts`:
+
+```ts
+test("percent strings become fractions", () => expect(parseBuffer("75%")).toEqual({ kind: "percent", percent: 0.75 }));
+test("decimal percents are preserved", () => expect(parseBuffer("12.5%")).toEqual({ kind: "percent", percent: 0.125 }));
+test("integers are absolute token reservations", () => expect(parseBuffer(20000)).toEqual({ kind: "tokens", tokens: 20000 }));
+test("nonsense is treated as no buffer", () => { expect(parseBuffer("abc")).toEqual({ kind: "none" }); expect(parseBuffer(undefined)).toEqual({ kind: "none" }); });
+test("reads the first existing config and tolerates comments", () => { … temp jsonc with comments, trailing comma and `"buffer": "75%"` … expect percent 0.75 … });
+test("an unreadable file means no buffer", () => { … expect { kind: "none" } … });
+test("a rewritten file is re-read after its mtime changes", () => { … invalidateBufferCache() between writes … });
+```
+
+- [ ] **Step 6: Run them to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/compaction-config.test.ts`
+Expected: FAIL — module not found.
+
+- [ ] **Step 7: Implement `v2/server/compaction-config.ts`**
+
+Candidate paths in order: `env.OPENCODE_CONFIG`, `<cwd>/opencode.json`, `<cwd>/opencode.jsonc`, `$HOME/.config/opencode/opencode.json`, `$HOME/.config/opencode/opencode.jsonc`. Strip `//` and `/* */` comments and trailing commas before `JSON.parse`; read `compaction.buffer`. Cache keyed by resolved path plus `mtimeMs`. A malformed file is `{ kind: "none" }`, never a throw.
+
+- [ ] **Step 8: Run them to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/compaction-config.test.ts`
+Expected: PASS.
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add v2/core/context.ts v2/server/compaction-config.ts v2/tests/context.test.ts v2/tests/compaction-config.test.ts
+git commit --no-verify -m "Read the compaction buffer and compensate row windows"
+```
+
+---
+
+### Task 3: Resolve rows and register stored chains
+
+**Files:**
+- Modify: `v2/server/connectors.ts` (the `loadCatalog` family loop, the `ModelFamily` type, `registerBalancerProvider`)
+- Test: `v2/tests/connectors.test.ts` (new)
+
+**Interfaces:**
+- Consumes: `listStoredChains`, `ChainTarget` (Task 1); `rowWindow`, `declaredContext` (Task 2).
+- Produces, on `ModelFamily`:
+  ```ts
+  stored?: boolean;
+  targets: readonly FamilyRoute[];   // effective order: stored chain, else automatic routes
+  window?: { context: number; output: number };
+  ```
+  and `resolveChain(db, family): FamilyRoute[]` exported from `server/connectors.ts`.
+
+- [ ] **Step 1: Write the failing tests**
+
+Use a stub `ctx.model.list()` / `ctx.provider.list()` returning two providers with `limit` metadata, mirroring the shapes in `v2/tests/balancer.test.ts`:
+
+```ts
+test("a stored chain replaces the automatic route order", () => { … });
+test("a stored chain with no catalog family still yields a row", () => { … expect family named by the stored label … });
+test("row window is the smallest target context", () => { … });
+test("a stored chain with zero targets is ignored", () => { … });
+test("stored targets carry their own baseURL", () => { … });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/connectors.test.ts`
+Expected: FAIL — `resolveChain` not exported.
+
+- [ ] **Step 3: Implement resolution**
+
+In `loadCatalog`: keep building automatic groups, then for each stored chain override `targets` (mapping `ChainTarget` → `FamilyRoute` with the row `package`), or synthesize a family when the key is absent. Label/package come from the stored row. Build a `Map<"providerID:modelID", ModelRecord>` from the already-fetched `models.data` to fill each target's `context`/`output` and the synthetic source record. Compute `window` with `rowWindow`.
+
+In `registerBalancerProvider`: declare `limit: { context: declaredContext(window.context, readCompactionBuffer()), output: window.output }` when `window` exists, and `modelFamily(family.key)`-independent `id`/`modelID` stays `family.key`.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/connectors.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add v2/server/connectors.ts v2/tests/connectors.test.ts
+git commit --no-verify -m "Resolve rows from stored chains and size their windows"
+```
+
+---
+
+### Task 4: Route through the resolved chain
+
+**Files:**
+- Modify: `v2/server/routing.ts` (`chooseRoute`, `hasAlternativeRoute`)
+- Modify: `v2/server/hooks.ts` (`familyFor` must find stored-only rows; pass the compaction-auto flag)
+- Test: `v2/tests/routing.test.ts` (new)
+
+**Interfaces:**
+- Consumes: `resolveChain`, `ModelFamily` (Task 3); `isProviderEnabled` (new, in `server/routing.ts`).
+- Produces: `chooseRoute(db, family, exclude?)` unchanged in name; it now walks `family.targets` and skips a target when its provider is disabled, its model is missing from the row, or no healthy account exists.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("the second target serves when the first provider is limited", () => { … });
+test("a disabled provider is skipped in a stored chain", () => { … });
+test("a disabled provider is skipped in an automatic chain", () => { … });
+test("an unavailable target does not break the row", () => { … });
+test("excluded providers are not retried", () => { … });
+test("a disabled provider is skipped and comes back when re-enabled", () => { … });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/routing.test.ts`
+Expected: FAIL — disabled providers still returned.
+
+- [ ] **Step 3: Implement the walk**
+
+`isProviderEnabled(db, providerID)` reads the `provider_priority` row (`enabled !== 0` when present, otherwise true); implement it in `server/routing.ts` via `listProviderPriority(db)` to avoid a second query shape. `chooseRoute` walks `family.targets` instead of `sortRoutes(family.routes)`, skipping disabled providers, missing models, and providers without a healthy account. In `hooks.ts`, `familyFor` resolves from `loadCatalog` (which now includes stored rows), so it must not early-return when `family.routes` is empty but `family.targets` is not.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/routing.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Write the failing overflow guard test**
+
+When `compaction.auto` is false nothing stops a conversation outgrowing a target, so routing must skip a target below the request's estimated size. Add to `v2/tests/routing.test.ts`:
+
+```ts
+test("with auto compaction off, a target smaller than the conversation is skipped", () => {
+  // build a request body whose JSON length / 4 exceeds the first target's context
+  // expect chooseRouteForRequest to return the larger second target
+});
+test("the same request ignores the guard when auto compaction is on", () => { … });
+```
+
+- [ ] **Step 6: Implement the guard**
+
+Add to `v2/server/routing.ts`:
+
+```ts
+export function estimateTokens(body: string): number;   // Math.ceil(body.length / 4)
+export function chooseRouteForRequest(
+  db: Database,
+  family: ModelFamily,
+  body: string | undefined,
+  options: { guardOverflow: boolean; exclude?: ReadonlySet<string> },
+): ChosenRoute | undefined;
+```
+
+`hook.ts`'s `http.request` routed branch calls it with `guardOverflow = !getCompactionAutoEnabled()`. Add `getCompactionAutoEnabled()` to `server/compaction-config.ts` reading `compaction.auto`, defaulting to `true`.
+
+- [ ] **Step 7: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/routing.test.ts`
+Expected: PASS.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add v2/server/routing.ts v2/server/hooks.ts v2/tests/routing.test.ts
+git commit --no-verify -m "Route through resolved chain targets"
+```
+
+---
+
+### Task 5: Commands
+
+**Files:**
+- Modify: `v2/server/commands.ts`
+- Test: `v2/tests/balancer.test.ts` (extend)
+
+**Interfaces:**
+- Consumes: chain store (Task 1), `loadCatalog` (Task 3).
+- Produces: `/balancer chain <model> [add|remove|up|down|reset] …`; the `model` and `equivalents` branches are deleted.
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("chain lists targets in order with markers", () => { … });
+test("chain add appends and refuses a duplicate provider", () => { … });
+test("chain remove drops one target and refuses the last", () => { … });
+test("chain up moves a target and snapshots the automatic chain", () => { … });
+test("chain reset deletes the stored chain", () => { … });
+test("the model and equivalents commands are gone", () => { … expect "Unknown command" … });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/balancer.test.ts`
+Expected: FAIL — `Unknown command: chain`.
+
+- [ ] **Step 3: Implement**
+
+`chain` resolves the row through `loadCatalog` (by key or label, via `matchModel`) and implements the subcommands over `v2/core/chains.ts`. `add` validates: provider has an account, model exists in that provider's routable models, package matches, provider not already present. Update the help text: replace the `model`/`equivalents` lines with the `chain` lines.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/balancer.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add v2/server/commands.ts v2/tests/balancer.test.ts
+git commit --no-verify -m "Edit model chains from the command surface"
+```
+
+---
+
+### Task 6: RPC
+
+**Files:**
+- Modify: `v2/rpc.ts`, `v2/server/rpc.ts`
+- Test: `v2/tests/rpc.test.ts` (new)
+
+**Interfaces:**
+- Produces:
+  - `chains` → `{ rows: [{ key, label, package, stored, context, declaredContext, targets: [{ providerID, modelID, state }] }] }`
+  - `chainAdd` `{ key, providerID, modelID }`, `chainRemove` `{ key, providerID }`, `chainMove` `{ key, providerID, direction }`, `chainReset` `{ key }` — all → `result`
+  - `chainModels` `{ providerID }` → `{ models: [{ modelID, name }] }`
+  - `priority` entries gain `name: string` and `enabled: boolean`
+  - `setModel` removed
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+test("chains reports stored order and the declared window", () => { … });
+test("chainAdd rejects a foreign package", () => { … expect ok false … });
+test("chainMove rejects an unknown row", () => { … });
+test("priority carries provider names", () => { … });
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `cd v2 && npx --yes bun test tests/rpc.test.ts`
+Expected: FAIL — unknown method.
+
+- [ ] **Step 3: Implement contract and handlers**
+
+Add the schemas in `v2/rpc.ts`, handlers in `v2/server/rpc.ts`; every mutation calls `invalidateCatalog()` and `invalidateBufferCache()` where the buffer is read.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `cd v2 && npx --yes bun test tests/rpc.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add v2/rpc.ts v2/server/rpc.ts v2/tests/rpc.test.ts
+git commit --no-verify -m "Expose chain editing over RPC"
+```
+
+---
+
+### Task 7: Panel editor
+
+**Files:**
+- Modify: `v2/gui.tsx`
+- Modify: `v2/README.md` (chain usage)
+
+**Interfaces:**
+- Consumes: `chains`, `chainAdd`, `chainRemove`, `chainMove`, `chainReset`, `chainModels`, `priority` (Task 6).
+
+- [ ] **Step 1: Implement the models section**
+
+Below the account rows, `<For each={rows()}>` renders a label line, one line per target with `↑ ↓ ×`, the `window 200k · declares 800k` line, `+ add target`, and `reset`. `+ add target` reveals two `<select>`s populated from `chainModels`, filtered to providers not already in the row.
+
+- [ ] **Step 2: Implement the providers section**
+
+A compact list from `priority()` with `↑ ↓` and an enabled checkbox calling the existing `move` and `setEnabled` RPCs.
+
+- [ ] **Step 3: Verify it builds and the panel serves the new strings**
+
+Run: `npx --yes bun run build:gui && npx --yes bun run checktypes`
+Expected: build writes `v2/dist/gui-experimental.cjs`; then confirm the served code contains `add target` and `window`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add v2/gui.tsx v2/README.md
+git commit --no-verify -m "Edit chains and provider order from the panel"
+```
+
+---
+
+### Task 8: Docs and end-to-end check
+
+**Files:**
+- Modify: `v2/README.md`, `v2/design/model-chains.md` (status line)
+
+- [ ] **Step 1: Update README**
+
+Document chains, the window rule with the 200k/800k example, the removed commands, and that the buffer is read from config on reload.
+
+- [ ] **Step 2: Full gate**
+
+```bash
+npx --yes bun run lint && npx --yes bun run checktypes && (cd v2 && npx --yes bun test) && npx --yes bun run build && npx --yes bun run build:gui
+```
+
+Expected: all pass; 40+ tests.
+
+- [ ] **Step 3: Live check**
+
+Register the row, add a target by hand, confirm the picker still lists it, and confirm a prompt through `balancer/<key>` returns a completion. Record the result in the commit message.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add v2/README.md v2/design/model-chains.md
+git commit --no-verify -m "Document model chains"
+```
