@@ -107,6 +107,44 @@ describe("account usage", () => {
 });
 
 describe("account markers", () => {
+	test("a park outlives its window until the account is tried again", async () => {
+		const db = freshDb();
+		// A zero window expires immediately: the marker must still read as
+		// limited until routing comes back around to it.
+		markRateLimited(db, "p1", "a", 0, "HTTP 429 Too Many Requests");
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.list({})) as {
+			accounts: {
+				alias: string;
+				limited: boolean;
+				limitedReason: string;
+				providerID: string;
+			}[];
+		};
+		const account = listed.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "a",
+		);
+		expect(account?.limited).toBe(true);
+		expect(account?.limitedReason).toBe("HTTP 429 Too Many Requests");
+
+		// Being tried is what clears it, not the clock.
+		markAccountUsed(db, "p1", "a");
+		const after = (await rpc.list({})) as {
+			accounts: {
+				alias: string;
+				limited: boolean;
+				limitedReason: string;
+				providerID: string;
+			}[];
+		};
+		const cleared = after.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "a",
+		);
+		expect(cleared?.limited).toBe(false);
+		expect(cleared?.limitedReason).toBe("");
+	});
+
 	test("only the most recently used account is in use", async () => {
 		const db = freshDb();
 		markAccountUsed(db, "p1", "b", 5_000);

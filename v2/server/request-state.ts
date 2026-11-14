@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { getAccount } from "../core/accounts";
+import { getAccount, setLimitedReason } from "../core/accounts";
 import { now } from "../core/time";
 
 /**
@@ -61,10 +61,12 @@ export function markRateLimited(
 	providerID: string,
 	alias: string,
 	durationMs = 60_000,
+	reason?: string,
 ) {
 	const account = getAccount(db, providerID, alias);
 	if (!account) return;
 
+	if (reason) setLimitedReason(db, providerID, alias, reason);
 	const timestamp = now();
 	if (account.rateLimitedUntil && account.rateLimitedUntil > timestamp) return;
 

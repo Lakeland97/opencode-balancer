@@ -96,8 +96,22 @@ checkboxes and `↑ ↓` ordering on the header line, with its accounts — and 
 actions — nested underneath. A row's ceiling can be set in tokens per row and per target; each is
 described under Context windows.
 
+Routing is **sticky** per session: once a target answers, later requests stay on it while it is
+healthy. A failure moves forward to a provider this session has not tried since its last answer,
+rather than restarting at the top of the chain and parking every provider on the way down. When
+everything has been tried, the chain wraps back to the head.
+
+`limited` therefore means **failed, and not yet tried again** — it is cleared by the next routing
+attempt, not by a clock. Hovering the marker shows what the endpoint actually reported: the HTTP
+status, or the host's typed error when it raised one.
+
 The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
-`models`.
+`models`, `log`.
+
+A `log` at the bottom records what the balancer actually did during this run: which model went to
+which provider and account, every parking with its reason, and each config change. It is folded away
+by default, and is refreshed every two seconds together with the `in use` marker, which tracks the
+account the router is pointed at right now rather than the last one that answered.
 
 The panel lists only rows that route between providers, or that you built by hand. Rows are grouped
 under their brand where a brand has more than one, and every row, group and the whole section can be

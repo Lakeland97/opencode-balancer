@@ -53,6 +53,15 @@ const chainRow = object(
 		"limit",
 	],
 );
+const logEntry = object(
+	{
+		at: num,
+		/** route, failover, config or error. */
+		kind: str,
+		text: str,
+	},
+	["at", "kind", "text"],
+);
 const account = object(
 	{
 		active: bool,
@@ -62,6 +71,8 @@ const account = object(
 		inUse: bool,
 		lastUsedAt: num,
 		limited: bool,
+		/** What the endpoint said when it parked the account, empty when fine. */
+		limitedReason: str,
 		providerID: str,
 	},
 	["providerID", "alias", "active", "disabled", "limited", "failures"],
@@ -139,10 +150,17 @@ export const balancerDefinition = {
 			input: empty,
 			output: object({ rows: { items: chainRow, type: "array" } }, ["rows"]),
 		},
+		clearLog: { input: empty, output: result },
 		list: {
 			input: object({ providerID: str }),
 			output: object({ accounts: { items: account, type: "array" } }, [
 				"accounts",
+			]),
+		},
+		log: {
+			input: empty,
+			output: object({ entries: { items: logEntry, type: "array" } }, [
+				"entries",
 			]),
 		},
 		move: {

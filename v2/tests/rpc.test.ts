@@ -336,6 +336,25 @@ describe("chain rpc", () => {
 	});
 });
 
+describe("log rpc", () => {
+	test("log reports what the balancer did and can be cleared", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		await rpc.setBalancing({ enabled: false });
+		const listed = (await rpc.log({})) as {
+			entries: { kind: string; text: string }[];
+		};
+		expect(
+			listed.entries.some((entry) => entry.text.includes("balancing off")),
+		).toBe(true);
+
+		await rpc.clearLog({});
+		const cleared = (await rpc.log({})) as { entries: unknown[] };
+		expect(cleared.entries).toEqual([]);
+	});
+});
+
 describe("limit rpc", () => {
 	test("setRowLimit is reported by chains and an empty value clears it", async () => {
 		const db = freshDb();

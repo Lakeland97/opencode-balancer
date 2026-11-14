@@ -11,9 +11,11 @@ import {
 	Plugin,
 	TitlebarItem,
 } from "@opencode/plugin/gui";
-import { createSignal, For, onMount, Show } from "solid-js";
+import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import { groupByBrand } from "./core/models";
 import { Balancer } from "./rpc";
+
+type LogEntry = { at: number; kind: string; text: string };
 
 type Account = {
 	providerID: string;
@@ -24,6 +26,8 @@ type Account = {
 	inUse: boolean;
 	disabled: boolean;
 	limited: boolean;
+	/** What the endpoint reported when it parked this account. */
+	limitedReason?: string;
 	failures: number;
 };
 
@@ -107,6 +111,7 @@ export default Plugin.define({
 			alias: "alias",
 			apply: "apply",
 			balancing: "balancing",
+			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
 			declares: "declares",
@@ -117,6 +122,8 @@ export default Plugin.define({
 			inUse: "in use",
 			limit: "limit",
 			limited: "limited",
+			log: "log",
+			logEmpty: "nothing yet",
 			models: "models",
 			newChain: "new chain",
 			open: "Open Balancer",
@@ -147,6 +154,9 @@ export default Plugin.define({
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
+		// What the balancer has actually done this run, newest last.
+		const [logEntries, setLogEntries] = createSignal<LogEntry[]>([]);
+		const [logOpen, setLogOpen] = createSignal(false);
 		const [creating, setCreating] = createSignal(false);
 		// Collapses the whole models section, not just the rows. Starts folded,
 		// and rows and groups do too, so the panel opens compact.
@@ -160,15 +170,17 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order, settings] = await Promise.all([
+				const [status, list, rows, order, settings, log] = await Promise.all([
 					rpc.status({}),
 					rpc.list({}),
 					rpc.chains({}),
 					rpc.priority({}),
 					rpc.buffer({}),
+					rpc.log({}),
 				]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
+				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
 				setBuffer((settings as BufferState).value);
@@ -176,6 +188,20 @@ export default Plugin.define({
 				setBufferDraft(bareShare((settings as BufferState).value));
 			} catch (error) {
 				setMessage(describe(error));
+			}
+		};
+
+		// "in use" is the account the router is pointed at right now, and the log
+		// grows as requests move and fail over. Only those two are re-read, so a
+		// poll cannot overwrite a field being typed into.
+		const refreshInUse = async () => {
+			try {
+				const rpc = ctx.client.rpc(Balancer);
+				const [list, log] = await Promise.all([rpc.list({}), rpc.log({})]);
+				setAccounts([...(list as Listed).accounts]);
+				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
+			} catch {
+				// A poll that fails leaves the last good answer on screen.
 			}
 		};
 
@@ -305,7 +331,11 @@ export default Plugin.define({
 		} as const;
 
 		const View = () => {
-			onMount(() => void refresh());
+			onMount(() => {
+				void refresh();
+				const timer = setInterval(() => void refreshInUse(), 2000);
+				onCleanup(() => clearInterval(timer));
+			});
 			return (
 				<div
 					style={{
@@ -482,10 +512,14 @@ export default Plugin.define({
 													: account.active
 														? ` · ${ctx.t("active")}`
 														: ""}
-												{account.limited ? ` · ${ctx.t("limited")}` : ""}
+												<Show when={account.limited}>
+													<span title={account.limitedReason || undefined}>
+														{` · ${ctx.t("limited")}`}
+													</span>
+												</Show>
 												{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
 											</span>
-											<Show when={!account.inUse}>
+											<Show when={!account.active}>
 												<button
 													onClick={() =>
 														void run(() =>
@@ -923,6 +957,52 @@ export default Plugin.define({
 								</div>
 							)}
 						</For>
+					</Show>
+
+					<div style={divider} />
+					<div style={{ ...row, "align-items": "center" }}>
+						<button onClick={() => setLogOpen(!logOpen())}>
+							{logOpen() ? "▾" : "▸"} {ctx.t("log")}
+						</button>
+						<span style={{ opacity: 0.5 }}>{logEntries().length}</span>
+						<Show when={logOpen() && logEntries().length > 0}>
+							<button onClick={() => void run(() => rpc().clearLog({}))}>
+								{ctx.t("clear")}
+							</button>
+						</Show>
+					</div>
+					<Show when={logOpen()}>
+						<div
+							style={{
+								"border-top": "1px solid currentColor",
+								"font-family": "ui-monospace, monospace",
+								"font-size": "11px",
+								"max-height": "180px",
+								"min-height": 0,
+								"overflow-y": "auto",
+								"padding-top": "4px",
+								"white-space": "pre-wrap",
+							}}
+						>
+							<For
+								each={logEntries()}
+								fallback={
+									<span style={{ opacity: 0.5 }}>{ctx.t("logEmpty")}</span>
+								}
+							>
+								{(entry) => (
+									<div
+										style={{ opacity: entry.kind === "route" ? 1 : 0.75 }}
+										title={entry.kind}
+									>
+										<span style={{ opacity: 0.5 }}>
+											{new Date(entry.at).toLocaleTimeString()}{" "}
+										</span>
+										{entry.text}
+									</div>
+								)}
+							</For>
+						</div>
 					</Show>
 				</div>
 			);

@@ -19,7 +19,12 @@ const authTypes = ["api", "oauth", "wellknown"] as const;
 
 export type UsedAccount = { providerID: string; alias: string; at: number };
 
-/** Record that an account served a request, which is what "in use" reads. */
+/**
+ * Record that an account is the one the router is pointed at now, which is
+ * what "in use" reads. Being tried also clears the park left by its last
+ * failure: "limited" then means "failed and not yet retried", and lasts until
+ * the chain wraps back around to it, not until a clock runs out.
+ */
 export function markAccountUsed(
 	db: Database,
 	providerID: string,
@@ -27,8 +32,54 @@ export function markAccountUsed(
 	at: number = now(),
 ) {
 	db.query<unknown, [number, string, string]>(
-		"UPDATE accounts SET last_used_at = ? WHERE provider_id = ? AND alias = ?",
+		"UPDATE accounts SET last_used_at = ?, rate_limited_until = NULL WHERE provider_id = ? AND alias = ?",
 	).run(at, providerID, alias);
+	clearLimitedReason(db, providerID, alias);
+}
+
+/** Where the reason an account was parked is kept, next to the other settings. */
+function limitedReasonKey(providerID: string, alias: string) {
+	return `limited_reason:${providerID}:${alias}`;
+}
+
+/**
+ * Remember what the endpoint actually said when it parked the account, so the
+ * panel can answer "limited because of what?" on hover instead of asserting a
+ * state with no evidence beside it.
+ */
+export function setLimitedReason(
+	db: Database,
+	providerID: string,
+	alias: string,
+	reason: string,
+) {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(limitedReasonKey(providerID, alias), reason.slice(0, 300));
+}
+
+export function readLimitedReason(
+	db: Database,
+	providerID: string,
+	alias: string,
+): string | undefined {
+	const row = db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(limitedReasonKey(providerID, alias));
+	return row?.value;
+}
+
+export function clearLimitedReason(
+	db: Database,
+	providerID: string,
+	alias: string,
+) {
+	db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(
+		limitedReasonKey(providerID, alias),
+	);
 }
 
 /**

@@ -4,6 +4,7 @@ import {
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
+	readLimitedReason,
 	removeAccount,
 	renameAccount,
 	saveAccount,
@@ -54,6 +55,7 @@ import {
 	resolveChain,
 } from "./connectors";
 import { readActiveCredential } from "./credentials";
+import { clearLog, readLog, recordLog } from "./log";
 import { chooseRoute, isProviderEnabled } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
@@ -258,6 +260,11 @@ export async function registerBalancerRpc({
 			};
 		},
 
+		clearLog: async () => {
+			clearLog();
+			return { message: "Cleared the log.", ok: true };
+		},
+
 		list: async (input) => {
 			const { providerID } = (input ?? {}) as { providerID?: string };
 			const accounts = providerID
@@ -269,9 +276,10 @@ export async function registerBalancerRpc({
 			const used = mostRecentlyUsed(db);
 			return {
 				accounts: accounts.map((account) => {
-					const limited = Boolean(
-						account.rateLimitedUntil && account.rateLimitedUntil > now(),
-					);
+					// A park is cleared by the next attempt, so any park at all
+					// reads as limited: the account failed and has not been
+					// tried since.
+					const limited = account.rateLimitedUntil != null;
 					return {
 						active:
 							!account.disabled &&
@@ -286,11 +294,16 @@ export async function registerBalancerRpc({
 							used.alias === account.alias,
 						lastUsedAt: account.lastUsedAt ?? 0,
 						limited,
+						limitedReason: limited
+							? (readLimitedReason(db, account.providerID, account.alias) ?? "")
+							: "",
 						providerID: account.providerID,
 					};
 				}),
 			};
 		},
+
+		log: async () => ({ entries: readLog() }),
 
 		move: async (input) => {
 			const { providerID, direction } = input as {
@@ -358,6 +371,7 @@ export async function registerBalancerRpc({
 		setBalancing: async (input) => {
 			const { enabled } = input as { enabled: boolean };
 			setBalancingEnabled(db, enabled);
+			recordLog("config", `automatic balancing ${enabled ? "on" : "off"}`);
 			return {
 				message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
 				ok: true,
@@ -381,6 +395,10 @@ export async function registerBalancerRpc({
 					ok: false,
 				};
 			}
+			recordLog(
+				"config",
+				`context limit ${usableShare(readBufferAt(configPath))}`,
+			);
 			// The value is saved whatever the host can do about it: a host that
 			// cannot re-read its models still has the new buffer on disk.
 			try {
@@ -412,6 +430,10 @@ export async function registerBalancerRpc({
 				enabled: boolean;
 			};
 			setFreeOnly(db, providerID, enabled);
+			recordLog(
+				"config",
+				`${providerID} ${enabled ? "free models only" : "paid models too"}`,
+			);
 			return {
 				message: `${providerID} uses ${enabled ? "free models only" : "paid models too"}.`,
 				ok: true,
@@ -423,6 +445,12 @@ export async function registerBalancerRpc({
 			const parsed = parseLimit(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
 			setRowLimit(db, key, parsed.tokens);
+			recordLog(
+				"config",
+				parsed.tokens === undefined
+					? `${key} limit cleared`
+					: `${key} limited to ${parsed.tokens} tokens`,
+			);
 			// The catalog is cached, and a new limit must reach the next read of
 			// it: the panel redraws from `chains` and routing sizes the row.
 			invalidateCatalog();
@@ -452,6 +480,12 @@ export async function registerBalancerRpc({
 			const parsed = parseLimit(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
 			setTargetLimit(db, key, providerID, parsed.tokens);
+			recordLog(
+				"config",
+				parsed.tokens === undefined
+					? `${key} ${providerID} limit cleared`
+					: `${key} ${providerID} limited to ${parsed.tokens} tokens`,
+			);
 			invalidateCatalog();
 			// A per-target limit moves that target's window, so the host has to
 			// rebuild its models just as for a row limit.
@@ -474,10 +508,8 @@ export async function registerBalancerRpc({
 			return {
 				accounts: accounts.length,
 				balancing: getBalancingEnabled(db),
-				limited: accounts.filter(
-					(account) =>
-						account.rateLimitedUntil && account.rateLimitedUntil > now(),
-				).length,
+				limited: accounts.filter((account) => account.rateLimitedUntil != null)
+					.length,
 				providers: new Set(accounts.map((account) => account.providerID)).size,
 			};
 		},
@@ -486,6 +518,7 @@ export async function registerBalancerRpc({
 			const { providerID, alias } = input as Pair;
 			try {
 				const account = setActiveAccount(db, providerID, alias);
+				recordLog("config", `active account ${providerID}/${account.alias}`);
 				return {
 					message: `Active account is ${providerID}/${account.alias}.`,
 					ok: true,
