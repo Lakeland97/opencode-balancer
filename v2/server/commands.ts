@@ -9,6 +9,7 @@ import {
 	setActiveAccount,
 	setSelectedModel,
 } from "../core/accounts";
+import { matchModel } from "../core/models";
 import {
 	getBalancingEnabled,
 	listProviderPriority,
@@ -19,6 +20,7 @@ import {
 } from "../core/priority";
 import { now } from "../core/time";
 import type { Account } from "../core/types";
+import { invalidateCatalog, loadCatalog } from "./connectors";
 import { readActiveCredential } from "./credentials";
 
 function parseArgs(input: string) {
@@ -61,6 +63,42 @@ function accountList(db: Database, providerID?: string) {
 	return accounts.map((account) => accountLine(db, account)).join("\n");
 }
 
+type ResolvedModel = { modelID: string; name?: string } | { error: string };
+
+/**
+ * Turns what the picker shows into the provider's own model id. Connectors name
+ * the same model differently (`DeepSeek V4.1 Flash 1017` vs
+ * `deepseek/deepseek-v4.1-flash`), so an exact id is only the strongest match,
+ * not the only one.
+ */
+async function resolveModel(
+	ctx: Context,
+	providerID: string,
+	query: string,
+): Promise<ResolvedModel> {
+	const list = await ctx.model.list();
+	const candidates = list.data
+		.filter((model) => model.providerID === providerID)
+		.map((model) => ({ modelID: model.modelID, name: model.name }));
+	if (candidates.length === 0) {
+		return { error: `No models are available for ${providerID}.` };
+	}
+	const match = matchModel(query, candidates);
+	if (!match) {
+		return { error: `No ${providerID} model matches "${query}".` };
+	}
+	if (match.score < 4 && match.ties.length > 1) {
+		return {
+			error: [
+				`"${query}" matches ${match.ties.length} ${providerID} models:`,
+				...match.ties.map((model) => `  ${model.modelID}  (${model.name})`),
+				"Use the exact id.",
+			].join("\n"),
+		};
+	}
+	return match.model;
+}
+
 export async function runCommand({
 	ctx,
 	db,
@@ -91,7 +129,8 @@ export async function runCommand({
 			"  rename <provider> <alias> <new>",
 			"  on | off                     Toggle automatic failover",
 			"  priority                     Provider priority and chosen models",
-			"  model <provider> <modelID>   Model used when that provider is selected",
+			"  model <provider|all> <name>  Like-for-like model per connector; accepts the picker's name",
+			"  equivalents [name]           Which model each connector uses for the same family",
 			"  enable <provider> | disable <provider>",
 			"  up <provider> | down <provider>",
 		].join("\n");
@@ -120,6 +159,7 @@ export async function runCommand({
 				return `No usable active credential for ${providerID}. Connect the provider in opencode first.`;
 			}
 			const account = saveAccount(db, providerID, alias, auth);
+			invalidateCatalog();
 			return `Saved ${account.providerID}/${account.alias}.`;
 		} catch (error) {
 			return error instanceof Error ? error.message : "Could not save account.";
@@ -150,6 +190,7 @@ export async function runCommand({
 		if (!providerID || !alias)
 			return "Usage: /balancer remove <provider> <alias>";
 		const removed = removeAccount(db, providerID, alias);
+		invalidateCatalog();
 		return removed
 			? `Removed ${providerID}/${alias}.`
 			: `No account ${providerID}/${alias}.`;
@@ -190,14 +231,73 @@ export async function runCommand({
 			.join("\n");
 	}
 
-	if (action === "model") {
-		const [providerID, modelID] = args;
-		if (!providerID || !modelID) {
-			return "Usage: /balancer model <provider> <modelID>";
+	if (action === "equivalents" || action === "equivalent") {
+		const catalog = await loadCatalog(ctx, db);
+		if (args.length === 0) {
+			if (catalog.families.length === 0) {
+				return "No connector models yet. Add an account for a provider first.";
+			}
+			return [
+				"Model families shared by your connectors:",
+				...catalog.families.map(
+					(family) => `  ${family.key}  (${family.name})`,
+				),
+			].join("\n");
 		}
-		setProviderModel(db, providerID, modelID);
-		setSelectedModel(db, providerID, modelID);
-		return `Model for ${providerID} set to ${modelID}.`;
+		const query = args.join(" ");
+		const match = matchModel(
+			query,
+			catalog.families.map((family) => ({
+				modelID: family.key,
+				name: family.name,
+			})),
+		);
+		if (!match) return `No connector model matches "${query}".`;
+		const family = catalog.families.find(
+			(entry) => entry.key === match.model.modelID,
+		);
+		if (!family) return `No connector model matches "${query}".`;
+		return [
+			`${family.name} (${family.key})`,
+			...family.routes.map(
+				(route) => `  ${route.providerID.padEnd(28)} ${route.modelID}`,
+			),
+		].join("\n");
+	}
+
+	if (action === "model") {
+		const [providerID, ...rest] = args;
+		if (!providerID || rest.length === 0) {
+			return "Usage: /balancer model <provider|all> <model name or id>";
+		}
+		const query = rest.join(" ");
+
+		if (providerID === "all") {
+			const providers = [
+				...new Set(listAccounts(db).map((account) => account.providerID)),
+			];
+			if (providers.length === 0) return "No accounts saved.";
+			const lines: string[] = [];
+			for (const id of providers) {
+				const resolved = await resolveModel(ctx, id, query);
+				if ("error" in resolved) {
+					lines.push(`  ${id.padEnd(24)} no match`);
+					continue;
+				}
+				setProviderModel(db, id, resolved.modelID);
+				setSelectedModel(db, id, resolved.modelID);
+				lines.push(`  ${id.padEnd(24)} ${resolved.modelID}`);
+			}
+			invalidateCatalog();
+			return ["Like-for-like model set per connector:", ...lines].join("\n");
+		}
+
+		const resolved = await resolveModel(ctx, providerID, query);
+		if ("error" in resolved) return resolved.error;
+		setProviderModel(db, providerID, resolved.modelID);
+		setSelectedModel(db, providerID, resolved.modelID);
+		invalidateCatalog();
+		return `Model for ${providerID} set to ${resolved.modelID}.`;
 	}
 
 	if (action === "enable" || action === "disable") {

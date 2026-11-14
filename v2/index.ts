@@ -3,6 +3,7 @@ import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
+import { registerBalancerProvider } from "./server/connectors";
 import { registerHooks } from "./server/hooks";
 import { registerBalancerRpc } from "./server/rpc";
 
@@ -40,6 +41,7 @@ export default Plugin.define({
 
 		await registerHooks({ ctx, db });
 		const rpc = await registerBalancerRpc({ ctx, db });
+		await registerBalancerProvider({ ctx, db });
 		const openGui = async () => {
 			await rpc.events.emit("open", {});
 		};

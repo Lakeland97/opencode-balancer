@@ -176,7 +176,13 @@ describe("commands", () => {
 		const db = freshDb();
 		saveAccount(db, "openai", "a", apiAuth("k1"));
 		await runCommand({
-			ctx: {} as never,
+			ctx: {
+				model: {
+					list: async () => ({
+						data: [{ modelID: "gpt-5", name: "GPT-5", providerID: "openai" }],
+					}),
+				},
+			} as never,
 			db,
 			raw: "model openai gpt-5",
 		});
@@ -184,6 +190,29 @@ describe("commands", () => {
 			(row) => row.providerID === "openai",
 		);
 		expect(entry?.modelID).toBe("gpt-5");
+	});
+
+	test("model accepts the label the picker shows", async () => {
+		const db = freshDb();
+		saveAccount(db, "opencode-go", "a", apiAuth("k1"));
+		const reply = await runCommand({
+			ctx: {
+				model: {
+					list: async () => ({
+						data: [
+							{
+								modelID: "deepseek-v4.1-flash",
+								name: "DeepSeek V4.1 Flash 1017",
+								providerID: "opencode-go",
+							},
+						],
+					}),
+				},
+			} as never,
+			db,
+			raw: "model opencode-go DeepSeek V4.1 Flash 1017",
+		});
+		expect(reply).toContain("deepseek-v4.1-flash");
 	});
 
 	test("bare command reports state instead of help", async () => {

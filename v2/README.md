@@ -26,14 +26,33 @@ re-implements the integration on the V2 hook surface.
 | Credential capture | V2 `integration.connection.resolve` instead of `auth.json` |
 | Credential injection | `session.hook("http.request")` instead of a global `fetch` patch |
 | Rate-limit detection | `session.hook("http.response")` |
-| Failover | `session.hook("retry")` forces a retry; the next request selects another account |
+| Failover | `session.hook("retry")` forces a retry; the next request selects another account or connector |
 | Control surface | `/balancer` command + `balancer_command` tool, replacing the terminal dashboard |
+
+## The Balancer provider
+
+A session's model is readonly in V2, so the plugin cannot switch *providers* on an existing
+session. It registers its own provider instead:
+
+1. `balancer` exposes one virtual model per model family — `Balancer · DeepSeek V4.1 Flash` —
+   collapsing the per-provider spellings (`deepseek/deepseek-v4.1-flash` and
+   `deepseek-v4.1-flash`) into a single picker row.
+2. Picking it pins the session to `balancer`, permanently.
+3. On `model.request` the plugin chooses the connector in provider-priority order, then rewrites
+   the API root, the credential, and the body's `model` field to that connector's own id.
+4. `http.response` parks a limited connector; `retry` moves the call to the next like-for-like
+   connector, so failover crosses providers.
+
+Families never mix wire formats: a model offered as `anthropic-compatible` gets its own row,
+because routing only rewrites the `model` field and the request shape stays whatever the package
+built.
 
 ## Deliberate limits
 
-- **Account-level failover only.** `SessionContext.model` is readonly in V2, so the plugin cannot
-  switch *providers* mid-request. Multiple accounts for the same provider work; the provider
-  priority matrix only affects which model a provider is configured with.
+- **One model at a time.** The session is pinned to a family; the connector behind it changes,
+  the model does not.
+- **Pre-stream failover only.** A retry can hop connectors until the first token arrives; a
+  stream already in progress cannot move.
 - **No TUI.** OpenCode Desktop renders only plugins that export `./gui-experimental`, which
   upstream does not provide.
 
@@ -49,7 +68,8 @@ re-implements the integration on the V2 hook surface.
 /balancer rename <provider> <alias> <new>
 /balancer on | off                    toggle automatic failover
 /balancer priority
-/balancer model <provider> <modelID>
+/balancer model <provider|all> <name>   like-for-like model; accepts the picker's label
+/balancer equivalents [name]            which model each connector uses for a family
 /balancer enable <provider> | disable <provider>
 /balancer up <provider> | down <provider>
 ```

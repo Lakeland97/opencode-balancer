@@ -74,8 +74,11 @@ export default Plugin.define({
 		const row = {
 			"align-items": "center",
 			display: "flex",
+			"flex-wrap": "wrap",
 			gap: "6px",
 		} as const;
+		// Narrow panels must wrap instead of pushing controls off the edge.
+		const field = { flex: "1 1 120px", "min-width": 0 } as const;
 
 		const View = () => {
 			onMount(() => void refresh());
@@ -117,7 +120,13 @@ export default Plugin.define({
 					<For each={accounts()}>
 						{(account) => (
 							<div style={row}>
-								<span style={{ flex: 1 }}>
+								<span
+									style={{
+										flex: "1 1 140px",
+										"min-width": 0,
+										"overflow-wrap": "anywhere",
+									}}
+								>
 									{account.providerID}/{account.alias}
 									{account.active ? " · active" : ""}
 									{account.limited ? " · limited" : ""}
@@ -155,13 +164,13 @@ export default Plugin.define({
 						<input
 							onInput={(event) => setProvider(event.currentTarget.value)}
 							placeholder={ctx.t("provider")}
-							style={{ flex: 1 }}
+							style={field}
 							value={provider()}
 						/>
 						<input
 							onInput={(event) => setAlias(event.currentTarget.value)}
 							placeholder={ctx.t("alias")}
-							style={{ flex: 1 }}
+							style={field}
 							value={alias()}
 						/>
 						<button
