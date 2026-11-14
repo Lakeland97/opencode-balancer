@@ -453,7 +453,7 @@ export function accountKey(providerID: string, alias: string) {
 }
 
 /** The credential a provider would serve with: the first one it may use. */
-export function firstCredential(
+function firstCredential(
 	db: Database,
 	providerID: string,
 ): Account | undefined {
@@ -609,30 +609,6 @@ export function getActiveAccount(
 		.get(providerID);
 	if (!row?.active_alias) return undefined;
 	return getAccount(db, providerID, row.active_alias);
-}
-
-export function getSelectedAccount(db: Database): Account | undefined {
-	const selectedProvider = db
-		.query<{ value: string }, []>(
-			"SELECT value FROM settings WHERE key = 'selected_provider_id'",
-		)
-		.get();
-	if (selectedProvider?.value) {
-		const active = getActiveAccount(db, selectedProvider.value);
-		if (active) return active;
-	}
-
-	const row = db
-		.query<{ provider_id: string; active_alias: string }, []>(
-			`SELECT provider_id, active_alias
-             FROM provider_state
-             WHERE active_alias IS NOT NULL
-             ORDER BY updated_at DESC, provider_id
-             LIMIT 1`,
-		)
-		.get();
-	if (!row?.active_alias) return undefined;
-	return getAccount(db, row.provider_id, row.active_alias);
 }
 
 export function setSelectedModel(

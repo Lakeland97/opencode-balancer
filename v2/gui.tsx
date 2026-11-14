@@ -25,7 +25,6 @@ type Account = {
 	active: boolean;
 	/** What would authorise the next request, fallback included. */
 	inUse: boolean;
-	disabled: boolean;
 	limited: boolean;
 	/** What the endpoint reported when it parked this account. */
 	limitedReason?: string;
