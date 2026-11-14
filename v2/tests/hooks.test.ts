@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { describe, expect, setSystemTime, test } from "bun:test";
 import type { Context } from "@opencode/plugin/promise/plugin";
 
 import {
@@ -289,7 +289,7 @@ describe("the session's target", () => {
 		const { registry } = await routedSetup();
 		await registry["model.request"]({
 			agent: "build",
-			headers: {},
+			headers: {} as Record<string, string>,
 			kind: "chat",
 			model: BALANCER,
 			sessionID: "routed-1",
@@ -308,5 +308,102 @@ describe("the session's target", () => {
 	test("a session that never routed here has nothing to compact", async () => {
 		await routedSetup();
 		expect(balancerTargetFor("never-routed")).toBeUndefined();
+	});
+});
+
+describe("a balance that has gone stale", () => {
+	const FIVE_HOURS = 5 * 60 * 60_000;
+
+	/** Two providers offering one model, so the order is a real choice. */
+	async function twoProviders() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const offered = (providerID: string) => ({
+			enabled: true,
+			limit: { context: 200_000, output: 4096 },
+			modelID: "deepseek-v4.1-flash",
+			name: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			providerID,
+			settings: { baseURL: `https://${providerID}.invalid/v1` },
+			type: "chat",
+		});
+		const ctx = {
+			model: { list: async () => ({ data: [offered("p1"), offered("p2")] }) },
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		saveAccount(db, "p2", "a", apiAuth("sk-2"));
+		setBalancingEnabled(db, true);
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
+	/** Serve from the head, then fail it: the trail now says "use p2". */
+	async function failOverFromTheHead(
+		registry: Record<string, HookCallback>,
+		sessionID: string,
+	) {
+		const event = {
+			agent: "build",
+			headers: {} as Record<string, string>,
+			kind: "chat",
+			model: BALANCER,
+			sessionID,
+		};
+		await registry["model.request"](event);
+		expect(event.headers.authorization).toBe("Bearer sk-1");
+		await registry.retry({
+			...retryEvent(sessionID, { delay: 1_000, retry: false }),
+			model: BALANCER,
+		});
+	}
+
+	const request = (sessionID: string) => ({
+		agent: "build",
+		headers: {} as Record<string, string>,
+		kind: "chat",
+		model: BALANCER,
+		sessionID,
+	});
+
+	test("past a quota window the order starts from the head again", async () => {
+		const start = Date.now();
+		const { registry } = await twoProviders();
+		await failOverFromTheHead(registry, "stale-window");
+
+		// Five hours on, the provider's window has refilled and p1's park is long
+		// expired, so the trail describes a world that no longer exists.
+		setSystemTime(start + FIVE_HOURS + 60_000);
+		try {
+			const event = request("stale-window");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-1");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("inside the window the trail still decides, so a park is not the reason", async () => {
+		const start = Date.now();
+		const { registry } = await twoProviders();
+		await failOverFromTheHead(registry, "fresh-window");
+
+		// p1's park has expired here too, so only the trail can explain p2 being
+		// chosen: the session already tried p1 and has not had an answer since.
+		setSystemTime(start + FIVE_HOURS - 60_000);
+		try {
+			const event = request("fresh-window");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-2");
+		} finally {
+			setSystemTime();
+		}
 	});
 });

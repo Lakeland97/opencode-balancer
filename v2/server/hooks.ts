@@ -46,6 +46,11 @@ const byRequest = new WeakMap<Request, Tracked>();
 const bySession = new Map<string, Tracked>();
 
 const STALE_AFTER_MS = 5 * 60_000;
+// A provider's quota refills on a five-hour window, so a failover trail older
+// than one describes a world that no longer exists: the credentials this session
+// had already tried are worth trying first again, and the head of the order is
+// where a fresh balance starts.
+const REBALANCE_AFTER_MS = 5 * 60 * 60_000;
 // The virtual provider's slot is keyed by `balancer`, which is the provider id
 // `http.response` and `retry` report for a routed call.
 const ROUTED = BALANCER_PROVIDER_ID;
@@ -80,15 +85,27 @@ function isParked(db: Database, providerID: string, alias: string) {
 // instead of starting again at the first target and parking everything on the
 // way down; naming the credential rather than the provider is what lets the
 // second credential of a provider still answer.
-const triedBySession = new Map<string, Set<string>>();
+//
+// The trail carries its own clock because the routing slots cannot: the failover
+// path clears those before a retry on purpose, so by the time the question is
+// asked there is nothing there to date. `at` is refreshed by every routing
+// decision, which makes it the last time this session was balanced.
+type Trail = { at: number; tried: Set<string> };
+const trailsBySession = new Map<string, Trail>();
+
+function trailFor(sessionID: string) {
+	let trail = trailsBySession.get(sessionID);
+	if (!trail) {
+		trail = { at: now(), tried: new Set() };
+		trailsBySession.set(sessionID, trail);
+	}
+	return trail;
+}
 
 function triedFor(sessionID: string) {
-	let tried = triedBySession.get(sessionID);
-	if (!tried) {
-		tried = new Set();
-		triedBySession.set(sessionID, tried);
-	}
-	return tried;
+	const trail = trailFor(sessionID);
+	trail.at = now();
+	return trail.tried;
 }
 
 // The target each session was last announced on, so a switch can name where it
@@ -96,6 +113,23 @@ function triedFor(sessionID: string) {
 // deliberately clears before a retry: erasing that history would make every
 // failover read as a fresh first choice.
 const announced = new Map<string, { alias: string; providerID: string }>();
+
+/**
+ * Forget a trail that has outlived a quota window.
+ *
+ * A provider's quota refills on a five-hour window, so a trail older than one
+ * describes a world that no longer exists: the credentials this session had
+ * already tried are worth trying first again, and the head of the order is where
+ * a fresh balance starts. Only the trail goes — a park is the provider's own
+ * clock and expires on its own schedule, and throwing that away would send a call
+ * straight back to something still limited.
+ */
+function forgetStaleTrail(sessionID: string) {
+	const trail = trailsBySession.get(sessionID);
+	if (!trail || now() - trail.at <= REBALANCE_AFTER_MS) return;
+	trailsBySession.delete(sessionID);
+	announced.delete(sessionKey(sessionID, ROUTED));
+}
 
 /**
  * Say where a call went — the first time, and whenever it changes.
@@ -198,6 +232,8 @@ function chooseStickyRoute(input: {
 	sessionID: string;
 }) {
 	const { db, family, sessionID } = input;
+	// A trail older than a quota window is void, so the balance starts again.
+	forgetStaleTrail(sessionID);
 	const tried = triedFor(sessionID);
 	const remembered = bySession.get(sessionKey(sessionID, ROUTED));
 	const pinned =
@@ -388,7 +424,7 @@ export async function registerHooks({
 		if (!failed || !isRetryableFailure({ status: event.response.status })) {
 			// An answer ends the failover trail: the session stays on this
 			// target and a later failure may try the others again.
-			triedBySession.delete(event.sessionID);
+			trailsBySession.delete(event.sessionID);
 			return;
 		}
 		const reported = `HTTP ${event.response.status}${
