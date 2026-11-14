@@ -7,8 +7,13 @@ import {
 	renameAccount,
 	saveAccount,
 	setActiveAccount,
-	setSelectedModel,
 } from "../core/accounts";
+import {
+	type ChainTarget,
+	deleteChain,
+	moveTarget,
+	saveChain,
+} from "../core/chains";
 import { matchModel } from "../core/models";
 import {
 	getBalancingEnabled,
@@ -16,12 +21,13 @@ import {
 	moveProvider,
 	setBalancingEnabled,
 	setProviderEnabled,
-	setProviderModel,
 } from "../core/priority";
 import { now } from "../core/time";
 import type { Account } from "../core/types";
-import { invalidateCatalog, loadCatalog } from "./connectors";
+import { invalidateCatalog, loadCatalog, resolveChain } from "./connectors";
 import { readActiveCredential } from "./credentials";
+import { chooseRoute, isProviderEnabled } from "./routing";
+import { selectHealthyAccount } from "./selection";
 
 function parseArgs(input: string) {
 	return (
@@ -128,9 +134,11 @@ export async function runCommand({
 			"  remove <provider> <alias>    Delete a saved account",
 			"  rename <provider> <alias> <new>",
 			"  on | off                     Toggle automatic failover",
-			"  priority                     Provider priority and chosen models",
-			"  model <provider|all> <name>  Like-for-like model per connector; accepts the picker's name",
-			"  equivalents [name]           Which model each connector uses for the same family",
+			"  priority                     Provider order and on/off state",
+			"  chain <model>                Targets for a row, in the order they are tried",
+			"  chain <model> add <provider> <model>",
+			"  chain <model> remove|up|down <provider>",
+			"  chain <model> reset          Hand the row back to provider priority",
 			"  enable <provider> | disable <provider>",
 			"  up <provider> | down <provider>",
 		].join("\n");
@@ -223,28 +231,22 @@ export async function runCommand({
 		const entries = listProviderPriority(db);
 		if (entries.length === 0) return "No providers saved.";
 		return entries
-			.map((entry, index) => {
-				const model = entry.modelID ?? "(no model)";
-				const state = entry.enabled ? "on" : "off";
-				return `${index + 1}. ${entry.providerID}  ${state}  ${model}`;
-			})
+			.map(
+				(entry, index) =>
+					`${index + 1}. ${entry.providerID}  ${entry.enabled ? "on" : "off"}`,
+			)
 			.join("\n");
 	}
 
-	if (action === "equivalents" || action === "equivalent") {
-		const catalog = await loadCatalog(ctx, db);
-		if (args.length === 0) {
-			if (catalog.families.length === 0) {
-				return "No connector models yet. Add an account for a provider first.";
-			}
-			return [
-				"Model families shared by your connectors:",
-				...catalog.families.map(
-					(family) => `  ${family.key}  (${family.name})`,
-				),
-			].join("\n");
+	if (action === "chain") {
+		const [query, ...rest] = args;
+		if (!query) {
+			return "Usage: /balancer chain <model> [add|remove|up|down|reset] …";
 		}
-		const query = args.join(" ");
+		const catalog = await loadCatalog(ctx, db);
+		if (catalog.families.length === 0) {
+			return "No connector models yet. Add an account for a provider first.";
+		}
 		const match = matchModel(
 			query,
 			catalog.families.map((family) => ({
@@ -252,52 +254,136 @@ export async function runCommand({
 				name: family.name,
 			})),
 		);
-		if (!match) return `No connector model matches "${query}".`;
-		const family = catalog.families.find(
-			(entry) => entry.key === match.model.modelID,
-		);
-		if (!family) return `No connector model matches "${query}".`;
-		return [
-			`${family.name} (${family.key})`,
-			...family.routes.map(
-				(route) => `  ${route.providerID.padEnd(28)} ${route.modelID}`,
-			),
-		].join("\n");
-	}
+		const family = match
+			? catalog.families.find((entry) => entry.key === match.model.modelID)
+			: undefined;
+		if (!family) return `No row matches "${query}".`;
 
-	if (action === "model") {
-		const [providerID, ...rest] = args;
-		if (!providerID || rest.length === 0) {
-			return "Usage: /balancer model <provider|all> <model name or id>";
-		}
-		const query = rest.join(" ");
+		const [verb, providerID, ...modelWords] = rest;
+		const targets = () =>
+			resolveChain(db, family).map((route) => ({
+				baseURL: route.baseURL,
+				modelID: route.modelID,
+				providerID: route.providerID,
+			}));
 
-		if (providerID === "all") {
-			const providers = [
-				...new Set(listAccounts(db).map((account) => account.providerID)),
-			];
-			if (providers.length === 0) return "No accounts saved.";
-			const lines: string[] = [];
-			for (const id of providers) {
-				const resolved = await resolveModel(ctx, id, query);
-				if ("error" in resolved) {
-					lines.push(`  ${id.padEnd(24)} no match`);
-					continue;
-				}
-				setProviderModel(db, id, resolved.modelID);
-				setSelectedModel(db, id, resolved.modelID);
-				lines.push(`  ${id.padEnd(24)} ${resolved.modelID}`);
-			}
+		const store = (next: ChainTarget[]) => {
+			saveChain(db, {
+				familyKey: family.key,
+				label: family.name,
+				package: family.package,
+				targets: next,
+			});
 			invalidateCatalog();
-			return ["Like-for-like model set per connector:", ...lines].join("\n");
+		};
+
+		if (!verb) {
+			const live = chooseRoute(db, family);
+			const lines = targets().map((target, index) => {
+				const marks: string[] = [];
+				if (
+					live?.providerID === target.providerID &&
+					live.modelID === target.modelID
+				) {
+					marks.push("in use");
+				}
+				if (!isProviderEnabled(db, target.providerID)) marks.push("disabled");
+				const account = selectHealthyAccount(db, target.providerID);
+				if (!account) marks.push("no healthy account");
+				else if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
+					marks.push("limited");
+				}
+				const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
+				return `  ${index + 1}. ${target.providerID}  ${target.modelID}${suffix}`;
+			});
+			return [
+				`${family.name} (${family.key}) — ${family.stored ? "custom order" : "automatic order"}`,
+				...lines,
+			].join("\n");
 		}
 
-		const resolved = await resolveModel(ctx, providerID, query);
-		if ("error" in resolved) return resolved.error;
-		setProviderModel(db, providerID, resolved.modelID);
-		setSelectedModel(db, providerID, resolved.modelID);
-		invalidateCatalog();
-		return `Model for ${providerID} set to ${resolved.modelID}.`;
+		if (verb === "reset") {
+			const existed = deleteChain(db, family.key);
+			invalidateCatalog();
+			return existed
+				? `${family.key} is back to automatic order.`
+				: `${family.key} was already automatic.`;
+		}
+
+		if (verb === "add") {
+			if (!providerID || modelWords.length === 0) {
+				return "Usage: /balancer chain <model> add <provider> <model>";
+			}
+			if (targets().some((target) => target.providerID === providerID)) {
+				return `${providerID} is already in this chain. Remove it first.`;
+			}
+			const list = await ctx.model.list();
+			const candidates = list.data.filter(
+				(model) =>
+					model.providerID === providerID &&
+					(!model.type || model.type === "chat") &&
+					model.enabled !== false &&
+					typeof model.settings?.baseURL === "string",
+			);
+			const resolved = matchModel(
+				modelWords.join(" "),
+				candidates.map((model) => ({
+					modelID: model.modelID,
+					name: model.name ?? model.modelID,
+				})),
+			);
+			const record = resolved
+				? candidates.find((model) => model.modelID === resolved.model.modelID)
+				: undefined;
+			if (!record) {
+				return `No routable ${providerID} model matches "${modelWords.join(" ")}".`;
+			}
+			if ((record.package ?? "") !== family.package) {
+				return `${providerID}'s ${record.modelID} speaks ${record.package}, but this row speaks ${family.package}.`;
+			}
+			store([
+				...targets(),
+				{
+					baseURL: (record.settings?.baseURL ?? "").replace(/\/+$/, ""),
+					modelID: record.modelID,
+					providerID,
+				},
+			]);
+			return `Added ${providerID} ${record.modelID} to ${family.key}.`;
+		}
+
+		if (!providerID) {
+			return `Usage: /balancer chain <model> ${verb} <provider>`;
+		}
+
+		if (verb === "remove") {
+			const current = targets();
+			const next = current.filter((target) => target.providerID !== providerID);
+			if (next.length === current.length) {
+				return `${providerID} is not in this chain.`;
+			}
+			if (next.length === 0) {
+				return "That is the last target; a row needs at least one.";
+			}
+			store(next);
+			return `Removed ${providerID} from ${family.key}.`;
+		}
+
+		if (verb === "up" || verb === "down") {
+			if (!family.stored) store(targets());
+			const moved = moveTarget(
+				db,
+				family.key,
+				providerID,
+				verb === "up" ? -1 : 1,
+			);
+			invalidateCatalog();
+			return moved
+				? `Moved ${providerID} ${verb}.`
+				: `${providerID} cannot move further ${verb}.`;
+		}
+
+		return `Unknown chain action: ${verb}.`;
 	}
 
 	if (action === "enable" || action === "disable") {
