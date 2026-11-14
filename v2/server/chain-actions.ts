@@ -14,6 +14,8 @@ import {
 	resolveChain,
 } from "./connectors";
 
+const DEFAULT_CHAIN_PACKAGE = "@opencode/ai/providers/openai-compatible";
+
 export type ActionResult =
 	| { ok: true; message: string }
 	| { ok: false; message: string };
@@ -129,6 +131,76 @@ export async function addTarget(
 		},
 	]);
 	return { message: `Added ${providerID} ${record.modelID}.`, ok: true };
+}
+
+/**
+ * Start a custom row from one routable model. The row is stored immediately, so
+ * it survives even when no connector offers that model as a family, and its key
+ * is derived from the model so the picker lists it as `balancer/<key>`.
+ */
+export async function createChain(
+	ctx: Context,
+	db: Database,
+	providerID: string,
+	query: string,
+): Promise<ActionResult & { key?: string }> {
+	const list = await ctx.model.list();
+	const candidates = list.data.filter(
+		(model) =>
+			model.providerID === providerID &&
+			(!model.type || model.type === "chat") &&
+			model.enabled !== false &&
+			typeof model.settings?.baseURL === "string",
+	);
+	if (candidates.length === 0) {
+		return { message: `No routable models for ${providerID}.`, ok: false };
+	}
+	const match = matchModel(
+		query,
+		candidates.map((model) => ({
+			modelID: model.modelID,
+			name: model.name ?? model.modelID,
+		})),
+	);
+	const record = match
+		? candidates.find((model) => model.modelID === match.model.modelID)
+		: undefined;
+	if (!record) {
+		return {
+			message: `No routable ${providerID} model matches "${query}".`,
+			ok: false,
+		};
+	}
+
+	const existing = (await loadCatalog(ctx, db)).families.find((family) =>
+		family.targets.some(
+			(target) =>
+				target.providerID === providerID && target.modelID === record.modelID,
+		),
+	);
+	const key = existing?.key ?? familyKeyFor(record.modelID);
+	saveChain(db, {
+		familyKey: key,
+		label: record.name ?? existing?.name ?? record.modelID,
+		package: record.package ?? existing?.package ?? DEFAULT_CHAIN_PACKAGE,
+		targets: [
+			{
+				baseURL: (record.settings?.baseURL ?? "").replace(/\/+$/, ""),
+				modelID: record.modelID,
+				providerID,
+			},
+		],
+	});
+	invalidateCatalog();
+	return { key, message: `Started ${key} with ${providerID}.`, ok: true };
+}
+
+/** A stable, readable row key from a model id. */
+function familyKeyFor(modelID: string) {
+	return modelID
+		.toLowerCase()
+		.replace(/[^a-z0-9.]+/g, "-")
+		.replace(/^-+|-+$/g, "");
 }
 
 export function removeTarget(

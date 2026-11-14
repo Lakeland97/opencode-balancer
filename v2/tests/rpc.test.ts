@@ -155,6 +155,29 @@ describe("chain rpc", () => {
 		expect(listed.entries[0]?.name).toBe("Provider One");
 	});
 
+	test("chainCreate starts a custom row from one model", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const created = (await rpc.chainCreate({
+			modelID: "mimo-v2.6-flash",
+			providerID: "p2",
+		})) as { key?: string; ok: boolean };
+
+		expect(created.ok).toBe(true);
+		expect(created.key).toBe("mimo-v2.6-flash");
+		const stored = getStoredChain(db, "mimo-v2.6-flash");
+		expect(stored?.targets.map((target) => target.providerID)).toEqual(["p2"]);
+		expect(stored?.label).toBe("MiMo V2.6 Flash");
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; stored: boolean; targets: unknown[] }[];
+		};
+		const row = listed.rows.find((entry) => entry.key === "mimo-v2.6-flash");
+		expect(row?.stored).toBe(true);
+		expect(row?.targets.length).toBe(1);
+	});
+
 	test("chainModels lists only routable models for a provider", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);

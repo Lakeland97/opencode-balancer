@@ -21,6 +21,7 @@ import { now } from "../core/time";
 import { Balancer } from "../rpc";
 import {
 	addTarget,
+	createChain,
 	removeTarget,
 	resetRow,
 	rowByKey,
@@ -105,6 +106,14 @@ export async function registerBalancerRpc({
 			if (!family) return { message: `No row named ${key}.`, ok: false };
 			const result = await addTarget(ctx, db, family, providerID, modelID);
 			return result;
+		},
+
+		chainCreate: async (input) => {
+			const { providerID, modelID } = input as {
+				providerID: string;
+				modelID: string;
+			};
+			return createChain(ctx, db, providerID, modelID);
 		},
 
 		chainModels: async (input) => {

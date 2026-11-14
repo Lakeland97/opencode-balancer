@@ -81,6 +81,17 @@ const definition = {
 			]),
 			output: result,
 		},
+		chainCreate: {
+			input: object({ modelID: str, providerID: str }, [
+				"providerID",
+				"modelID",
+			]),
+			output: object({ key: str, message: str, ok: bool }, [
+				"ok",
+				"message",
+				"key",
+			]),
+		},
 		chainModels: {
 			input: object({ providerID: str }, ["providerID"]),
 			output: object(

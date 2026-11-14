@@ -70,6 +70,7 @@ export default Plugin.define({
 			inUse: "in use",
 			limited: "limited",
 			models: "models",
+			newChain: "new chain",
 			open: "Open Balancer",
 			provider: "provider",
 			providers: "providers",
@@ -93,6 +94,9 @@ export default Plugin.define({
 		const [adding, setAdding] = createSignal("");
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
+		const [creating, setCreating] = createSignal(false);
+		const [createProvider, setCreateProvider] = createSignal("");
+		const [createModels, setCreateModels] = createSignal<Models["models"]>([]);
 
 		const refresh = async () => {
 			try {
@@ -145,6 +149,23 @@ export default Plugin.define({
 			}
 		};
 
+		const chooseCreateProvider = async (providerID: string) => {
+			setCreateProvider(providerID);
+			setCreateModels([]);
+			if (!providerID) return;
+			try {
+				const reply = (await rpc().chainModels({ providerID })) as Models;
+				setCreateModels(reply.models);
+			} catch (error) {
+				setMessage(error instanceof Error ? error.message : String(error));
+			}
+		};
+
+		// The panel lists rows that actually triage between providers, plus any
+		// row the user built by hand. Everything else is noise.
+		const visibleChains = () =>
+			chains().filter((chain) => chain.stored || chain.targets.length > 1);
+
 		const row = {
 			"align-items": "center",
 			display: "flex",
@@ -163,6 +184,10 @@ export default Plugin.define({
 						"flex-direction": "column",
 						"font-size": "13px",
 						gap: "8px",
+						height: "100%",
+						"min-height": 0,
+						"overflow-y": "auto",
+						"overscroll-behavior": "contain",
 						padding: "12px",
 					}}
 				>
@@ -266,8 +291,57 @@ export default Plugin.define({
 
 					<div style={{ ...row, "margin-top": "4px" }}>
 						<strong>{ctx.t("models")}</strong>
+						<button
+							onClick={() => {
+								setCreating(!creating());
+								setCreateProvider("");
+								setCreateModels([]);
+							}}
+							style={{ "margin-left": "auto" }}
+						>
+							+ {ctx.t("newChain")}
+						</button>
 					</div>
-					<For each={chains()}>
+
+					<Show when={creating()}>
+						<div style={row}>
+							<select
+								onChange={(event) =>
+									void chooseCreateProvider(event.currentTarget.value)
+								}
+								style={field}
+								value={createProvider()}
+							>
+								<option value="">provider</option>
+								<For each={providers()}>
+									{(entry) => (
+										<option value={entry.providerID}>{entry.name}</option>
+									)}
+								</For>
+							</select>
+							<select
+								onChange={(event) =>
+									void run(() =>
+										rpc().chainCreate({
+											modelID: event.currentTarget.value,
+											providerID: createProvider(),
+										}),
+									).then(() => setCreating(false))
+								}
+								style={field}
+								value=""
+							>
+								<option value="">model</option>
+								<For each={createModels()}>
+									{(model) => (
+										<option value={model.modelID}>{model.name}</option>
+									)}
+								</For>
+							</select>
+						</div>
+					</Show>
+
+					<For each={visibleChains()}>
 						{(chain) => (
 							<div
 								style={{
