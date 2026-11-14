@@ -48,8 +48,8 @@ balancer model and compact it ourselves") removed the whole buffer mechanism:
   declares `DECLARED_CONTEXT` and keeps only the real `output`, the smallest a hop can
   answer.
 - Task 8 Step 1's "window 200k · declares 800k" line is gone with it: the panel now shows
-  a `context limit` field (the share of the declared 1M, 1–99%, with the token count it
-  works out to).
+  a `context limit` field (a size in thousands or a share of the declared 1M, with the token
+  count it works out to).
 
 **What changed after this plan, and is not described below.** The unit of routing became
 the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Three changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Four changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -81,6 +81,11 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
 - A failover trail older than a five-hour quota window is dropped, so a session that has been idle
   that long starts its balance from the head of the order again rather than resuming where it left off
   (`a45a54e`).
+- The `context limit` field takes the same size-or-share grammar as the buffer, so `200` means two
+  hundred thousand tokens and `20%` still means a fifth of a window; the `%` suffix the field used to
+  print is gone. The stored keys moved to `context_limit` / `model_limit:<row>` to match, and the
+  migration puts a `%` back on any bare number an earlier version left, which would otherwise now read
+  as thousands of tokens.
 
 **Outstanding**
 

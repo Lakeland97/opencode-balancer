@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 
-import { setGlobalPercent, setModelPercent } from "../core/context";
+import { setLimit, setModelLimit } from "../core/context";
 import { migrate } from "../core/schema";
 import {
 	type CompactionEvent,
@@ -96,7 +96,7 @@ describe("when a conversation is compacted", () => {
 
 	test("the share is clamped by the model that is actually serving", async () => {
 		const db = freshDb();
-		setGlobalPercent(db, 30);
+		setLimit(db, "30%");
 		// 30% of the declared 1M is 300k, but this connector holds 200k, and the
 		// cut stays a reserve below it so the compaction request itself fits.
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
@@ -108,8 +108,8 @@ describe("when a conversation is compacted", () => {
 
 	test("a model's own share overrides the global and measures its window", async () => {
 		const db = freshDb();
-		setGlobalPercent(db, 90);
-		setModelPercent(db, "deepseek-v4.1-flash", 50);
+		setLimit(db, "90%");
+		setModelLimit(db, "deepseek-v4.1-flash", "50%");
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
 
 		// 50% of this model's own 200k is 100k, not 90% of the declared window.
@@ -122,8 +122,8 @@ describe("when a conversation is compacted", () => {
 		const db = freshDb();
 		// Set while one credential served it; the other credential must not
 		// compact the same model at the global share instead.
-		setGlobalPercent(db, 90);
-		setModelPercent(db, "deepseek-v4.1-flash", 50);
+		setLimit(db, "90%");
+		setModelLimit(db, "deepseek-v4.1-flash", "50%");
 		const { handle } = harness(db, {
 			...TARGET,
 			context: 200_000,

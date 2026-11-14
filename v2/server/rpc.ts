@@ -13,14 +13,17 @@ import {
 	useAccount,
 } from "../core/accounts";
 import {
-	MAX_PERCENT,
+	DEFAULT_PERCENT,
+	formatTokens,
 	parseBuffer,
+	parseLimit,
 	readBuffer,
-	readGlobalPercent,
-	readModelPercent,
+	readLimit,
+	readModelLimit,
+	type SizeOrShare,
 	setBuffer,
-	setGlobalPercent,
-	setModelPercent,
+	setLimit,
+	setModelLimit,
 } from "../core/context";
 import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
@@ -91,24 +94,13 @@ function targetState(
 }
 
 /**
- * A share the panel typed. An empty field clears it — for a whole-row default
- * that means back to the built-in one, for a model it means back to following
- * the default. Anything that is not a share from 1% to 99% is refused rather
- * than stored as a NaN that would leave nothing able to hold a conversation.
+ * How a limit reads in a sentence: a size in tokens, or a share of the window it
+ * is measured against.
  */
-function parsePercent(
-	value: string,
-): { ok: true; percent: number | undefined } | { ok: false; message: string } {
-	const trimmed = value.trim().replace(/%$/, "");
-	if (trimmed === "") return { ok: true, percent: undefined };
-	const percent = Number(trimmed);
-	if (!Number.isFinite(percent) || percent <= 0 || percent > MAX_PERCENT) {
-		return {
-			message: `"${value}" is not a share from 1% to ${MAX_PERCENT}%.`,
-			ok: false,
-		};
-	}
-	return { ok: true, percent };
+function describeLimit(size: SizeOrShare, window: string): string {
+	return "tokens" in size
+		? formatTokens(size.tokens)
+		: `${size.percent}% of ${window}`;
 }
 
 /**
@@ -202,11 +194,11 @@ export async function registerBalancerRpc({
 				rows: catalog.families.map((family) => ({
 					key: family.key,
 					label: family.name,
+					// This model's own limit as typed, or empty when it follows
+					// the global one. One value per model: the credential
+					// serving it does not change it.
+					limit: readModelLimit(db, family.key) ?? "",
 					package: family.package,
-					// The share of this model's own window, or 0 when it
-					// follows the global one. One value per model: the
-					// credential serving it does not change it.
-					percent: readModelPercent(db, family.key) ?? 0,
 					stored: Boolean(family.stored),
 					targets: resolveChain(db, family).map((target) => ({
 						modelID: target.modelID,
@@ -225,7 +217,7 @@ export async function registerBalancerRpc({
 
 		contextBuffer: async () => ({ value: readBuffer(db) ?? "" }),
 
-		contextPercent: async () => ({ percent: readGlobalPercent(db) }),
+		contextLimit: async () => ({ value: readLimit(db) ?? "" }),
 
 		list: async (input) => {
 			const { providerID } = (input ?? {}) as { providerID?: string };
@@ -344,22 +336,21 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setContextPercent: async (input) => {
+		setContextLimit: async (input) => {
 			const { value } = input as { value: string };
-			const parsed = parsePercent(value);
+			const parsed = parseLimit(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setGlobalPercent(db, parsed.percent);
+			setLimit(db, value);
+			const where =
+				parsed.size && describeLimit(parsed.size, "the declared window");
 			recordLog(
 				"config",
-				parsed.percent === undefined
-					? "context limit back to the default"
-					: `context limit ${parsed.percent}% of the declared window`,
+				where ? `context limit ${where}` : "context limit back to the default",
 			);
 			return {
-				message:
-					parsed.percent === undefined
-						? `Context limit is back to the default (${readGlobalPercent(db)}%).`
-						: `Context limit is ${parsed.percent}% of the declared window.`,
+				message: where
+					? `Context limit is ${where}.`
+					: `Context limit is back to the default (${DEFAULT_PERCENT}% of the declared window).`,
 				ok: true,
 			};
 		},
@@ -398,22 +389,22 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setModelPercent: async (input) => {
+		setModelLimit: async (input) => {
 			const { key, value } = input as { key: string; value: string };
-			const parsed = parsePercent(value);
+			const parsed = parseLimit(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setModelPercent(db, key, parsed.percent);
+			setModelLimit(db, key, value);
+			const where = parsed.size && describeLimit(parsed.size, "its own window");
 			recordLog(
 				"config",
-				parsed.percent === undefined
-					? `${key} follows the global limit`
-					: `${key} compacts at ${parsed.percent}% of its own window`,
+				where
+					? `${key} compacts at ${where}`
+					: `${key} follows the global limit`,
 			);
 			return {
-				message:
-					parsed.percent === undefined
-						? `${key} follows the global limit again.`
-						: `${key} compacts at ${parsed.percent}% of its own window.`,
+				message: where
+					? `${key} compacts at ${where}.`
+					: `${key} follows the global limit again.`,
 				ok: true,
 			};
 		},

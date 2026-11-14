@@ -1,5 +1,5 @@
 import { Plugin } from "@opencode/plugin";
-import { migrateModelPercent } from "./core/context";
+import { migrateLimits } from "./core/context";
 import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
 import { migrateProviderSettings } from "./core/priority";
@@ -57,7 +57,7 @@ export default Plugin.define({
 		migrateProviderSettings(db);
 		// A row's share was once stored per credential as well as per model; it
 		// belongs to the model, so fold anything left behind onto it.
-		migrateModelPercent(db);
+		migrateLimits(db);
 
 		await registerHooks({ ctx, db });
 		const rpc = await registerBalancerRpc({ ctx, db });

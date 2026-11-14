@@ -3,8 +3,8 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	effectiveThreshold,
 	readBufferSpec,
-	readGlobalPercent,
-	readModelPercent,
+	readLimitSpec,
+	readModelLimitSpec,
 } from "../core/context";
 import { balancerTargetFor } from "./hooks";
 import { recordLog } from "./log";
@@ -67,8 +67,8 @@ export function createCompactionController(input: {
 	const thresholdFor = (target: SessionTarget) =>
 		effectiveThreshold({
 			buffer: readBufferSpec(input.db),
-			globalPercent: readGlobalPercent(input.db),
-			modelPercent: readModelPercent(input.db, target.familyKey),
+			globalLimit: readLimitSpec(input.db),
+			modelLimit: readModelLimitSpec(input.db, target.familyKey),
 			realContext: target.context,
 		});
 

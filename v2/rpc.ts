@@ -32,17 +32,18 @@ const chainRow = object(
 	{
 		key: str,
 		label: str,
-		package: str,
 		/**
-		 * The user's share of this model's own window, 0 when it follows the
-		 * global. One value per model, not per credential: who answers does not
-		 * change what the model holds.
+		 * The user's own limit for this model — a size in thousands or a share of
+		 * its window — as typed, empty when it follows the global. One value per
+		 * model, not per credential: who answers does not change what the model
+		 * holds.
 		 */
-		percent: num,
+		limit: str,
+		package: str,
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
 	},
-	["key", "label", "package", "percent", "stored", "targets"],
+	["key", "label", "package", "limit", "stored", "targets"],
 );
 const logEntry = object(
 	{
@@ -141,11 +142,12 @@ export const balancerDefinition = {
 			input: empty,
 			output: object({ value: str }, ["value"]),
 		},
-		contextPercent: {
+		contextLimit: {
 			input: empty,
-			// The share of the declared window the balancer compacts at, unless a
-			// model overrides it with its own.
-			output: object({ percent: num }, ["percent"]),
+			// A size in thousands or a share of the declared window the balancer
+			// compacts at, as the user typed it; empty means the built-in value.
+			// A model may override it with a limit of its own.
+			output: object({ value: str }, ["value"]),
 		},
 		list: {
 			input: object({ providerID: str }),
@@ -209,7 +211,7 @@ export const balancerDefinition = {
 			input: object({ value: str }, ["value"]),
 			output: result,
 		},
-		setContextPercent: {
+		setContextLimit: {
 			input: object({ value: str }, ["value"]),
 			output: result,
 		},
@@ -229,7 +231,7 @@ export const balancerDefinition = {
 			]),
 			output: result,
 		},
-		setModelPercent: {
+		setModelLimit: {
 			input: object({ key: str, value: str }, ["key", "value"]),
 			output: result,
 		},

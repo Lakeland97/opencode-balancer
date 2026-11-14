@@ -50,7 +50,7 @@ describe("contract", () => {
 		await rpc.chains({});
 		await rpc.list({});
 		await rpc.priority({});
-		await rpc.contextPercent({});
+		await rpc.contextLimit({});
 	});
 });
 
@@ -154,7 +154,7 @@ describe("chain rpc", () => {
 		const listed = (await rpc.chains({})) as {
 			rows: {
 				key: string;
-				percent: number;
+				limit: string;
 				targets: unknown[];
 			}[];
 		};
@@ -163,12 +163,12 @@ describe("chain rpc", () => {
 		);
 		expect(row).toBeDefined();
 		// The window is the same 1M declaration whatever the row holds, so a
-		// row has no window of its own to report; only the shares matter.
+		// row has no window of its own to report; only the limits matter.
 		expect(row && "context" in row).toBe(false);
 		expect(row && "trip" in row).toBe(false);
 		expect(row?.targets.length).toBe(1);
-		// The share belongs to the row, not to a credential.
-		expect(row?.percent).toBe(0);
+		// The limit belongs to the row, not to a credential.
+		expect(row?.limit).toBe("");
 
 		await rpc.chainAdd({
 			key: "deepseek-v4.1-flash",
@@ -176,7 +176,7 @@ describe("chain rpc", () => {
 			providerID: "p2",
 		});
 		const after = (await rpc.chains({})) as {
-			rows: { key: string; targets: { percent: number }[] }[];
+			rows: { key: string; targets: unknown[] }[];
 		};
 		const mixed = after.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
@@ -420,38 +420,32 @@ describe("log rpc", () => {
 	});
 });
 
-describe("context percent rpc", () => {
-	test("the global share reads as its default until it is set", async () => {
+describe("context limit rpc", () => {
+	test("the global limit reads as its default until it is set", async () => {
 		const rpc = await handlers(freshDb());
 
-		const state = (await rpc.contextPercent({})) as { percent: number };
-		expect(state.percent).toBe(20);
+		expect(await rpc.contextLimit({})).toEqual({ value: "" });
 	});
 
-	test("a set share is reported back and an empty value restores the default", async () => {
+	test("a set limit is reported back as typed, and empty restores the default", async () => {
 		const rpc = await handlers(freshDb());
 
-		const set = (await rpc.setContextPercent({ value: "35" })) as {
+		const share = (await rpc.setContextLimit({ value: "35%" })) as {
 			ok: boolean;
 		};
-		expect(set.ok).toBe(true);
-		const after = (await rpc.contextPercent({})) as { percent: number };
-		expect(after.percent).toBe(35);
+		expect(share.ok).toBe(true);
+		expect(await rpc.contextLimit({})).toEqual({ value: "35%" });
 
-		await rpc.setContextPercent({ value: "" });
-		const cleared = (await rpc.contextPercent({})) as { percent: number };
-		expect(cleared.percent).toBe(20);
-	});
-
-	test("a trailing percent sign is accepted", async () => {
-		const rpc = await handlers(freshDb());
-
-		const set = (await rpc.setContextPercent({ value: "45%" })) as {
+		// The same field takes a size in thousands, kept as typed so the panel
+		// reads back what was written.
+		const size = (await rpc.setContextLimit({ value: "200" })) as {
 			ok: boolean;
 		};
-		expect(set.ok).toBe(true);
-		const after = (await rpc.contextPercent({})) as { percent: number };
-		expect(after.percent).toBe(45);
+		expect(size.ok).toBe(true);
+		expect(await rpc.contextLimit({})).toEqual({ value: "200" });
+
+		await rpc.setContextLimit({ value: "" });
+		expect(await rpc.contextLimit({})).toEqual({ value: "" });
 	});
 
 	test("the buffer round-trips, and what it cannot read it refuses", async () => {
@@ -477,62 +471,78 @@ describe("context percent rpc", () => {
 		expect(await rpc.contextBuffer({})).toEqual({ value: "" });
 	});
 
-	test("a share outside 1% to 100% is refused and nothing is stored", async () => {
+	test("a limit is outside what it may be, and nothing is stored", async () => {
 		const rpc = await handlers(freshDb());
 
-		for (const value of ["0%", "-5", "abc", "101"]) {
-			const result = (await rpc.setContextPercent({ value })) as {
+		for (const value of ["0%", "0", "-5", "abc", "101%", "2m"]) {
+			const result = (await rpc.setContextLimit({ value })) as {
 				message: string;
 				ok: boolean;
 			};
 			expect(result.ok).toBe(false);
 			expect(result.message.length).toBeGreaterThan(0);
 		}
-		const after = (await rpc.contextPercent({})) as { percent: number };
-		expect(after.percent).toBe(20);
+		expect(await rpc.contextLimit({})).toEqual({ value: "" });
 	});
 
-	test("a model's share is reported on its own row", async () => {
+	test("a model's limit is reported on its own row", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
 
-		const set = (await rpc.setModelPercent({
+		const set = (await rpc.setModelLimit({
 			key: "deepseek-v4.1-flash",
-			value: "50",
+			value: "50%",
 		})) as { ok: boolean };
 		expect(set.ok).toBe(true);
 
 		const listed = (await rpc.chains({})) as {
 			rows: {
 				key: string;
-				percent: number;
-				targets: { percent?: number; providerID: string }[];
+				limit: string;
+				targets: { limit?: string; providerID: string }[];
 			}[];
 		};
 		const row = listed.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
-		expect(row?.percent).toBe(50);
-		// One number for the model, so no credential carries a private one.
-		expect(row?.targets.every((target) => target.percent === undefined)).toBe(
+		expect(row?.limit).toBe("50%");
+		// One limit for the model, so no credential carries a private one.
+		expect(row?.targets.every((target) => target.limit === undefined)).toBe(
 			true,
 		);
 		expect(row?.targets.length).toBeGreaterThan(0);
 
-		// Clearing it hands the model back to the global share.
-		await rpc.setModelPercent({ key: "deepseek-v4.1-flash", value: "" });
+		// Clearing it hands the model back to the global limit.
+		await rpc.setModelLimit({ key: "deepseek-v4.1-flash", value: "" });
 		const after = (await rpc.chains({})) as {
-			rows: { key: string; percent: number }[];
+			rows: { key: string; limit: string }[];
 		};
 		expect(
-			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.percent,
-		).toBe(0);
+			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
+		).toBe("");
 	});
 
-	test("a share outside 1% to 100% is refused, and changes nothing", async () => {
+	test("a model's own size is accepted and kept as typed", async () => {
 		const rpc = await handlers(freshDb());
 
-		const refused = (await rpc.setModelPercent({
+		const set = (await rpc.setModelLimit({
+			key: "deepseek-v4.1-flash",
+			value: "200",
+		})) as { ok: boolean };
+		expect(set.ok).toBe(true);
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; limit: string }[];
+		};
+		expect(
+			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
+		).toBe("200");
+	});
+
+	test("a limit outside what it may be is refused, and changes nothing", async () => {
+		const rpc = await handlers(freshDb());
+
+		const refused = (await rpc.setModelLimit({
 			key: "deepseek-v4.1-flash",
 			value: "lots",
 		})) as { message: string; ok: boolean };
@@ -540,10 +550,10 @@ describe("context percent rpc", () => {
 		expect(refused.message.length).toBeGreaterThan(0);
 
 		const listed = (await rpc.chains({})) as {
-			rows: { key: string; percent: number }[];
+			rows: { key: string; limit: string }[];
 		};
 		expect(
-			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.percent,
-		).toBe(0);
+			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
+		).toBe("");
 	});
 });

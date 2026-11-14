@@ -12,7 +12,14 @@ import {
 	TitlebarItem,
 } from "@opencode/plugin/gui";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { DECLARED_CONTEXT, MAX_PERCENT, parseBuffer } from "./core/context";
+import {
+	DECLARED_CONTEXT,
+	DEFAULT_PERCENT,
+	formatTokens,
+	MAX_PERCENT,
+	parseBuffer,
+	parseLimit,
+} from "./core/context";
 import { groupByBrand } from "./core/models";
 import { Balancer } from "./rpc";
 
@@ -34,7 +41,7 @@ type Account = {
 type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
-type ContextState = { percent: number };
+type ContextState = { value: string };
 
 type Target = {
 	modelID: string;
@@ -47,8 +54,8 @@ type Chain = {
 	key: string;
 	label: string;
 	package: string;
-	/** This model's own share of its window, 0 when it follows the global. */
-	percent: number;
+	/** This model's own limit as typed, empty when it follows the global. */
+	limit: string;
 	stored: boolean;
 	targets: Target[];
 };
@@ -93,18 +100,6 @@ function builtAt() {
 		: "dev";
 }
 
-/** A token count the way it is said aloud: 200000 reads as 200k, 1000000 as 1m. */
-function size(value: number) {
-	if (!Number.isFinite(value) || value <= 0) return "";
-	// A buffer can be small enough that rounding to thousands would misreport it.
-	if (value < 1_000) return String(Math.round(value));
-	if (value >= 1_000_000) {
-		const millions = value / 1_000_000;
-		return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}m`;
-	}
-	return `${Math.round(value / 1000)}k`;
-}
-
 export default Plugin.define({
 	i18n: {
 		en: {
@@ -140,10 +135,10 @@ export default Plugin.define({
 	setup(ctx) {
 		const [accounts, setAccounts] = createSignal<Account[]>([]);
 		const [balancing, setBalancing] = createSignal(false);
-		// The share of the declared 1M window the balancer compacts at, and the
-		// field being typed into. A model may override it with its own share.
-		const [globalPercent, setGlobalPercent] = createSignal(20);
-		const [globalDraft, setGlobalDraft] = createSignal("20");
+		// The limit the balancer compacts at, as typed: a size in thousands or a
+		// share of the declared 1M window. A model may override it with its own.
+		const [globalLimit, setGlobalLimit] = createSignal("");
+		const [globalLimitDraft, setGlobalLimitDraft] = createSignal("");
 		// The room kept free below a model's window, as typed: a size in
 		// thousands or a share like 10%. Empty means the built-in rule.
 		const [buffer, setBuffer] = createSignal("");
@@ -183,7 +178,7 @@ export default Plugin.define({
 						rpc.list({}),
 						rpc.chains({}),
 						rpc.priority({}),
-						rpc.contextPercent({}),
+						rpc.contextLimit({}),
 						rpc.contextBuffer({}),
 						rpc.log({}),
 					]);
@@ -192,8 +187,8 @@ export default Plugin.define({
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
-				setGlobalPercent((settings as ContextState).percent);
-				setGlobalDraft(String((settings as ContextState).percent));
+				setGlobalLimit((settings as ContextState).value);
+				setGlobalLimitDraft((settings as ContextState).value);
 				setBuffer((room as { value: string }).value);
 				setBufferDraft((room as { value: string }).value);
 				setLastRefreshed(Date.now());
@@ -229,24 +224,25 @@ export default Plugin.define({
 
 		const rpc = () => ctx.client.rpc(Balancer);
 
-		// What the share being typed works out to. The global share is a slice
-		// of the 1M every balancer model declares, so this arithmetic is the
-		// whole story for a 1M model; a model whose real window is smaller is
-		// clamped to that window instead, which the field's title says. Read
-		// from the draft rather than the stored value, so the number follows
-		// the field as it is typed.
-		const draftTokens = () => {
-			const typed = globalDraft().replace("%", "").trim();
-			if (typed === "") return 0;
-			const percent = Number(typed);
-			if (!Number.isFinite(percent) || percent <= 0 || percent > MAX_PERCENT)
-				return 0;
-			return Math.round((DECLARED_CONTEXT * percent) / 100);
+		// What a limit works out to in tokens. A size already is one; a share is
+		// measured against the 1M every balancer model declares, which is the
+		// whole story for a 1M model — one whose real window is smaller is
+		// clamped to that window instead, which the field's title says. An empty
+		// field means the built-in default. Read from what is typed, so the
+		// number follows the field as it is written.
+		const limitTokens = (typed: string) => {
+			const parsed = parseLimit(typed);
+			if (!parsed.ok) return 0;
+			if (parsed.size === undefined)
+				return Math.round((DECLARED_CONTEXT * DEFAULT_PERCENT) / 100);
+			return "tokens" in parsed.size
+				? parsed.size.tokens
+				: Math.round((DECLARED_CONTEXT * parsed.size.percent) / 100);
 		};
 
-		const commitPercent = () => {
-			if (globalDraft() === String(globalPercent())) return;
-			void run(() => rpc().setContextPercent({ value: globalDraft() }));
+		const commitLimit = () => {
+			if (globalLimitDraft() === globalLimit()) return;
+			void run(() => rpc().setContextLimit({ value: globalLimitDraft() }));
 		};
 
 		// What the buffer being typed works out to in tokens, for the readout
@@ -254,8 +250,8 @@ export default Plugin.define({
 		// so it shows none and the field's title explains what it measures.
 		const bufferTokens = () => {
 			const parsed = parseBuffer(bufferDraft());
-			return parsed.ok && parsed.buffer && "tokens" in parsed.buffer
-				? parsed.buffer.tokens
+			return parsed.ok && parsed.size && "tokens" in parsed.size
+				? parsed.size.tokens
 				: 0;
 		};
 
@@ -437,26 +433,33 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="The share of the declared 1M window the balancer compacts a conversation at. It compacts itself, so this is what actually trips; a model can override it with its own share of its real window."
+							title="The limit the balancer compacts a conversation at. It compacts itself, so this is what actually trips. A size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%. Empty keeps the built-in default. A model can override it with a limit of its own."
 						>
 							{ctx.t("contextLimit")}
 						</span>
-						<span
-							style={{ "align-items": "center", display: "flex", gap: "2px" }}
-						>
-							<input
-								onBlur={commitPercent}
-								onInput={(event) => setGlobalDraft(event.currentTarget.value)}
-								onKeyDown={(event) => {
-									if (event.key === "Enter") event.currentTarget.blur();
-								}}
-								placeholder="20"
-								style={{ width: "2.5em" }}
-								title={`a share from 1% to ${MAX_PERCENT}% of the 1M window every balancer model declares; empty restores the default`}
-								value={globalDraft()}
-							/>
-							<span style={{ opacity: 0.7 }}>%</span>
-						</span>
+						<input
+							onBlur={commitLimit}
+							onInput={(event) =>
+								setGlobalLimitDraft(event.currentTarget.value)
+							}
+							onKeyDown={(event) => {
+								if (event.key === "Enter") event.currentTarget.blur();
+							}}
+							placeholder="200"
+							style={{ width: "4.5em" }}
+							title="a size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%; empty restores the default"
+							value={globalLimitDraft()}
+						/>
+						{/* `200` meaning two hundred thousand is worth confirming, as
+						    is what a share lands on. */}
+						<Show when={limitTokens(globalLimitDraft()) > 0}>
+							<span
+								style={{ opacity: 0.6 }}
+								title="what this limit works out to in tokens"
+							>
+								{formatTokens(limitTokens(globalLimitDraft()))}
+							</span>
+						</Show>
 						{/* The room to keep free below the window: what makes a model
 						    whose real cap is below what it reports compact before it
 						    is refused, rather than on its last token. */}
@@ -478,23 +481,13 @@ export default Plugin.define({
 							value={bufferDraft()}
 						/>
 						{/* `20` meaning twenty thousand is worth confirming, since
-						    the field above is a share. */}
+						    the field above it takes a share as readily. */}
 						<Show when={bufferTokens() > 0}>
 							<span
 								style={{ opacity: 0.6 }}
 								title="what the buffer works out to"
 							>
-								{size(bufferTokens())}
-							</span>
-						</Show>
-						{/* What the share on screen works out to, at the far end of
-						    the line so the field itself stays small. */}
-						<Show when={draftTokens() > 0}>
-							<span
-								style={{ "margin-left": "auto", opacity: 0.6 }}
-								title="what this share works out to: the share of the declared 1M the balancer compacts at. A model whose real window is smaller is compacted below it, with the room compaction needs kept free."
-							>
-								{size(draftTokens())}
+								{formatTokens(bufferTokens())}
 							</span>
 						</Show>
 					</div>
@@ -744,16 +737,15 @@ export default Plugin.define({
 																{chain.targets.length} ·{" "}
 																{chain.stored ? "custom" : "automatic"}
 															</span>
-															{/* The model's own share, on the model's own
+															{/* The model's own limit, on the model's own
 															    row: it applies wherever the request is
 															    served from, so it does not belong on a
 															    provider line or to any one of them. */}
 															<input
-																inputMode="numeric"
 																onBlur={(event) => {
 																	const value = event.currentTarget.value;
 																	void run(() =>
-																		rpc().setModelPercent({
+																		rpc().setModelLimit({
 																			key: chain.key,
 																			value,
 																		}),
@@ -765,10 +757,8 @@ export default Plugin.define({
 																}}
 																placeholder={ctx.t("globalShare")}
 																style={{ width: "5em" }}
-																title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
-																value={
-																	chain.percent ? String(chain.percent) : ""
-																}
+																title={`this model's own limit: a size in thousands — 200 is two hundred thousand — or a share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
+																value={chain.limit}
 															/>
 															<Show when={chain.stored}>
 																<button
@@ -1032,7 +1022,10 @@ export default Plugin.define({
 									{visibleChains().length} rows · {logEntries().length} log
 									lines
 								</span>
-								<span>context limit {globalPercent()}% of 1m</span>
+								<span>
+									context limit {globalLimit() || `${DEFAULT_PERCENT}%`} ·{" "}
+									{formatTokens(limitTokens(globalLimit()))}
+								</span>
 							</div>
 							<Show when={logEntries().length > 0}>
 								<button

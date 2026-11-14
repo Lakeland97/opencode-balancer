@@ -158,12 +158,13 @@ The panel lists only rows that route between providers, or that you built by han
 under their brand where a brand has more than one, and every row, group and the whole section can be
 folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
 
-The `context limit` field at the top is the share of **1M** — the window every balancer model declares
-— at which the balancer compacts a conversation, with the number of tokens that works out to beside
-it. It is stored in the plugin's own database, never in `opencode.json`, and nothing needs to reload
+The `context limit` field at the top is where the balancer compacts a conversation, with the number of
+tokens it works out to beside it. It takes either a **size in thousands** — `200` is two hundred
+thousand, `0.5` is five hundred — or a **share of the 1M** window every balancer model declares, like
+`20%`. It is stored in the plugin's own database, never in `opencode.json`, and nothing needs to reload
 for it to take effect: the balancer watches the conversation and asks the host to compact when it
-reaches the threshold. A field whose model needs its own share overrides it, see below. Enter a number
-from `1` to `99`; an empty field restores the default of `20`.
+reaches the threshold. A model that needs its own limit overrides it, see below. An empty field restores
+the default of `20%` — 200k.
 
 ### Context and compaction
 
@@ -174,10 +175,11 @@ one large window hands that decision to the balancer, which is what lets a sessi
 to be reached. The declared **output** stays real: it caps one answer, not the conversation, so it is
 the smallest output limit among the row's targets.
 
-Two shares decide where the conversation is cut, and they measure different windows on purpose:
+Two limits decide where the conversation is cut, and they measure different windows on purpose:
 
-- the **global share** is a slice of the declared 1M, so `20%` always means 200k whatever is serving;
-- a **model's own share** (the `%` field on the row, not on a target) is a slice of that model's **own**
+- the **global limit** is a slice of the declared 1M, so `20%` always means 200k whatever is serving; a
+  **size** is that many tokens outright, wherever it is set;
+- a **model's own limit** (the field on the row, not on a target) is a slice of that model's **own**
   window, so `50%` on a 200k model is 100k. It *overrides* the global rather than being capped against
   it, and it follows the model: whichever credential answers, the conversation is cut at the same place.
 
@@ -188,21 +190,22 @@ request against the same model and carries the conversation with it: triggering 
 token is how a compaction trips the very overflow failure it exists to prevent. The reserve is a tenth
 of the window or 20k, whichever is larger — the two agree at 200k — and never more than a quarter of a
 window so small that 20k would swallow it. A model whose window the provider does not report has no
-ceiling to clamp against, so the share stands alone.
+ceiling to clamp against, so the limit stands alone.
 
-The **buffer** field next to `context limit` replaces that reserve when a model's real cap is below what
-it reports — a free variant, say, which is refused well before its advertised window. A bare number
-means thousands (`20` is 20k, `0.5` is five hundred) and a `%` means a share of each model's own window,
-so the same setting still suits a 200k model and a 1M one. Empty restores the built-in rule. Either way
-the reserve never exceeds a quarter of the window, so a very small model is still left room to hold a
-conversation.
+The **buffer** field next to `context limit` sets that reserve when a model's real cap is below what it
+reports — a free variant, say, which is refused well before its advertised window. It takes the same
+grammar as the limit: a size in thousands (`20` is 20k, `0.5` is five hundred) or a share of each
+model's own window, so the same setting still suits a 200k model and a 1M one. Empty restores the
+built-in rule. Either way the reserve never exceeds a quarter of the window, so a very small model is
+still left room to hold a conversation.
 
 The balancer watches `session.step.ended`, whose token counts are the same per-request figure the host
 shows against the model's limit, and sums input, output, reasoning, and both cache fields. A session
 the balancer never routed is never compacted, and a compaction already in flight is never doubled: the
 guard re-arms only once the conversation is back under the threshold, or a failed compaction is
-retried. The shares and the buffer are stored in the plugin's `settings` table (`context_percent`,
-`model_percent:<row>`, `context_buffer`).
+retried. The limits and the buffer are stored in the plugin's `settings` table (`context_limit`,
+`model_limit:<row>`, `context_buffer`); a bare number an earlier version left under the old names is
+read as the share it then meant.
 
 There is no `compaction.buffer` any more: if you have one in your config, the balancer ignores it and
 you can delete it.
