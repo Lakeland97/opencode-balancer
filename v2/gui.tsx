@@ -21,7 +21,7 @@ type LogEntry = { at: number; kind: string; text: string };
 type Account = {
 	providerID: string;
 	alias: string;
-	/** The stored default for this provider. */
+	/** Whether the balancer can send to it: switched on and not parked. */
 	active: boolean;
 	/** What would authorise the next request, fallback included. */
 	inUse: boolean;
@@ -121,7 +121,6 @@ export default Plugin.define({
 			globalShare: "global",
 			inUse: "in use",
 			limited: "limited",
-			log: "log",
 			logEmpty: "nothing yet",
 			models: "models",
 			newChain: "new chain",
@@ -159,7 +158,6 @@ export default Plugin.define({
 		const [lastRefreshed, setLastRefreshed] = createSignal(0);
 		// What the balancer has actually done this run, newest last.
 		const [logEntries, setLogEntries] = createSignal<LogEntry[]>([]);
-		const [logOpen, setLogOpen] = createSignal(false);
 		const [creating, setCreating] = createSignal(false);
 		// Collapses the whole models section, not just the rows. Starts folded,
 		// and rows and groups do too, so the panel opens compact.
@@ -442,7 +440,7 @@ export default Plugin.define({
 					<div style={divider} />
 
 					<div style={row}>
-						<strong title="one row per credential, in the order routing tries them. active = this provider's pick; in use = served the last request; limited = parked after a failure — hover a marker for the reason. Two credentials on one provider are two rows, and each is tried in turn.">
+						<strong title="one row per credential, in the order routing tries them. active = the balancer can send here; in use = served the last request; limited = parked after a failure — hover a marker for the reason. Two credentials on one provider are two rows, and each is tried in turn.">
 							{ctx.t("providers")}
 						</strong>
 					</div>
@@ -915,13 +913,14 @@ export default Plugin.define({
 
 					<div style={divider} />
 
-					{/* Diagnostics: what the panel is made of and when its values were
-					    read, with the one button that re-reads them. Kept down here so
-					    the top line stays the name and the on/off switch. */}
+					{/* Diagnostics: the panel's own plumbing — what is loaded, when it
+					    was read, and what the balancer has done this run. Folded away
+					    so the top of the panel is the state, not the tools. */}
 					<div style={{ ...row, "align-items": "center" }}>
 						<button onClick={() => setDiagOpen(!diagOpen())}>
 							{diagOpen() ? "▾" : "▸"} {ctx.t("diagnostics")}
 						</button>
+						<span style={{ opacity: 0.5 }}>{logEntries().length}</span>
 						<button
 							onClick={() => void refresh()}
 							style={{ "margin-left": "auto" }}
@@ -936,73 +935,77 @@ export default Plugin.define({
 								"border-top": "1px solid currentColor",
 								display: "flex",
 								"flex-direction": "column",
-								"font-family": "ui-monospace, monospace",
-								"font-size": "11px",
-								gap: "2px",
-								opacity: 0.8,
+								gap: "4px",
 								"padding-top": "4px",
 							}}
 						>
-							<span title="the panel bundle in use; reload the window to pick up a newer build">
-								build {builtAt()}
-							</span>
-							<span title="when every value below was last read in full; the credential list and the log also follow along every couple of seconds">
-								values{" "}
-								{lastRefreshed()
-									? new Date(lastRefreshed()).toLocaleTimeString()
-									: "not read yet"}
-							</span>
-							<span>
-								{providerEntries().length} credentials ·{" "}
-								{visibleChains().length} rows · {logEntries().length} log lines
-							</span>
-							<span>context limit {globalPercent()}% of 1m</span>
-						</div>
-					</Show>
-
-					<div style={divider} />
-					<div style={{ ...row, "align-items": "center" }}>
-						<button onClick={() => setLogOpen(!logOpen())}>
-							{logOpen() ? "▾" : "▸"} {ctx.t("log")}
-						</button>
-						<span style={{ opacity: 0.5 }}>{logEntries().length}</span>
-						<Show when={logOpen() && logEntries().length > 0}>
-							<button onClick={() => void run(() => rpc().clearLog({}))}>
-								{ctx.t("clear")}
-							</button>
-						</Show>
-					</div>
-					<Show when={logOpen()}>
-						<div
-							style={{
-								"border-top": "1px solid currentColor",
-								"font-family": "ui-monospace, monospace",
-								"font-size": "11px",
-								"max-height": "180px",
-								"min-height": 0,
-								"overflow-y": "auto",
-								"padding-top": "4px",
-								"white-space": "pre-wrap",
-							}}
-						>
-							<For
-								each={logEntries()}
-								fallback={
-									<span style={{ opacity: 0.5 }}>{ctx.t("logEmpty")}</span>
-								}
+							<div
+								style={{
+									display: "flex",
+									"flex-direction": "column",
+									"font-family": "ui-monospace, monospace",
+									"font-size": "11px",
+									gap: "2px",
+									opacity: 0.8,
+								}}
 							>
-								{(entry) => (
-									<div
-										style={{ opacity: entry.kind === "route" ? 1 : 0.75 }}
-										title={entry.kind}
-									>
-										<span style={{ opacity: 0.5 }}>
-											{new Date(entry.at).toLocaleTimeString()}{" "}
-										</span>
-										{entry.text}
-									</div>
-								)}
-							</For>
+								<span title="the panel bundle in use; reload the window to pick up a newer build">
+									build {builtAt()}
+								</span>
+								<span title="when every value here was last read in full; the credential list and the log also follow along every couple of seconds">
+									values{" "}
+									{lastRefreshed()
+										? new Date(lastRefreshed()).toLocaleTimeString()
+										: "not read yet"}
+								</span>
+								<span>
+									{providerEntries().length} credentials ·{" "}
+									{visibleChains().length} rows · {logEntries().length} log
+									lines
+								</span>
+								<span>context limit {globalPercent()}% of 1m</span>
+							</div>
+							<Show when={logEntries().length > 0}>
+								<button
+									onClick={() => void run(() => rpc().clearLog({}))}
+									style={{ "align-self": "flex-start" }}
+								>
+									{ctx.t("clear")}
+								</button>
+							</Show>
+							{/* What the balancer has actually done this run, under the
+							    values it is asked about: one place to look, not two. */}
+							<div
+								style={{
+									"border-top": "1px solid currentColor",
+									"font-family": "ui-monospace, monospace",
+									"font-size": "11px",
+									"max-height": "180px",
+									"min-height": 0,
+									"overflow-y": "auto",
+									"padding-top": "4px",
+									"white-space": "pre-wrap",
+								}}
+							>
+								<For
+									each={logEntries()}
+									fallback={
+										<span style={{ opacity: 0.5 }}>{ctx.t("logEmpty")}</span>
+									}
+								>
+									{(entry) => (
+										<div
+											style={{ opacity: entry.kind === "route" ? 1 : 0.75 }}
+											title={entry.kind}
+										>
+											<span style={{ opacity: 0.5 }}>
+												{new Date(entry.at).toLocaleTimeString()}{" "}
+											</span>
+											{entry.text}
+										</div>
+									)}
+								</For>
+							</div>
 						</div>
 					</Show>
 				</div>

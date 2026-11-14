@@ -3,7 +3,6 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	clearAccountPark,
 	getAccount,
-	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
 	moveAccount,
@@ -227,10 +226,12 @@ export async function registerBalancerRpc({
 					// tried since.
 					const limited = account.rateLimitedUntil != null;
 					return {
-						active:
-							!account.disabled &&
-							!limited &&
-							getActiveAccount(db, account.providerID)?.alias === account.alias,
+						// `active` is not "the provider's one pick": it means the
+						// balancer can send to this credential at all — switched
+						// on, and not sitting out a park. A provider with two
+						// keys has two rows that say so, because that is the
+						// question the panel is being asked.
+						active: !account.disabled && !limited,
 						alias: account.alias,
 						disabled: account.disabled,
 						failures: account.failures,

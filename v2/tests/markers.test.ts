@@ -306,6 +306,38 @@ describe("account markers", () => {
 		expect(row?.active).toBe(false);
 	});
 
+	test("every credential the balancer could send to reads active, not one", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.list({})) as {
+			accounts: { active: boolean; alias: string; providerID: string }[];
+		};
+		const rows = listed.accounts.filter(
+			(account) => account.providerID === "p1",
+		);
+		// p1/b is not the provider's first row, but the balancer would still
+		// serve with it, which is what the marker is asked to say.
+		expect(rows.map((row) => `${row.alias}:${row.active}`)).toEqual([
+			"a:true",
+			"b:true",
+		]);
+	});
+
+	test("a switched-off credential is not reported active", async () => {
+		const db = freshDb();
+		setAccountEnabled(db, "p1", "b", false);
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.list({})) as {
+			accounts: { active: boolean; alias: string; providerID: string }[];
+		};
+		const row = listed.accounts.find(
+			(account) => account.providerID === "p1" && account.alias === "b",
+		);
+		expect(row?.active).toBe(false);
+	});
+
 	test("listAccounts keeps reading usage back", () => {
 		const db = freshDb();
 		markAccountUsed(db, "p1", "a", 42);
