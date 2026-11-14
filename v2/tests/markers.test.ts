@@ -14,6 +14,7 @@ import {
 import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
 import {
+	errorRetryAfterMs,
 	isRetryableFailure,
 	markRateLimited,
 	RETRYABLE_STATUS,
@@ -89,6 +90,49 @@ describe("failure classification", () => {
 		expect(isRetryableFailure({ error: new Error("Too many requests") })).toBe(
 			true,
 		);
+	});
+
+	test("a failure in wording no list anticipates is still retryable", () => {
+		// The provider that started this: a free-tier cap raised with no status
+		// and not one word a keyword list would carry.
+		expect(
+			isRetryableFailure({
+				error: new Error(
+					"You've used today's free messages. They reset at 11:27 AM.",
+				),
+			}),
+		).toBe(true);
+		expect(
+			isRetryableFailure({
+				error: new Error("something entirely new happened"),
+			}),
+		).toBe(true);
+	});
+
+	test("a request-shaped failure is never charged to the account", () => {
+		expect(
+			isRetryableFailure({
+				error: new Error("Prompt is too long for the model's context window"),
+			}),
+		).toBe(false);
+		expect(
+			isRetryableFailure({
+				error: new Error("blocked by content filtering policy"),
+			}),
+		).toBe(false);
+	});
+
+	test("a response that was not a failure is not one here either", () => {
+		expect(isRetryableFailure({ status: 200 })).toBe(false);
+		expect(isRetryableFailure({})).toBe(false);
+	});
+
+	test("the wait the provider named is read off the typed error", () => {
+		expect(errorRetryAfterMs({ retryAfterMs: 5_000 })).toBe(5_000);
+		expect(errorRetryAfterMs({ retryAfterMs: 0 })).toBeUndefined();
+		expect(errorRetryAfterMs({ retryAfterMs: -1 })).toBeUndefined();
+		expect(errorRetryAfterMs({ retryAfterMs: "soon" })).toBeUndefined();
+		expect(errorRetryAfterMs(undefined)).toBeUndefined();
 	});
 });
 

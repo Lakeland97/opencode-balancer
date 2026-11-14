@@ -1,6 +1,10 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import { getActiveAccount, markAccountUsed } from "../core/accounts";
+import {
+	getAccount,
+	getActiveAccount,
+	markAccountUsed,
+} from "../core/accounts";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
@@ -12,6 +16,7 @@ import {
 } from "./connectors";
 import { recordLog } from "./log";
 import {
+	errorRetryAfterMs,
 	isRetryableFailure,
 	markRateLimited,
 	retryAfterMs,
@@ -42,6 +47,12 @@ const STALE_AFTER_MS = 5 * 60_000;
 // The virtual provider's slot is keyed by `balancer`, which is the provider id
 // `http.response` and `retry` report for a routed call.
 const ROUTED = BALANCER_PROVIDER_ID;
+// How many times one session may be moved on before the real failure is handed
+// over. Comfortably longer than any chain, so it only fires after a wrap-around.
+const ATTEMPT_CAP = 12;
+// A provider that names its own window is believed, but only so far: a park is
+// cleared by `use`, and a mis-parsed value must not sit on an account for days.
+const MAX_PARK_MS = 60 * 60_000;
 
 function sessionKey(sessionID: string, providerID: string) {
 	return `${sessionID}:${providerID}`;
@@ -56,6 +67,12 @@ function fresh(tracked: Tracked) {
 	return now() - tracked.at <= STALE_AFTER_MS;
 }
 
+/** Whether an account is currently sitting out its cooldown. */
+function isParked(db: Database, providerID: string, alias: string) {
+	const account = getAccount(db, providerID, alias);
+	return Boolean(account?.rateLimitedUntil && account.rateLimitedUntil > now());
+}
+
 // Providers this session has already tried since its last answer. A retry
 // reads this so it moves forward through the chain instead of starting again
 // at the first target and parking every provider on the way down.
@@ -68,6 +85,72 @@ function triedFor(sessionID: string) {
 		triedBySession.set(sessionID, tried);
 	}
 	return tried;
+}
+
+// The target each session was last announced on, so a switch can name where it
+// came from. Kept apart from the routing slots above, which the failover path
+// deliberately clears before a retry: erasing that history would make every
+// failover read as a fresh first choice.
+const announced = new Map<string, { alias: string; providerID: string }>();
+
+/**
+ * Say where a call went — the first time, and whenever it changes.
+ *
+ * Logging every request buried the switches among identical lines, which is why
+ * the log said nothing about when routing moved or why. Only a change is worth
+ * a line, and a change is exactly where the reason belongs.
+ */
+function announceRoute(input: {
+	db: Database;
+	key: string;
+	modelID?: string;
+	next: { alias: string; providerID: string };
+}) {
+	const { db, key, modelID, next } = input;
+	const before = announced.get(key);
+	if (
+		before &&
+		before.providerID === next.providerID &&
+		before.alias === next.alias
+	) {
+		return;
+	}
+	announced.set(key, next);
+	const prefix = modelID ? `${modelID}: ` : "";
+	const to = `${next.providerID}/${next.alias}`;
+	if (!before) {
+		recordLog("route", `${prefix}${to} (first choice)`);
+		return;
+	}
+	const from = `${before.providerID}/${before.alias}`;
+	const because = isParked(db, before.providerID, before.alias)
+		? "the previous target is parked"
+		: "moved on";
+	recordLog("route", `${prefix}${from} → ${to} (${because})`);
+}
+
+/**
+ * The failure in the endpoint's own words where it gave any, its status next,
+ * and what it calls itself last. A park the panel cannot explain reads exactly
+ * like a bug, so one of these always lands.
+ */
+function describeFailure(error: unknown, status?: number) {
+	const value = error as
+		| { message?: unknown; name?: unknown; type?: unknown; _tag?: unknown }
+		| undefined;
+	const described =
+		typeof value?.message === "string" ? value.message.trim() : "";
+	const named = [value?.name, value?.type, value?._tag]
+		.filter(
+			(part): part is string => typeof part === "string" && part.trim() !== "",
+		)
+		.join(" ");
+	return (
+		described ||
+		(typeof status === "number" ? `HTTP ${status}` : "") ||
+		named ||
+		"the host reported a failure with no detail"
+	);
 }
 
 /**
@@ -212,10 +295,12 @@ export async function registerHooks({
 			request = new Request(request, { headers });
 
 			event.request = request;
-			recordLog(
-				"route",
-				`${family.key} → ${route.providerID}/${route.account.alias} (${route.modelID})`,
-			);
+			announceRoute({
+				db,
+				key: sessionKey(event.sessionID, ROUTED),
+				modelID: family.key,
+				next: { alias: route.account.alias, providerID: route.providerID },
+			});
 			markAccountUsed(db, route.providerID, route.account.alias);
 			byRequest.set(request, {
 				alias: route.account.alias,
@@ -246,7 +331,11 @@ export async function registerHooks({
 			preserveExistingOAuth: !isFailover,
 		});
 
-		recordLog("route", `${providerID} → ${account.alias}`);
+		announceRoute({
+			db,
+			key: sessionKey(event.sessionID, providerID),
+			next: { alias: account.alias, providerID: account.providerID },
+		});
 		markAccountUsed(db, account.providerID, account.alias);
 		const tracked = { alias: account.alias, at: now(), providerID };
 		byRequest.set(event.request, tracked);
@@ -260,7 +349,11 @@ export async function registerHooks({
 			sessionID: event.sessionID,
 		});
 		if (!tracked) return;
-		if (!isRetryableFailure({ status: event.response.status })) {
+		// Only a status the provider rejected counts as a failure: the classifier
+		// treats an unrecognised failure as retryable, so an answer must be
+		// excluded before it is asked about.
+		const failed = event.response.status >= 400;
+		if (!failed || !isRetryableFailure({ status: event.response.status })) {
 			// An answer ends the failover trail: the session stays on this
 			// target and a later failure may try the others again.
 			triedBySession.delete(event.sessionID);
@@ -282,44 +375,55 @@ export async function registerHooks({
 		);
 	});
 
+	// The host will not retry a failure it has classified as deterministic, and
+	// a quota cap is exactly that, so the only thing that can keep the text out
+	// of the conversation is this hook setting the decision itself. It is also
+	// the last moment before the session records a cut-off, which is why every
+	// outcome is logged — including the ones that let the failure through.
 	await ctx.session.hook("retry", async (event) => {
 		const status = (event.error as { status?: number } | undefined)?.status;
-		if (!isRetryableFailure({ error: event.error, status })) return;
-
+		const reported = describeFailure(event.error, status);
 		const tracked = lookupTracked({
 			providerID: event.model.providerID,
 			sessionID: event.sessionID,
 		});
-		if (!tracked) return;
+		if (!tracked) {
+			// A routed call always has a target on record; losing it means the
+			// failure cannot be charged to anyone, which the panel must say.
+			if (event.model.providerID === BALANCER_PROVIDER_ID) {
+				recordLog(
+					"error",
+					`a routed call failed with no target on record: ${reported.slice(0, 120)}`,
+				);
+			}
+			return;
+		}
 
-		// The typed error the host raised carries the provider's own words when
-		// it has any; failing that, the status it raised; failing that, whatever
-		// the error calls itself. A park the panel cannot explain reads exactly
-		// like a bug, so one of these always lands.
-		const error = event.error as
-			| { message?: unknown; name?: unknown; type?: unknown; _tag?: unknown }
-			| undefined;
-		const described =
-			typeof error?.message === "string" ? error.message.trim() : "";
-		const named = [error?.name, error?.type, error?._tag]
-			.filter(
-				(value): value is string =>
-					typeof value === "string" && value.trim() !== "",
-			)
-			.join(" ");
-		const reported =
-			described ||
-			(typeof status === "number" ? `HTTP ${status}` : "") ||
-			named ||
-			"the host reported a failure with no detail";
-		markRateLimited(db, tracked.providerID, tracked.alias, 60_000, reported);
-		triedFor(event.sessionID).add(tracked.providerID);
-		recordLog(
-			"failover",
-			`${tracked.providerID}/${tracked.alias} failed: ${reported.slice(0, 120)}; moving to the next target`,
+		const from = `${tracked.providerID}/${tracked.alias}`;
+		if (!isRetryableFailure({ error: event.error, status })) {
+			recordLog(
+				"error",
+				`${from} failed and is not the account's fault, so the session sees it: ${reported.slice(0, 120)}`,
+			);
+			return;
+		}
+
+		// Park before deciding, so a failure that cannot be passed on still
+		// leaves the account out of the next selection.
+		const park = Math.min(
+			errorRetryAfterMs(event.error) ?? 60_000,
+			MAX_PARK_MS,
 		);
+		markRateLimited(db, tracked.providerID, tracked.alias, park, reported);
+		triedFor(event.sessionID).add(tracked.providerID);
 
-		if (!getBalancingEnabled(db)) return;
+		if (!getBalancingEnabled(db)) {
+			recordLog(
+				"failover",
+				`${from} failed: ${reported.slice(0, 120)}; balancing is off, so the session sees it`,
+			);
+			return;
+		}
 
 		const routed = event.model.providerID === BALANCER_PROVIDER_ID;
 		const family = routed
@@ -331,7 +435,17 @@ export async function registerHooks({
 		if (!canContinue) {
 			recordLog(
 				"error",
-				`no alternative to ${tracked.providerID}/${tracked.alias}; the session sees the error`,
+				`no alternative to ${from}: the session sees the error`,
+			);
+			return;
+		}
+
+		// Past a few rounds the chain has wrapped and re-walking it would only
+		// hide the reason, so the real failure is handed over instead.
+		if (event.attempt > ATTEMPT_CAP) {
+			recordLog(
+				"error",
+				`${from} failed after ${event.attempt} attempts; the session sees the error`,
 			);
 			return;
 		}
@@ -341,6 +455,10 @@ export async function registerHooks({
 		bySession.delete(sessionKey(event.sessionID, ROUTED));
 		bySession.delete(sessionKey(event.sessionID, tracked.providerID));
 
+		recordLog(
+			"failover",
+			`${from} failed: ${reported.slice(0, 120)}; moving to the next target`,
+		);
 		event.decision = { delay: 0, retry: true };
 	});
 }

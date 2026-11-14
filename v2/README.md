@@ -170,6 +170,31 @@ retried. Both shares are stored in the plugin's `settings` table (`context_perce
 There is no `compaction.buffer` any more: if you have one in your config, the balancer ignores it and
 you can delete it.
 
+## What counts as a failure
+
+A provider failure is intercepted in the `retry` hook, before the session records a cut-off, so the
+conversation only ever sees one when no other target is left. The host classifies each failure
+itself and will not retry a deterministic one — a quota cap is exactly that — so the balancer sets
+the retry decision rather than relying on it.
+
+Anything unrecognised, arriving without a status, is treated as the account's fault. Providers
+invent a new way to say "this account is spent" every few months, so a keyword list can never be the
+test; a park is bounded and `use` clears it, whereas the opposite guess hands the message to the
+user. Only two shapes are positively rejected, because another account would refuse them in the
+same words:
+
+- context overflow, which the compaction watcher handles instead;
+- a content refusal.
+
+The endpoint's own words, and its `retryAfterMs` when it gives one, are what the panel shows and how
+long the account sits out — capped at an hour, so a mis-parsed value cannot strand it.
+
+## The log
+
+The panel's log records the first route a session takes and then every change, naming where it came
+from and whether the previous target was parked. A failure that is *not* failed over is logged as
+well, with its reason, so a cut-off in the conversation is always explained here.
+
 ## Deliberate limits
 
 - **One model at a time.** The session is pinned to a family; the connector behind it changes,
