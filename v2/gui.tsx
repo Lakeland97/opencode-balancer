@@ -390,18 +390,12 @@ export default Plugin.define({
 						</button>
 						<strong>{ctx.t("models")}</strong>
 						<button
-							onClick={toggleAll}
-							style={{ "margin-left": "auto" }}
-							title={allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
-						>
-							{allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
-						</button>
-						<button
 							onClick={() => {
 								setCreating(!creating());
 								setCreateProvider("");
 								setCreateModels([]);
 							}}
+							style={{ "margin-left": "auto" }}
 						>
 							+ {ctx.t("newChain")}
 						</button>
