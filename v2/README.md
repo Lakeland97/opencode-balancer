@@ -1,8 +1,20 @@
-# opencode-balancer (V2 port)
+# opencode-balancer
 
-A port of [`@thelioo/opencode-balancer`](https://github.com/thelioo/opencode-balancer) to the
-OpenCode 2 plugin API. Keeps multiple accounts per provider and fails over to a healthy one when
-the active account is rate limited.
+Multiple accounts per provider, automatic failover when one is rate limited, and one picker row
+per model family that can be served by any provider you have an account for.
+
+> [!IMPORTANT]
+> **This fork is the maintained line.** Upstream
+> [`thelioo/opencode-balancer`](https://github.com/thelioo/opencode-balancer) has been dormant
+> since July 2026 and still targets the V1 plugin API, which OpenCode 2 refuses to load. Work
+> continues here, on OpenCode 2. The V1 plugin at the repository root is kept for OpenCode 1
+> users and is no longer developed.
+
+| | |
+|---|---|
+| OpenCode 2 | supported — this directory |
+| OpenCode 1 | the top-level plugin, unchanged, no longer developed |
+| Upstream | dormant since 2026-07-17 |
 
 ## Why this exists
 
@@ -28,6 +40,7 @@ re-implements the integration on the V2 hook surface.
 | Rate-limit detection | `session.hook("http.response")` |
 | Failover | `session.hook("retry")` forces a retry; the next request selects another account or connector |
 | Control surface | `/balancer` command + `balancer_command` tool, replacing the terminal dashboard |
+| Base URL / provider switching | the `balancer` provider, which routing rewrites per request |
 
 ## The Balancer provider
 
@@ -53,8 +66,8 @@ built.
   the model does not.
 - **Pre-stream failover only.** A retry can hop connectors until the first token arrives; a
   stream already in progress cannot move.
-- **No TUI.** OpenCode Desktop renders only plugins that export `./gui-experimental`, which
-  upstream does not provide.
+- **No TUI.** OpenCode Desktop renders only plugins that export `./gui-experimental`. The V2
+  plugin ships one (`v2/gui.tsx`); the V1 terminal dashboard cannot run there.
 
 ## Commands
 
@@ -78,11 +91,11 @@ Balancing defaults to **off**. Run `/balancer on` once accounts exist.
 
 ## Install
 
-Register the repository as a plugin directory in `~/.config/opencode/opencode.json`:
+Clone this repository, then register the `v2` directory in `~/.config/opencode/opencode.json`:
 
 ```jsonc
 {
-  "plugins": ["/Users/user/Scripts/git/opencode-balancer/v2"]
+  "plugins": [{ "package": "/absolute/path/to/opencode-balancer/v2" }]
 }
 ```
 
@@ -110,9 +123,10 @@ Open it from the command palette (**Open Balancer**), the **Balancer** pill in t
 
 ## Upstream sync
 
-`core/` files are unmodified copies. When rebasing on a new upstream release, diff that directory
-against the published tarball first — those files should merge cleanly, and everything in
-`server/` is expected to conflict.
+`core/` files began as unmodified copies of the upstream plugin. Upstream has stopped moving, so
+this is no longer a port: fixes and features land here first. If upstream ever resumes, diff
+those files against its release before merging — everything in `server/` is V2-only and will
+conflict by design.
 
 ## License
 

@@ -1,5 +1,5 @@
 {
-	"description": "OpenCode 2 port of @thelioo/opencode-balancer: multi-account failover with a command-driven interface.",
+	"description": "opencode-balancer for OpenCode 2: multi-account and multi-provider failover behind one Balancer provider.",
 	"devDependencies": {
 		"@opencode/plugin": "2.0.26",
 		"@types/bun": "latest"
@@ -10,12 +10,12 @@
 		"./rpc": "./rpc.ts"
 	},
 	"license": "MIT",
-	"name": "opencode-balancer-v2",
+	"name": "opencode-balancer",
 	"private": true,
 	"scripts": {
 		"audit": "~/.config/opencode/rules/audit.sh",
 		"test": "bun test"
 	},
 	"type": "module",
-	"version": "0.1.0"
+	"version": "1.0.0"
 }

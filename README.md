@@ -4,7 +4,7 @@
 
 _Use multiple accounts and provider/model priorities in opencode, then fail over automatically when one account hits a limit._
 
-[![npm version](https://img.shields.io/npm/v/@thelioo/opencode-balancer?style=flat-square)](https://www.npmjs.com/package/@thelioo/opencode-balancer)
+[![OpenCode 2](https://img.shields.io/badge/opencode-2-111?style=flat-square)](https://opencode.ai)
 [![TypeScript](https://img.shields.io/badge/TypeScript-blue?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org)
 [![opencode plugin](https://img.shields.io/badge/opencode-plugin-111?style=flat-square)](https://opencode.ai/docs/plugins)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow?style=flat-square)](LICENSE)
@@ -12,6 +12,16 @@ _Use multiple accounts and provider/model priorities in opencode, then fail over
 [Features](#features) | [Installation](#installation) | [Usage](#usage) | [Troubleshooting](#troubleshooting)
 
 </div>
+
+> [!IMPORTANT]
+> **This repository is the maintained fork of `opencode-balancer`.**
+> Upstream [`thelioo/opencode-balancer`](https://github.com/thelioo/opencode-balancer) has been
+> dormant since July 2026 and only targets OpenCode 1. Development continues here on
+> [OpenCode 2](https://opencode.ai), in [`v2/`](v2/README.md): a Balancer provider that routes one
+> picker row across every provider and account you have connected, with failover between them.
+>
+> The plugin documented below is the original V1 build. It still works on OpenCode 1 and is no
+> longer developed. **OpenCode 2 users want [`v2/README.md`](v2/README.md).**
 
 `opencode-balancer` is an [opencode](https://opencode.ai/) server and TUI plugin that lets you keep several authenticated accounts, choose which provider/model should be used first, and keep working when the current account becomes rate-limited.
 

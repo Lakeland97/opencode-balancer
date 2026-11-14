@@ -1,12 +1,12 @@
 {
 	"bugs": {
-		"url": "https://github.com/thelioo/opencode-balancer/issues"
+		"url": "https://github.com/Lakeland97/opencode-balancer/issues"
 	},
 	"dependencies": {
 		"@opencode-ai/plugin": "^1.14.51",
 		"@opentui/solid": "^0.4.3"
 	},
-	"description": "Account balancer plugin for opencode.",
+	"description": "Maintained fork of opencode-balancer: multi-account failover, with an OpenCode 2 build under v2/.",
 	"devDependencies": {
 		"@biomejs/biome": "^2.4.16",
 		"@changesets/cli": "^2.31.0",
@@ -33,7 +33,7 @@
 		"INSTALL.txt",
 		"LICENSE"
 	],
-	"homepage": "https://github.com/thelioo/opencode-balancer#readme",
+	"homepage": "https://github.com/Lakeland97/opencode-balancer#readme",
 	"keywords": [
 		"opencode",
 		"opencode-plugin",
@@ -45,7 +45,7 @@
 	"name": "@thelioo/opencode-balancer",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/thelioo/opencode-balancer.git"
+		"url": "git+https://github.com/Lakeland97/opencode-balancer.git"
 	},
 	"scripts": {
 		"build": "bun scripts/build.ts",
