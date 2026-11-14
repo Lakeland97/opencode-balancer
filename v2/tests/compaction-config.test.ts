@@ -213,6 +213,63 @@ describe("writeCompactionBuffer", () => {
 
 		expect(readFileSync(`${file}.bak`, "utf8")).toBe(original);
 	});
+
+	test("clearing removes only the buffer and keeps the section valid", () => {
+		const cwd = tempDir();
+		const file = join(cwd, "opencode.json");
+		writeFileSync(
+			file,
+			`{
+  // keep this
+  "compaction": {
+    "auto": true,
+    "buffer": "51%"
+  },
+  "model": "vendor/model"
+}`,
+		);
+
+		writeCompactionBuffer(file, undefined);
+
+		const text = readFileSync(file, "utf8");
+		expect(text).toContain("// keep this");
+		expect(text).not.toContain("buffer");
+		expect(JSON.parse(stripJsonc(text))).toEqual({
+			compaction: { auto: true },
+			model: "vendor/model",
+		});
+	});
+
+	test("clearing the last member of the section leaves no dangling comma", () => {
+		const cwd = tempDir();
+		const file = join(cwd, "opencode.json");
+		writeFileSync(
+			file,
+			'{\n  "model": "x",\n  "compaction": {\n    "auto": true,\n    "buffer": "51%"\n  }\n}',
+		);
+
+		writeCompactionBuffer(file, undefined);
+
+		expect(JSON.parse(stripJsonc(readFileSync(file, "utf8")))).toEqual({
+			compaction: { auto: true },
+			model: "x",
+		});
+	});
+
+	test("a buffer is added to a config with no compaction section", () => {
+		const cwd = tempDir();
+		const file = join(cwd, "opencode.json");
+		writeFileSync(file, '{\n  // keep this\n  "model": "vendor/model"\n}');
+
+		writeCompactionBuffer(file, "10%");
+
+		const text = readFileSync(file, "utf8");
+		expect(text).toContain("// keep this");
+		expect(JSON.parse(stripJsonc(text))).toEqual({
+			compaction: { buffer: "10%" },
+			model: "vendor/model",
+		});
+	});
 });
 
 describe("compactionConfigPath", () => {

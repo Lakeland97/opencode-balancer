@@ -2,15 +2,10 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import { listAccounts } from "../core/accounts";
 import { listStoredChains } from "../core/chains";
-import {
-	type CompactionBuffer,
-	declaredContext,
-	rowWindow,
-} from "../core/context";
+import { rowWindow } from "../core/context";
 import { readRowLimit, readTargetLimit } from "../core/limits";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
 import { isFreeOnly, listProviderPriority } from "../core/priority";
-import { readCompactionBuffer } from "./compaction-config";
 
 /** The provider this plugin registers; sessions pin it and never change. */
 export const BALANCER_PROVIDER_ID = "balancer";
@@ -391,10 +386,10 @@ export function sortRoutes(
  * picker reads as a single choice instead of one row per connector.
  */
 /** What the declared models are built from; replaced whenever the host reloads. */
-let declarations: { buffer: CompactionBuffer; catalog: Catalog } | undefined;
+let declarations: { catalog: Catalog } | undefined;
 
 /** The balancer's virtual models, one per family, at the window each settles on. */
-function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
+function declaredModels(catalog: Catalog) {
 	return catalog.families.map((family) => {
 		const source = catalog.sources.get(family.key);
 		const window = family.window;
@@ -411,12 +406,13 @@ function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
 				variants: [],
 			}),
 			id: family.key,
-			// The window is the smallest target's, declared so the host's
-			// buffer applies to that real limit instead of a fraction of it.
+			// The window is the smallest target's, declared as it is: the host
+			// already keeps `compaction.buffer` free of whatever it is told, so
+			// the buffer belongs in the config, not in invented arithmetic.
 			...(window
 				? {
 						limit: {
-							context: declaredContext(window.context, buffer, window.ceiling),
+							context: window.context,
 							...(window.output > 0 ? { output: window.output } : {}),
 						},
 					}
@@ -437,15 +433,13 @@ function declaredModels(catalog: Catalog, buffer: CompactionBuffer) {
 export async function registerBalancerProvider({
 	ctx,
 	db,
-	buffer = readCompactionBuffer(),
 }: {
 	ctx: Context;
 	db: Database;
-	buffer?: CompactionBuffer;
 }) {
 	const catalog = await loadCatalog(ctx, db);
 	if (catalog.families.length === 0) return;
-	declarations = { buffer, catalog };
+	declarations = { catalog };
 
 	await ctx.provider.transform((editor) => {
 		const current = declarations;
@@ -462,27 +456,25 @@ export async function registerBalancerProvider({
 					provider: BALANCER_PROVIDER_ID,
 				},
 			},
-			models: declaredModels(current.catalog, current.buffer),
+			models: declaredModels(current.catalog),
 		} as never);
 	});
 }
 
 /**
- * Re-reads the catalog and buffer and has the host rebuild its models, so a
- * changed buffer, an edited chain or a toggled free-only provider reaches the
- * declared windows without restarting the application.
+ * Re-reads the catalog and has the host rebuild its models, so an edited chain,
+ * a limit or a toggled free-only provider reaches the declared windows without
+ * restarting the application.
  */
 export async function refreshBalancerProvider({
 	ctx,
 	db,
-	buffer = readCompactionBuffer(),
 }: {
 	ctx: Context;
 	db: Database;
-	buffer?: CompactionBuffer;
 }) {
 	invalidateCatalog();
 	const catalog = await loadCatalog(ctx, db);
-	declarations = { buffer, catalog };
+	declarations = { catalog };
 	await ctx.provider.reload();
 }

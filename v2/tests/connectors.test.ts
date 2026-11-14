@@ -337,7 +337,6 @@ describe("provider registration", () => {
 		} as never;
 
 		await registerBalancerProvider({
-			buffer: { kind: "percent", percent: 0.75 },
 			ctx,
 			db,
 		});
@@ -348,7 +347,7 @@ describe("provider registration", () => {
 		expect(Array.isArray(row?.cost)).toBe(true);
 	});
 
-	test("the declared window is compensated for the buffer", async () => {
+	test("the declared window is the row's own, not an inflated one", async () => {
 		const db = freshDb();
 		saveChain(db, {
 			familyKey: "deepseek-v4.1-flash",
@@ -385,7 +384,6 @@ describe("provider registration", () => {
 		} as never;
 
 		await registerBalancerProvider({
-			buffer: { kind: "percent", percent: 0.75 },
 			ctx,
 			db,
 		});
@@ -393,7 +391,7 @@ describe("provider registration", () => {
 		const row = added.find(
 			(entry) => (entry as { id?: string }).id === "deepseek-v4.1-flash",
 		);
-		expect(row?.limit).toEqual({ context: 800_000, output: 32_000 });
+		expect(row?.limit).toEqual({ context: 200_000, output: 32_000 });
 	});
 });
 
@@ -436,13 +434,14 @@ describe("provider re-declaration", () => {
 		const db = freshDb();
 		const host = hostingCtx(twoConnectors);
 		await registerBalancerProvider({
-			buffer: { kind: "percent", percent: 0.75 },
 			ctx: host.ctx,
 			db,
 		});
 
-		// The smallest target is 200k, so the declaration is 200k / 0.25.
-		expect(host.limitOf("deepseek-v4.1-flash")).toBe(800_000);
+		// The declaration is the smallest target's own window. The 75% reserve
+		// lives in the config and pulls the trip to 50k; it does not inflate
+		// the number the host is told the model holds.
+		expect(host.limitOf("deepseek-v4.1-flash")).toBe(200_000);
 
 		// Narrow the row to the 1M connector alone.
 		saveChain(db, {
@@ -458,13 +457,11 @@ describe("provider re-declaration", () => {
 			],
 		});
 		await refreshBalancerProvider({
-			buffer: { kind: "percent", percent: 0.75 },
 			ctx: host.ctx,
 			db,
 		});
 
-		// The declaration follows the row and the buffer, capped at the row's
-		// largest real window: one 1M target at 75% declares 1M.
+		// The declaration follows the row: one 1M target declares 1M.
 		expect(host.limitOf("deepseek-v4.1-flash")).toBe(1_000_000);
 	});
 });

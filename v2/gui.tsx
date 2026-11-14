@@ -34,7 +34,7 @@ type Account = {
 type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
-type BufferState = { path: string; value: string };
+type ContextState = { reserve: string; target: number };
 
 type Target = {
 	modelID: string;
@@ -47,7 +47,8 @@ type Target = {
 };
 type Chain = {
 	context: number;
-	declaredContext: number;
+	/** Where the host compacts: the chosen share of the model's own window. */
+	trip: number;
 	key: string;
 	label: string;
 	package: string;
@@ -97,9 +98,9 @@ function size(value: number) {
 	return `${Math.round(value / 1000)}k`;
 }
 
-/** The editable part of a stored share: `99%` becomes `99`, a token count stays. */
-function bareShare(value: string) {
-	return value.endsWith("%") ? value.slice(0, -1) : value;
+/** How a share is typed into a field: `0.49` reads as `49`, `0.485` as `48.5`. */
+function shareText(target: number) {
+	return String(Number((target * 100).toFixed(2)));
 }
 
 export default Plugin.define({
@@ -114,7 +115,6 @@ export default Plugin.define({
 			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
-			declares: "declares",
 			disabled: "disabled",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
@@ -134,6 +134,7 @@ export default Plugin.define({
 			remove: "remove",
 			reset: "reset",
 			title: "Balancer",
+			tripsAt: "trips at",
 			use: "use",
 			window: "window",
 		},
@@ -141,9 +142,10 @@ export default Plugin.define({
 	setup(ctx) {
 		const [accounts, setAccounts] = createSignal<Account[]>([]);
 		const [balancing, setBalancing] = createSignal(false);
-		const [buffer, setBuffer] = createSignal("");
-		const [bufferDraft, setBufferDraft] = createSignal("");
-		const [bufferPath, setBufferPath] = createSignal("");
+		// The share of a model's window the user wants filled before compaction.
+		const [target, setTarget] = createSignal(1);
+		const [targetDraft, setTargetDraft] = createSignal("");
+		const [reserve, setReserve] = createSignal("");
 		const [message, setMessage] = createSignal("");
 		const [provider, setProvider] = createSignal("");
 		const [alias, setAlias] = createSignal("");
@@ -175,7 +177,7 @@ export default Plugin.define({
 					rpc.list({}),
 					rpc.chains({}),
 					rpc.priority({}),
-					rpc.buffer({}),
+					rpc.contextTarget({}),
 					rpc.log({}),
 				]);
 				setBalancing((status as Status).balancing);
@@ -183,9 +185,9 @@ export default Plugin.define({
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
-				setBuffer((settings as BufferState).value);
-				setBufferPath((settings as BufferState).path);
-				setBufferDraft(bareShare((settings as BufferState).value));
+				setTarget((settings as ContextState).target);
+				setReserve((settings as ContextState).reserve);
+				setTargetDraft(shareText((settings as ContextState).target));
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -218,13 +220,27 @@ export default Plugin.define({
 
 		const rpc = () => ctx.client.rpc(Balancer);
 
-		// The buffer reads as the share the user typed: a stored percentage keeps
-		// its `%` after the input, while a token count stays a bare number.
-		const bufferIsPercent = () => buffer().endsWith("%");
-		const commitBuffer = () => {
-			if (bufferDraft() === bareShare(buffer())) return;
-			const value = bufferIsPercent() ? `${bufferDraft()}%` : bufferDraft();
-			void run(() => rpc().setBuffer({ value }));
+		// The plugin's reload rebuilds the model registry. The project keeps its
+		// own catalog cached per directory, so it needs the same nudge before the
+		// numbers reach a running chat.
+		const reloadProject = async () => {
+			try {
+				await ctx.client.location.reload();
+			} catch {
+				// A project that cannot reload still gets the new declaration next
+				// time it builds its catalog.
+			}
+		};
+
+		const commitTarget = () => {
+			if (targetDraft() === shareText(target())) return;
+			void run(async () => {
+				const reply = (await rpc().setContextTarget({
+					value: targetDraft(),
+				})) as Reply;
+				if (reply.ok) await reloadProject();
+				return reply;
+			});
 		};
 
 		const startAdd = async (key: string) => {
@@ -384,25 +400,23 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="How full a model's window may get before it compacts; the rest is kept free for the compaction itself. 1% to 99%, or a token count."
+							title="How full a model's window may get before the host compacts. This writes the config's compaction buffer, so the number here is what actually trips."
 						>
 							{ctx.t("contextLimit")}
 						</span>
 						<span style={{ "align-items": "center", display: "flex" }}>
 							<input
-								onBlur={commitBuffer}
-								onInput={(event) => setBufferDraft(event.currentTarget.value)}
+								onBlur={commitTarget}
+								onInput={(event) => setTargetDraft(event.currentTarget.value)}
 								onKeyDown={(event) => {
 									if (event.key === "Enter") event.currentTarget.blur();
 								}}
-								placeholder="80"
+								placeholder="100"
 								style={{ width: "9em" }}
-								title={bufferPath()}
-								value={bufferDraft()}
+								title={`writes the compaction buffer in your config; it currently keeps ${reserve()} free`}
+								value={targetDraft()}
 							/>
-							<span style={{ opacity: 0.7 }}>
-								{bufferIsPercent() ? "%" : ""}
-							</span>
+							<span style={{ opacity: 0.7 }}>%</span>
 						</span>
 					</div>
 
@@ -762,15 +776,20 @@ export default Plugin.define({
 																	</span>
 																	<input
 																		inputMode="numeric"
-																		onBlur={(event) =>
-																			void run(() =>
-																				rpc().setTargetLimit({
-																					key: chain.key,
-																					providerID: target.providerID,
-																					value: event.currentTarget.value,
-																				}),
-																			)
-																		}
+																		onBlur={(event) => {
+																			const value = event.currentTarget.value;
+																			void run(async () => {
+																				const reply =
+																					await rpc().setTargetLimit({
+																						key: chain.key,
+																						providerID: target.providerID,
+																						value,
+																					});
+																				if ((reply as Reply).ok)
+																					await reloadProject();
+																				return reply;
+																			});
+																		}}
 																		onKeyDown={(event) => {
 																			if (event.key === "Enter")
 																				event.currentTarget.blur();
@@ -833,7 +852,7 @@ export default Plugin.define({
 
 														<div style={{ opacity: 0.6 }}>
 															{ctx.t("window")} {size(chain.context)} ·{" "}
-															{ctx.t("declares")} {size(chain.declaredContext)}
+															{ctx.t("tripsAt")} {size(chain.trip)}
 														</div>
 
 														<div style={row}>
@@ -842,14 +861,18 @@ export default Plugin.define({
 															</span>
 															<input
 																inputMode="numeric"
-																onBlur={(event) =>
-																	void run(() =>
-																		rpc().setRowLimit({
+																onBlur={(event) => {
+																	const value = event.currentTarget.value;
+																	void run(async () => {
+																		const reply = await rpc().setRowLimit({
 																			key: chain.key,
-																			value: event.currentTarget.value,
-																		}),
-																	)
-																}
+																			value,
+																		});
+																		if ((reply as Reply).ok)
+																			await reloadProject();
+																		return reply;
+																	});
+																}}
 																onKeyDown={(event) => {
 																	if (event.key === "Enter")
 																		event.currentTarget.blur();

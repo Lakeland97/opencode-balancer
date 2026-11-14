@@ -33,7 +33,6 @@ const chainTarget = object(
 const chainRow = object(
 	{
 		context: num,
-		declaredContext: num,
 		key: str,
 		label: str,
 		/** The user's token ceiling for the whole row, 0 when none. */
@@ -41,17 +40,10 @@ const chainRow = object(
 		package: str,
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
+		/** Where the host will compact: the chosen share of the window. */
+		trip: num,
 	},
-	[
-		"key",
-		"label",
-		"package",
-		"stored",
-		"context",
-		"declaredContext",
-		"targets",
-		"limit",
-	],
+	["key", "label", "package", "stored", "context", "trip", "targets", "limit"],
 );
 const logEntry = object(
 	{
@@ -91,10 +83,6 @@ export const balancerDefinition = {
 	id: "balancer",
 	methods: {
 		add: { input: pair, output: result },
-		buffer: {
-			input: empty,
-			output: object({ path: str, value: str }, ["value", "path"]),
-		},
 		chainAdd: {
 			input: object({ key: str, modelID: str, providerID: str }, [
 				"key",
@@ -151,6 +139,12 @@ export const balancerDefinition = {
 			output: object({ rows: { items: chainRow, type: "array" } }, ["rows"]),
 		},
 		clearLog: { input: empty, output: result },
+		contextTarget: {
+			input: empty,
+			// The user's share of the model's window, and the config reserve it
+			// is compensated against.
+			output: object({ reserve: str, target: num }, ["target", "reserve"]),
+		},
 		list: {
 			input: object({ providerID: str }),
 			output: object({ accounts: { items: account, type: "array" } }, [
@@ -208,7 +202,7 @@ export const balancerDefinition = {
 			input: object({ enabled: bool }, ["enabled"]),
 			output: result,
 		},
-		setBuffer: {
+		setContextTarget: {
 			input: object({ value: str }, ["value"]),
 			output: result,
 		},

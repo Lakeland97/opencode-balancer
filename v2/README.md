@@ -118,31 +118,30 @@ under their brand where a brand has more than one, and every row, group and the 
 folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
 
 The `context limit` field at the top edits `compaction.buffer` in the config file directly — in place,
-so comments and every other setting survive — then asks the host to rebuild its models, so the change
-reaches the declared windows without restarting OpenCode. It shows the share of a window left to use,
-while the file stores the part kept free, so a limit of `80%` is written as `"buffer": "20%"`. Enter a
-percentage from `1%` to `99%`, or a bare token count.
+so comments and every other setting survive, with a one-time `.bak` beside it and a parse check before
+anything lands — then asks the host and the current project to rebuild their model lists, so the change
+reaches a running chat without restarting OpenCode. It shows the share of a window left to use, while
+the file stores the part kept free, so a limit of `90%` is written as `"buffer": "10%"`. Enter a
+percentage from `1%` to `100%`; `100%` is stored as no buffer at all, which trips at the whole window.
 
 ### Context windows
 
-A row declares the **smallest** context window in its chain, because every target must be able to
-take over the same conversation. `compaction.buffer` is a share of the declared window, so the host
-would compact early if the declared window were the real one. The plugin compensates: with a real
-window of 200k the row declares `200k / (1 − p)`, and the host compacts at 200k — where the smallest
-target actually ends. The same applies to output limits, which use the smallest output limit in the
-chain.
+A row declares the **smallest** context window in its chain, because every target must be able to take
+over the same conversation. The number the host shows is therefore the window a model really has, and
+the only thing that moves the compaction trigger inside it is `compaction.buffer`: the host compacts at
+`declared × (1 − reserve)`. The panel's `context limit` and that reserve are the same fact, so the menu
+writes the file — `50%` stores a 50% buffer and the host trips at half the window. There is no
+arithmetic standing between the two, and no declaration larger than a model's real window.
 
-The declaration follows the row and the buffer, and stops at the chain's largest real window. The
-panel's `context limit` is read as a share of the model's own window — `20%` means "compact at 20% of
-what this model holds" — so a declaration past the real window would have the host display a number no
-target in the row actually has. A smaller target still compensates up to that largest window, because
-the row is allowed to route to it: 200k beside a 1M model at a 75% reserve declares 800k, and a
-uniform 1M row declares 1M and compacts at 250k.
+The same applies to output limits, which use the smallest output limit in the chain. A row limit is
+where a row may exceed its smallest window; the trip point then follows the declared number, so a
+200k limit beside a 51% buffer trips at 98k.
 
 The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
 re-read on every read of the chain list and whenever the panel writes a new value, so the panel's
-numbers follow the file immediately. With `compaction.auto: false` nothing trims the conversation, so
-routing also skips targets smaller than the request's estimated token count.
+numbers follow the file immediately — including a file you edited by hand, which the menu shows. With
+`compaction.auto: false` nothing trims the conversation, so routing also skips targets smaller than
+the request's estimated token count.
 
 ### Limits
 

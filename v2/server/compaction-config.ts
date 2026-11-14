@@ -272,7 +272,7 @@ function normalizeBufferValue(value: string): string | number {
 /** Replace `compaction.buffer` in place, adding the key if the section lacks one. */
 function withBufferValue(text: string, json: string): string {
 	const section = /"compaction"\s*:\s*\{/.exec(text);
-	if (!section) throw new Error("no compaction section to update");
+	if (!section) return withCompactionSection(text, json);
 
 	const open = section.index + section[0].length - 1;
 	const end = containerEnd(text, open);
@@ -288,15 +288,71 @@ function withBufferValue(text: string, json: string): string {
 	return `${text.slice(0, from)}"buffer": ${json}${text.slice(from + existing[0].length)}`;
 }
 
+/** The first `{` that opens a real object, skipping strings and comments. */
+function firstObjectOpen(text: string): number {
+	let inString = false;
+	let escaped = false;
+
+	for (let index = 0; index < text.length; index++) {
+		const char = text[index];
+		const next = text[index + 1];
+
+		if (inString) {
+			if (escaped) escaped = false;
+			else if (char === "\\") escaped = true;
+			else if (char === '"') inString = false;
+			continue;
+		}
+		if (char === '"') {
+			inString = true;
+			continue;
+		}
+		if (char === "/" && next === "/") {
+			while (index < text.length && text[index] !== "\n") index++;
+			continue;
+		}
+		if (char === "/" && next === "*") {
+			index += 2;
+			while (
+				index < text.length &&
+				!(text[index] === "*" && text[index + 1] === "/")
+			)
+				index++;
+			index++;
+			continue;
+		}
+		if (char === "{") return index;
+	}
+	return -1;
+}
+
 /**
- * Point the host's compaction buffer at a new value, editing the config in
- * place so comments, formatting and every other setting survive. The first
- * write to a file keeps a `.bak` of the original, and a malformed result is
- * refused before anything lands on disk.
+ * Add a `compaction` section holding the buffer when the config has none. The
+ * member goes last in the root object, and the result is parsed again by the
+ * caller before it is written, so a mistake here cannot reach the disk.
  */
-export function writeCompactionBuffer(path: string, value: string) {
-	const json = JSON.stringify(normalizeBufferValue(value));
-	const next = withBufferValue(readFileSync(path, "utf8"), json);
+function withCompactionSection(text: string, json: string): string {
+	const open = firstObjectOpen(text);
+	if (open < 0) throw new Error("the config is not a JSON object");
+
+	const close = containerEnd(text, open) - 1;
+	const before = text.slice(0, close);
+	const needsComma = !/\{\s*$/.test(before);
+	return `${before}${needsComma ? "," : ""}\n\t"compaction": {\n\t\t"buffer": ${json}\n\t}\n${text.slice(close)}`;
+}
+
+/**
+ * Point the host's compaction buffer at a new value, or remove it when `value`
+ * is undefined, editing the config in place so comments, formatting and every
+ * other setting survive. The first write to a file keeps a `.bak` of the
+ * original, and a malformed result is refused before anything lands on disk.
+ */
+export function writeCompactionBuffer(path: string, value: string | undefined) {
+	const original = readFileSync(path, "utf8");
+	const next =
+		value === undefined
+			? withoutBufferValue(original)
+			: withBufferValue(original, JSON.stringify(normalizeBufferValue(value)));
 	// Never persist text we cannot parse back.
 	JSON.parse(stripJsonc(next));
 
@@ -306,4 +362,32 @@ export function writeCompactionBuffer(path: string, value: string) {
 	writeFileSync(temp, next);
 	renameSync(temp, path);
 	invalidateBufferCache();
+}
+
+/** Drop `compaction.buffer` without disturbing the rest of the section. */
+function withoutBufferValue(text: string): string {
+	const section = /"compaction"\s*:\s*\{/.exec(text);
+	if (!section) return text;
+
+	const open = section.index + section[0].length - 1;
+	const end = containerEnd(text, open);
+	const region = text.slice(open, end);
+	const existing = /"buffer"\s*:\s*(?:"(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)/.exec(
+		region,
+	);
+	if (!existing) return text;
+
+	const from = open + existing.index;
+	const valueEnd = from + existing[0].length;
+	// A following comma is the usual case; a trailing one only when the key is
+	// the last member. Removing either keeps the object valid.
+	const after = /^\s*,/.exec(text.slice(valueEnd, end));
+	if (after)
+		return text.slice(0, from) + text.slice(valueEnd + after[0].length);
+
+	const before = /,\s*$/.exec(text.slice(open, from));
+	if (before) {
+		return text.slice(0, open + before.index) + text.slice(valueEnd);
+	}
+	return text.slice(0, from) + text.slice(valueEnd);
 }

@@ -11,10 +11,10 @@ import {
 	setActiveAccount,
 } from "../core/accounts";
 import {
-	bufferFromShare,
 	type CompactionBuffer,
-	declaredContext,
-	usableShare,
+	reserveLabel,
+	targetShare,
+	tripContext,
 } from "../core/context";
 import {
 	readRowLimit,
@@ -152,11 +152,6 @@ export async function registerBalancerRpc({
 			}
 		},
 
-		buffer: async () => ({
-			path: configPath ?? "",
-			value: usableShare(configPath ? readBufferAt(configPath) : buffer),
-		}),
-
 		chainAdd: async (input) => {
 			const { key, providerID, modelID } = input as {
 				key: string;
@@ -239,10 +234,10 @@ export async function registerBalancerRpc({
 				rows: catalog.families.map((family) => {
 					const window = family.window;
 					return {
+						// The window the host is told the model holds, which is
+						// the row's smallest target as it really is; the config's
+						// reserve is what moves the trip inside it.
 						context: window?.context ?? 0,
-						declaredContext: window
-							? declaredContext(window.context, current, window.ceiling)
-							: 0,
 						key: family.key,
 						label: family.name,
 						limit: readRowLimit(db, family.key) ?? 0,
@@ -255,6 +250,7 @@ export async function registerBalancerRpc({
 							resolved: resolvedModelID(db, target),
 							state: targetState(db, family, target),
 						})),
+						trip: window ? tripContext(window.context, current) : 0,
 					};
 				}),
 			};
@@ -263,6 +259,18 @@ export async function registerBalancerRpc({
 		clearLog: async () => {
 			clearLog();
 			return { message: "Cleared the log.", ok: true };
+		},
+
+		contextTarget: async () => {
+			const current = configPath
+				? readBufferAt(configPath)
+				: readCompactionBuffer();
+			return {
+				// The share left to use and the reserve it is stored as are the
+				// same fact: the panel edits this, the host applies it.
+				reserve: reserveLabel(current),
+				target: targetShare(current),
+			};
 		},
 
 		list: async (input) => {
@@ -378,36 +386,63 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setBuffer: async (input) => {
+		setContextTarget: async (input) => {
 			const { value } = input as { value: string };
 			if (!configPath) {
 				return {
-					message: "No OpenCode config file to write a buffer into.",
+					message: "No OpenCode config file to write the limit into.",
 					ok: false,
 				};
 			}
+
+			const typed = value.trim().replace(/%$/, "");
+			// Empty means the whole window, which is the absence of a reserve.
+			const percent = typed === "" ? 100 : Number(typed);
+			if (!(percent >= 1 && percent <= 100)) {
+				return {
+					message: `"${value}" is not a share from 1% to 100%.`,
+					ok: false,
+				};
+			}
+
+			// The file stores the part kept free, so the host trips at the share
+			// the user typed. 100% means no reserve at all.
+			const reserve = 100 - percent;
 			try {
-				writeCompactionBuffer(configPath, bufferFromShare(value));
+				if (reserve <= 0) writeCompactionBuffer(configPath, undefined);
+				else writeCompactionBuffer(configPath, `${reserve}%`);
 			} catch (error) {
 				return {
 					message:
-						error instanceof Error ? error.message : "Could not write buffer.",
+						error instanceof Error
+							? `Could not write the limit: ${error.message}`
+							: "Could not write the limit.",
 					ok: false,
 				};
 			}
+
+			// Read back rather than trust the arithmetic: the file is the record.
+			const stored = readBufferAt(configPath);
 			recordLog(
 				"config",
-				`context limit ${usableShare(readBufferAt(configPath))}`,
+				reserve <= 0
+					? "context limit cleared (whole window)"
+					: `context limit ${Math.round(targetShare(stored) * 100)}% (${reserveLabel(stored)} kept free)`,
 			);
-			// The value is saved whatever the host can do about it: a host that
-			// cannot re-read its models still has the new buffer on disk.
+
+			// The declared window does not move, but a running session reads the
+			// limit from its catalog, so both caches are refreshed anyway.
+			invalidateCatalog();
 			try {
 				await refresh?.();
 			} catch {
-				// Reported as success: the file is what the change is.
+				// Reported as success: the file is the change.
 			}
 			return {
-				message: `Context limit set to ${usableShare(readBufferAt(configPath))}.`,
+				message:
+					reserve <= 0
+						? "Context limit cleared: the whole window is used."
+						: `Context limit set to ${Math.round(targetShare(stored) * 100)}%; the config keeps ${reserveLabel(stored)} free.`,
 				ok: true,
 			};
 		},

@@ -3,36 +3,41 @@ export type CompactionBuffer =
 	| { kind: "tokens"; tokens: number }
 	| { kind: "none" };
 
+function clampReserve(percent: number): number {
+	return Number.isFinite(percent) ? Math.min(Math.max(percent, 0), 0.99) : 0;
+}
+
 /**
- * The window a row declares so the host compacts where the smallest target in
- * the chain actually ends, not at a fraction of it.
- *
- * `compaction.buffer` is a share of the declared window, so a buffer of `p`
- * makes the host compact at `declared × (1 − p)`. Declaring `real / (1 − p)`
- * puts that trigger back on the real limit.
- *
- * `ceiling` is the largest real window in the row, and the declaration stops
- * there. The panel's `context limit` is a share of the model's own window — 20%
- * means "compact at 20% of what this model holds" — so a declaration past the
- * real window would have the host display a number no target in the row
- * actually has. A smaller target still compensates up to the ceiling, because
- * the row is allowed to route to the larger one.
+ * Where the host will compact: the window a row declares, less the reserve the
+ * config keeps free. `compaction.buffer` is that reserve, so a 51% buffer makes
+ * the host compact at 49% of the declared window. The file is the setting; the
+ * panel writes it rather than inventing a declaration to compensate for it.
  */
-export function declaredContext(
+export function tripContext(
 	realContext: number,
 	buffer: CompactionBuffer,
-	ceiling: number,
 ): number {
-	const declared = (() => {
-		if (buffer.kind === "tokens") return realContext + buffer.tokens;
-		if (buffer.kind === "percent") {
-			const percent = Math.min(Math.max(buffer.percent, 0), 0.99);
-			if (percent <= 0) return realContext;
-			return Math.ceil(realContext / (1 - percent));
-		}
-		return realContext;
-	})();
-	return ceiling > 0 ? Math.min(declared, ceiling) : declared;
+	if (!(realContext > 0)) return 0;
+	if (buffer.kind === "percent") {
+		return Math.max(
+			Math.ceil(realContext * (1 - clampReserve(buffer.percent))),
+			0,
+		);
+	}
+	if (buffer.kind === "tokens") {
+		return Math.max(realContext - Math.max(buffer.tokens, 0), 0);
+	}
+	return realContext;
+}
+
+/**
+ * The share of a window left to use, which is what the panel edits: the reserve
+ * reads the other way round, so a 51% buffer is a 49% limit. A token reserve
+ * has no single share, and no reserve means the whole window.
+ */
+export function targetShare(buffer: CompactionBuffer): number {
+	if (buffer.kind === "percent") return 1 - clampReserve(buffer.percent);
+	return 1;
 }
 
 function formatShare(fraction: number): string {
@@ -40,35 +45,13 @@ function formatShare(fraction: number): string {
 }
 
 /**
- * The share of a window left to use, which is what the panel shows: the host's
- * buffer is the part kept free, so a 20% buffer is an 80% limit. A token
- * reserve has no share to show and is reported as the token count it is.
+ * How much the config keeps free, shown beside the limit so the relationship is
+ * visible: the panel's percentage and this reserve are the same fact, twice.
  */
-export function usableShare(buffer: CompactionBuffer): string {
-	if (buffer.kind === "percent") return formatShare(1 - buffer.percent);
-	if (buffer.kind === "tokens") return String(buffer.tokens);
-	return "";
-}
-
-/**
- * The value to write for a share the user typed. A percentage becomes the
- * reserve the host wants — `80%` becomes `20%` — while a bare number over 99 is
- * a token count and is written as one.
- */
-export function bufferFromShare(input: string): string {
-	const typed = /^(\d+(?:\.\d+)?)(%?)$/.exec(input.trim());
-	if (!typed) throw new Error(`"${input}" is not a share or a token count`);
-
-	const value = Number(typed[1]);
-	if (!typed[2] && value > 99) return String(value);
-
-	const reserve = 100 - value;
-	if (reserve < 1 || reserve > 99) {
-		throw new Error(
-			`the host keeps between 1% and 99% of a window free, so a share of "${input}" cannot be stored`,
-		);
-	}
-	return formatShare(reserve / 100);
+export function reserveLabel(buffer: CompactionBuffer): string {
+	if (buffer.kind === "percent") return formatShare(buffer.percent);
+	if (buffer.kind === "tokens") return `${buffer.tokens} tokens`;
+	return "none";
 }
 
 /**

@@ -1,97 +1,92 @@
 import { describe, expect, test } from "bun:test";
 import {
-	bufferFromShare,
-	declaredContext,
+	type CompactionBuffer,
+	reserveLabel,
 	rowWindow,
-	usableShare,
+	targetShare,
+	tripContext,
 } from "../core/context";
-import { parseBuffer } from "../server/compaction-config";
 
-describe("declared context", () => {
-	test("a percent buffer is compensated away", () => {
-		expect(
-			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 1_000_000),
-		).toBe(800_000);
+const percent = (value: number): CompactionBuffer => ({
+	kind: "percent",
+	percent: value,
+});
+
+describe("where the host trips", () => {
+	test("the trip is the window less the reserve", () => {
+		// The host keeps `metadata.buffer` free of whatever window it is told,
+		// so the file's reserve is the only thing between the window and the
+		// compaction trigger.
+		expect(tripContext(1_000_000, percent(0.51))).toBe(490_000);
+		expect(tripContext(1_000_000, percent(0.25))).toBe(750_000);
+		expect(tripContext(200_000, percent(0.51))).toBe(98_000);
 	});
 
-	test("a buffer just under 100% cannot divide by zero", () => {
-		expect(
-			declaredContext(200_000, { kind: "percent", percent: 0.999 }, 1_000_000),
-		).toBeGreaterThan(0);
-		expect(
-			Number.isFinite(
-				declaredContext(1000, { kind: "percent", percent: 1 }, 1_000_000),
-			),
-		).toBe(true);
+	test("no reserve trips at the whole window", () => {
+		expect(tripContext(1_000_000, { kind: "none" })).toBe(1_000_000);
 	});
 
-	test("an integer buffer is added, not divided", () => {
-		expect(
-			declaredContext(200_000, { kind: "tokens", tokens: 20_000 }, 1_000_000),
-		).toBe(220_000);
+	test("a token reserve is taken off the window", () => {
+		expect(tripContext(1_000_000, { kind: "tokens", tokens: 150_000 })).toBe(
+			850_000,
+		);
 	});
 
-	test("no buffer leaves the window alone", () => {
-		expect(declaredContext(200_000, { kind: "none" }, 1_000_000)).toBe(200_000);
+	test("a reserve larger than the window trips immediately", () => {
+		expect(tripContext(100_000, { kind: "tokens", tokens: 150_000 })).toBe(0);
+		// And a window of nothing never trips above nothing.
+		expect(tripContext(0, percent(0.5))).toBe(0);
 	});
 
-	test("the declaration is capped at the largest real window", () => {
-		// The panel's `context limit` is a share of the model's own window — 20%
-		// means "compact at 20% of what this model holds" — and the host compacts
-		// at declared × (1 − reserve). Declaring more than the real window would
-		// make the host show a window no target in the row actually has, so the
-		// declaration stops at the largest one.
-		expect(
-			declaredContext(1_000_000, { kind: "percent", percent: 0.8 }, 1_000_000),
-		).toBe(1_000_000);
-		// A smaller target still compensates up to the largest window in the row,
-		// because the row is allowed to route there.
-		expect(
-			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 1_000_000),
-		).toBe(800_000);
-		expect(
-			declaredContext(200_000, { kind: "percent", percent: 0.75 }, 250_000),
-		).toBe(250_000);
-		expect(
-			declaredContext(200_000, { kind: "tokens", tokens: 20_000 }, 210_000),
-		).toBe(210_000);
+	test("a nonsensical reserve is clamped, not trusted", () => {
+		expect(tripContext(1_000_000, percent(-1))).toBe(1_000_000);
+		expect(tripContext(1_000_000, percent(1))).toBeLessThan(11_000);
+		expect(tripContext(1_000_000, percent(1))).toBeGreaterThan(9_000);
+		expect(tripContext(1_000_000, percent(Number.NaN))).toBe(1_000_000);
 	});
 });
 
-describe("the share a window has left to use", () => {
-	test("the host's reserve reads the other way round", () => {
-		expect(usableShare({ kind: "percent", percent: 0.2 })).toBe("80%");
-		expect(usableShare({ kind: "percent", percent: 0.75 })).toBe("25%");
-		expect(usableShare({ kind: "percent", percent: 0.01 })).toBe("99%");
+describe("the share the panel edits", () => {
+	test("it is the remaining part of the window", () => {
+		expect(targetShare(percent(0.51))).toBeCloseTo(0.49, 5);
+		expect(targetShare(percent(0.25))).toBeCloseTo(0.75, 5);
 	});
 
-	test("a token reserve has no share to show", () => {
-		expect(usableShare({ kind: "tokens", tokens: 150_000 })).toBe("150000");
-		expect(usableShare({ kind: "none" })).toBe("");
+	test("a token reserve or none has no share to divide", () => {
+		expect(targetShare({ kind: "tokens", tokens: 150_000 })).toBe(1);
+		expect(targetShare({ kind: "none" })).toBe(1);
 	});
 
-	test("a typed share is stored as the reserve the host wants", () => {
-		expect(bufferFromShare("80%")).toBe("20%");
-		expect(bufferFromShare("80")).toBe("20%");
-		expect(bufferFromShare("25%")).toBe("75%");
-	});
-
-	test("a large bare number is a token count, not a share", () => {
-		expect(bufferFromShare("150000")).toBe("150000");
-		expect(bufferFromShare("120")).toBe("120");
-	});
-
-	test("a share the host cannot store is refused", () => {
-		// 0% reserve would compact at the window's very edge, 100% would never.
-		expect(() => bufferFromShare("100%")).toThrow();
-		expect(() => bufferFromShare("0%")).toThrow();
-		expect(() => bufferFromShare("abc")).toThrow();
-	});
-
-	test("a share survives a round trip", () => {
-		for (const reserve of ["1%", "20%", "49.5%", "99%"]) {
-			expect(bufferFromShare(usableShare(parseBuffer(reserve)))).toBe(reserve);
+	test("the file and the panel are the same fact, twice", () => {
+		// The invariant that replaces the old compensation arithmetic: the panel
+		// writes `100 − share` as the reserve, so the trip is the share.
+		for (const share of [0.05, 0.25, 0.49, 0.5, 0.75, 0.99]) {
+			const buffer = percent(1 - share);
+			const trip = tripContext(1_000_000, buffer);
+			expect(trip / 1_000_000).toBeCloseTo(share, 3);
+			expect(100 - Math.round(targetShare(buffer) * 100)).toBeCloseTo(
+				Math.round((1 - share) * 100),
+				0,
+			);
 		}
+	});
+});
+
+describe("the reserve label", () => {
+	test("reads as the part kept free", () => {
+		expect(reserveLabel(percent(0.25))).toBe("25%");
+		expect(reserveLabel(percent(0.51))).toBe("51%");
+		expect(reserveLabel(percent(0.495))).toBe("49.5%");
+	});
+
+	test("a token reserve says so", () => {
+		expect(reserveLabel({ kind: "tokens", tokens: 150_000 })).toBe(
+			"150000 tokens",
+		);
+	});
+
+	test("no reserve is named as such", () => {
+		expect(reserveLabel({ kind: "none" })).toBe("none");
 	});
 });
 

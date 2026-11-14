@@ -92,6 +92,13 @@ async function handlers(
 	data: unknown[] = connectors,
 	options: { configPath?: string; refresh?: () => Promise<void> | void } = {},
 ) {
+	// A default parameter turns an explicit `undefined` back into the machine's
+	// real config file, and these handlers write to whatever they are given.
+	if ("configPath" in options && options.configPath === undefined) {
+		throw new Error(
+			'pass configPath: "" for no file; undefined would write to the real config',
+		);
+	}
 	const ctx = {
 		model: { list: async () => ({ data }) },
 		provider: {
@@ -166,16 +173,21 @@ describe("chain rpc", () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
 		const listed = (await rpc.chains({})) as {
-			rows: { declaredContext: number; key: string; targets: unknown[] }[];
+			rows: {
+				context: number;
+				key: string;
+				targets: unknown[];
+				trip: number;
+			}[];
 		};
 		const row = listed.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// One 1M target at 75% would compensate to 4M, but the declaration is
-		// capped at the row's largest real window: 20% of a model means 20% of
-		// the window the model actually holds.
-		expect(row?.declaredContext).toBe(1_000_000);
+		// The window the host is told is the row's real one; the config's 75%
+		// reserve is what pulls the compaction trigger inside it.
+		expect(row?.context).toBe(1_000_000);
+		expect(row?.trip).toBe(250_000);
 		expect(row?.targets.length).toBe(1);
 
 		await rpc.chainAdd({
@@ -185,10 +197,10 @@ describe("chain rpc", () => {
 		});
 		const after = (await rpc.chains({})) as {
 			rows: {
-				declaredContext: number;
-				key: string;
 				context: number;
+				key: string;
 				targets: unknown[];
+				trip: number;
 			}[];
 		};
 		const mixed = after.rows.find(
@@ -196,7 +208,8 @@ describe("chain rpc", () => {
 		);
 		expect(mixed?.targets.length).toBe(2);
 		expect(mixed?.context).toBe(200_000);
-		expect(mixed?.declaredContext).toBe(800_000);
+
+		expect(mixed?.trip).toBe(50_000);
 	});
 
 	test("chainAdd appends a target and refuses a foreign wire format", async () => {
@@ -465,47 +478,72 @@ describe("limit rpc", () => {
 	});
 });
 
-describe("buffer rpc", () => {
-	test("reports the usable share, not the host's reserve", async () => {
+describe("context limit rpc", () => {
+	test("reports the share left to use and the reserve it is stored as", async () => {
 		const file = tempConfig(
 			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
 		);
 		const rpc = await handlers(freshDb(), connectors, { configPath: file });
 
-		const state = (await rpc.buffer({})) as { path: string; value: string };
-		expect(state.value).toBe("25%");
-		expect(state.path).toBe(file);
+		const state = (await rpc.contextTarget({})) as {
+			reserve: string;
+			target: number;
+		};
+		expect(state.reserve).toBe("75%");
+		expect(state.target).toBeCloseTo(0.25, 5);
 	});
 
-	test("setBuffer stores the reserve that leaves the share asked for", async () => {
+	test("setting the limit writes the reserve that leaves that share", async () => {
 		const file = tempConfig(
 			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
 		);
 		const rpc = await handlers(freshDb(), connectors, { configPath: file });
 
-		const result = (await rpc.setBuffer({ value: "5%" })) as { ok: boolean };
+		const result = (await rpc.setContextTarget({ value: "95%" })) as {
+			ok: boolean;
+		};
 		expect(result.ok).toBe(true);
 
+		// The file keeps the part the host holds free, so 95% of the window is
+		// free to use and the host trips there.
 		const text = readFileSync(file, "utf8");
 		expect(text).toContain("// keep this");
-		expect(text).toContain('"buffer": "95%"');
-		expect(((await rpc.buffer({})) as { value: string }).value).toBe("5%");
+		expect(text).toContain('"buffer": "5%"');
+		const after = (await rpc.contextTarget({})) as { target: number };
+		expect(after.target).toBeCloseTo(0.95, 5);
 	});
 
-	test("setBuffer refuses a value the host would reject", async () => {
+	test("clearing the limit removes the reserve entirely", async () => {
 		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
 		const rpc = await handlers(freshDb(), connectors, { configPath: file });
 
-		const result = (await rpc.setBuffer({ value: "0%" })) as {
-			message: string;
+		const result = (await rpc.setContextTarget({ value: "" })) as {
 			ok: boolean;
 		};
+		expect(result.ok).toBe(true);
 
-		expect(result.ok).toBe(false);
+		const text = readFileSync(file, "utf8");
+		expect(text).not.toContain("buffer");
+		expect(JSON.parse(text)).toEqual({ compaction: {} });
+		const after = (await rpc.contextTarget({})) as { target: number };
+		expect(after.target).toBe(1);
+	});
+
+	test("a share outside 1% to 100% is refused and nothing is written", async () => {
+		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
+		const rpc = await handlers(freshDb(), connectors, { configPath: file });
+
+		for (const value of ["0%", "-5", "abc", "101"]) {
+			const result = (await rpc.setContextTarget({ value })) as {
+				message: string;
+				ok: boolean;
+			};
+			expect(result.ok).toBe(false);
+		}
 		expect(readFileSync(file, "utf8")).toContain('"buffer":"75%"');
 	});
 
-	test("setBuffer asks the host to re-read its models", async () => {
+	test("setting the limit asks the host to re-read its models", async () => {
 		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
 		let refreshed = 0;
 		const rpc = await handlers(freshDb(), connectors, {
@@ -515,7 +553,7 @@ describe("buffer rpc", () => {
 			},
 		});
 
-		await rpc.setBuffer({ value: "5%" });
+		await rpc.setContextTarget({ value: "95%" });
 
 		expect(refreshed).toBe(1);
 	});
@@ -529,9 +567,21 @@ describe("buffer rpc", () => {
 			},
 		});
 
-		const result = (await rpc.setBuffer({ value: "5%" })) as { ok: boolean };
+		const result = (await rpc.setContextTarget({ value: "95%" })) as {
+			ok: boolean;
+		};
 
 		expect(result.ok).toBe(true);
-		expect(readFileSync(file, "utf8")).toContain('"buffer": "95%"');
+		expect(readFileSync(file, "utf8")).toContain('"buffer": "5%"');
+	});
+
+	test("no config file means no limit to write, and it says so", async () => {
+		// An empty path, not `undefined`: a default parameter would resolve
+		// `undefined` to the machine's real config and write to it.
+		const rpc = await handlers(freshDb(), connectors, { configPath: "" });
+		const result = (await rpc.setContextTarget({ value: "50%" })) as {
+			ok: boolean;
+		};
+		expect(result.ok).toBe(false);
 	});
 });
