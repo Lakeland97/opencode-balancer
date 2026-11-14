@@ -244,7 +244,9 @@ export default Plugin.define({
 			const rows: Record<string, boolean> = {};
 			for (const chain of visibleChains()) rows[chain.key] = collapse;
 			const groups: Record<string, boolean> = {};
-			for (const [name] of groupedChains()) groups[name] = collapse;
+			for (const group of groupedChains()) {
+				if (group.brand) groups[group.brand] = collapse;
+			}
 			setCollapsed(rows);
 			setCollapsedGroups(groups);
 		};
@@ -390,26 +392,24 @@ export default Plugin.define({
 						</button>
 						<strong>{ctx.t("models")}</strong>
 						<button
+							onClick={toggleAll}
+							style={{ "margin-left": "auto", opacity: 0.55 }}
+							title={allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
+						>
+							{allCollapsed() ? "⇕" : "⇳"}
+						</button>
+						<button
 							onClick={() => {
 								setCreating(!creating());
 								setCreateProvider("");
 								setCreateModels([]);
 							}}
-							style={{ "margin-left": "auto" }}
 						>
 							+ {ctx.t("newChain")}
 						</button>
 					</div>
 
 					<Show when={modelsOpen()}>
-						<div style={{ ...row, "justify-content": "flex-end" }}>
-							<button
-								onClick={toggleAll}
-								title={allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
-							>
-								{allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
-							</button>
-						</div>
 						<Show when={creating()}>
 							<div style={row}>
 								<select
@@ -449,7 +449,7 @@ export default Plugin.define({
 						</Show>
 
 						<For each={groupedChains()}>
-							{([group, groupChains]) => (
+							{(group) => (
 								<div
 									style={{
 										display: "flex",
@@ -457,23 +457,25 @@ export default Plugin.define({
 										gap: "4px",
 									}}
 								>
-									<div style={{ ...row, "margin-top": "4px" }}>
-										<button
-											onClick={() => toggleGroup(group)}
-											style={{ "min-width": "1.4em" }}
-											title={
-												isGroupCollapsed(group)
-													? ctx.t("expand")
-													: ctx.t("collapse")
-											}
-										>
-											{isGroupCollapsed(group) ? "▸" : "▾"}
-										</button>
-										<strong>{group}</strong>
-										<span style={{ opacity: 0.6 }}>{groupChains.length}</span>
-									</div>
-									<Show when={!isGroupCollapsed(group)}>
-										<For each={groupChains}>
+									<Show when={group.brand}>
+										<div style={{ ...row, "margin-top": "4px" }}>
+											<button
+												onClick={() => toggleGroup(group.brand ?? "")}
+												style={{ "min-width": "1.4em" }}
+												title={
+													isGroupCollapsed(group.brand ?? "")
+														? ctx.t("expand")
+														: ctx.t("collapse")
+												}
+											>
+												{isGroupCollapsed(group.brand ?? "") ? "▸" : "▾"}
+											</button>
+											<strong>{group.brand}</strong>
+											<span style={{ opacity: 0.6 }}>{group.rows.length}</span>
+										</div>
+									</Show>
+									<Show when={!isGroupCollapsed(group.brand ?? "")}>
+										<For each={group.rows}>
 											{(chain) => (
 												<div
 													style={{

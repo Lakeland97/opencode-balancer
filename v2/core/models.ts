@@ -116,9 +116,20 @@ export function modelBrand(label: string) {
  * Groups labelled rows under their brand, keeping the order inside each group
  * and sorting the groups case-insensitively.
  */
+export type BrandGroup<T> = {
+	/** Absent for a row that is the only one of its brand: it needs no header. */
+	brand?: string;
+	rows: T[];
+};
+
+/**
+ * Groups labelled rows under their brand. Brands with more than one row come
+ * first, alphabetically, then the lone rows in label order: a header over a
+ * single row is noise.
+ */
 export function groupByBrand<T extends { label: string }>(
 	rows: readonly T[],
-): Array<[string, T[]]> {
+): Array<BrandGroup<T>> {
 	const groups = new Map<string, T[]>();
 	for (const row of rows) {
 		const brand = modelBrand(row.label);
@@ -126,7 +137,20 @@ export function groupByBrand<T extends { label: string }>(
 		list.push(row);
 		groups.set(brand, list);
 	}
-	return [...groups.entries()].sort((a, b) =>
-		a[0].localeCompare(b[0], undefined, { sensitivity: "base" }),
-	);
+
+	const compare = (a: string, b: string) =>
+		a.localeCompare(b, undefined, { sensitivity: "base" });
+
+	const entered: Array<BrandGroup<T>> = [...groups.entries()]
+		.filter(([, list]) => list.length > 1)
+		.sort((a, b) => compare(a[0], b[0]))
+		.map(([brand, list]) => ({ brand, rows: list }));
+
+	const singles = [...groups.values()]
+		.filter((list) => list.length === 1)
+		.flat()
+		.sort((a, b) => compare(a.label, b.label))
+		.map((row) => ({ rows: [row] }));
+
+	return [...entered, ...singles];
 }

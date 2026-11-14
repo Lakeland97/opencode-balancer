@@ -107,14 +107,17 @@ describe("groupByBrand", () => {
 		];
 		const grouped = groupByBrand(rows);
 
-		expect(grouped.map(([brand]) => brand)).toEqual([
+		expect(grouped.map((group) => group.brand)).toEqual([
 			"Claude",
-			"DeepSeek",
-			"GLM",
+			undefined,
+			undefined,
 		]);
-		expect(grouped[0]?.[1].map((row) => row.label)).toEqual([
+		expect(grouped[0]?.rows.map((row) => row.label)).toEqual([
 			"Claude Fable 5.1",
 			"Claude Opus 5.5",
+		]);
+		expect(grouped[1]?.rows.map((row) => row.label)).toEqual([
+			"DeepSeek V4 Pro",
 		]);
 	});
 
