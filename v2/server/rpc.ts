@@ -7,23 +7,54 @@ import {
 	renameAccount,
 	saveAccount,
 	setActiveAccount,
-	setSelectedModel,
 } from "../core/accounts";
+import { type CompactionBuffer, declaredContext } from "../core/context";
 import {
 	getBalancingEnabled,
 	listProviderPriority,
 	moveProvider,
 	setBalancingEnabled,
 	setProviderEnabled,
-	setProviderModel,
 } from "../core/priority";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
-import { invalidateCatalog } from "./connectors";
+import {
+	addTarget,
+	removeTarget,
+	resetRow,
+	rowByKey,
+	shiftTarget,
+} from "./chain-actions";
+import { readCompactionBuffer } from "./compaction-config";
+import {
+	invalidateCatalog,
+	loadCatalog,
+	type ModelFamily,
+	resolveChain,
+} from "./connectors";
 import { readActiveCredential } from "./credentials";
+import { chooseRoute, isProviderEnabled } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
 type Pair = { providerID: string; alias: string };
+
+function targetState(
+	db: Database,
+	family: ModelFamily,
+	target: { providerID: string; modelID: string; available?: boolean },
+): string {
+	const live = chooseRoute(db, family);
+	const serving =
+		live?.providerID === target.providerID && live.modelID === target.modelID;
+	if (target.available === false) return "unavailable";
+	if (!isProviderEnabled(db, target.providerID)) return "disabled";
+	const account = selectHealthyAccount(db, target.providerID);
+	if (!account) return "unavailable";
+	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
+		return "limited";
+	}
+	return serving ? "in use" : "available";
+}
 
 /**
  * Typed RPC surface so clients (a GUI part, the TUI, or any SDK client) can
@@ -32,9 +63,11 @@ type Pair = { providerID: string; alias: string };
 export async function registerBalancerRpc({
 	ctx,
 	db,
+	buffer = readCompactionBuffer(),
 }: {
 	ctx: Context;
 	db: Database;
+	buffer?: CompactionBuffer;
 }) {
 	const registration = await ctx.rpc.register(Balancer, {
 		add: async (input) => {
@@ -59,6 +92,95 @@ export async function registerBalancerRpc({
 					ok: false,
 				};
 			}
+		},
+
+		chainAdd: async (input) => {
+			const { key, providerID, modelID } = input as {
+				key: string;
+				providerID: string;
+				modelID: string;
+			};
+			const family = await rowByKey(ctx, db, key);
+			if (!family) return { message: `No row named ${key}.`, ok: false };
+			const result = await addTarget(ctx, db, family, providerID, modelID);
+			return result;
+		},
+
+		chainModels: async (input) => {
+			const { providerID } = input as { providerID: string };
+			const list = await ctx.model.list();
+			return {
+				models: list.data
+					.filter(
+						(model) =>
+							model.providerID === providerID &&
+							(!model.type || model.type === "chat") &&
+							model.enabled !== false &&
+							typeof model.settings?.baseURL === "string",
+					)
+					.map((model) => ({
+						modelID: model.modelID,
+						name: model.name ?? model.modelID,
+					})),
+			};
+		},
+
+		chainMove: async (input) => {
+			const { key, providerID, direction } = input as {
+				key: string;
+				providerID: string;
+				direction: "up" | "down";
+			};
+			const family = await rowByKey(ctx, db, key);
+			if (!family) return { message: `No row named ${key}.`, ok: false };
+			return shiftTarget(db, family, providerID, direction);
+		},
+
+		chainRemove: async (input) => {
+			const { key, providerID } = input as {
+				key: string;
+				providerID: string;
+			};
+			const family = await rowByKey(ctx, db, key);
+			if (!family) return { message: `No row named ${key}.`, ok: false };
+			return removeTarget(db, family, providerID);
+		},
+
+		chainReset: async (input) => {
+			const { key } = input as { key: string };
+			const family = await rowByKey(ctx, db, key);
+			if (!family) return { message: `No row named ${key}.`, ok: false };
+			const existed = resetRow(db, family);
+			return {
+				message: existed
+					? `${key} is back to automatic order.`
+					: `${key} was already automatic.`,
+				ok: true,
+			};
+		},
+
+		chains: async () => {
+			const catalog = await loadCatalog(ctx, db);
+			return {
+				rows: catalog.families.map((family) => {
+					const window = family.window;
+					return {
+						context: window?.context ?? 0,
+						declaredContext: window
+							? declaredContext(window.context, buffer)
+							: 0,
+						key: family.key,
+						label: family.name,
+						package: family.package,
+						stored: Boolean(family.stored),
+						targets: resolveChain(db, family).map((target) => ({
+							modelID: target.modelID,
+							providerID: target.providerID,
+							state: targetState(db, family, target),
+						})),
+					};
+				}),
+			};
 		},
 
 		list: async (input) => {
@@ -96,14 +218,21 @@ export async function registerBalancerRpc({
 			return { message: `Moved ${providerID} ${direction}.`, ok: true };
 		},
 
-		priority: async () => ({
-			entries: listProviderPriority(db).map((entry) => ({
-				position: entry.position,
-				providerID: entry.providerID,
-				...(entry.modelID ? { modelID: entry.modelID } : {}),
-				enabled: entry.enabled,
-			})),
-		}),
+		priority: async () => {
+			const providers = await ctx.provider.list();
+			const names = new Map(
+				providers.data.map((provider) => [provider.id, provider.name]),
+			);
+			return {
+				entries: listProviderPriority(db).map((entry) => ({
+					enabled: entry.enabled,
+					name: names.get(entry.providerID) ?? entry.providerID,
+					position: entry.position,
+					providerID: entry.providerID,
+					...(entry.modelID ? { modelID: entry.modelID } : {}),
+				})),
+			};
+		},
 
 		remove: async (input) => {
 			const { providerID, alias } = input as Pair;
@@ -156,15 +285,6 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setModel: async (input) => {
-			const { providerID, modelID } = input as {
-				providerID: string;
-				modelID: string;
-			};
-			setProviderModel(db, providerID, modelID);
-			setSelectedModel(db, providerID, modelID);
-			return { message: `${providerID} uses ${modelID}.`, ok: true };
-		},
 		status: async () => {
 			const accounts = listAccounts(db);
 			return {

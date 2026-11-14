@@ -18,6 +18,34 @@ function object(
 const empty = object({});
 const pair = object({ alias: str, providerID: str }, ["providerID", "alias"]);
 const result = object({ message: str, ok: bool }, ["ok", "message"]);
+const chainTarget = object(
+	{
+		modelID: str,
+		providerID: str,
+		state: str,
+	},
+	["providerID", "modelID", "state"],
+);
+const chainRow = object(
+	{
+		context: num,
+		declaredContext: num,
+		key: str,
+		label: str,
+		package: str,
+		stored: bool,
+		targets: { items: chainTarget, type: "array" },
+	},
+	[
+		"key",
+		"label",
+		"package",
+		"stored",
+		"context",
+		"declaredContext",
+		"targets",
+	],
+);
 const account = object(
 	{
 		active: bool,
@@ -43,6 +71,49 @@ const definition = {
 	id: "balancer",
 	methods: {
 		add: { input: pair, output: result },
+		chainAdd: {
+			input: object({ key: str, modelID: str, providerID: str }, [
+				"key",
+				"providerID",
+				"modelID",
+			]),
+			output: result,
+		},
+		chainModels: {
+			input: object({ providerID: str }, ["providerID"]),
+			output: object(
+				{
+					models: {
+						items: object({ modelID: str, name: str }, ["modelID", "name"]),
+						type: "array",
+					},
+				},
+				["models"],
+			),
+		},
+		chainMove: {
+			input: object(
+				{
+					direction: { enum: ["up", "down"], type: "string" },
+					key: str,
+					providerID: str,
+				},
+				["key", "providerID", "direction"],
+			),
+			output: result,
+		},
+		chainRemove: {
+			input: object({ key: str, providerID: str }, ["key", "providerID"]),
+			output: result,
+		},
+		chainReset: {
+			input: object({ key: str }, ["key"]),
+			output: result,
+		},
+		chains: {
+			input: empty,
+			output: object({ rows: { items: chainRow, type: "array" } }, ["rows"]),
+		},
 		list: {
 			input: object({ providerID: str }),
 			output: object({ accounts: { items: account, type: "array" } }, [
@@ -68,10 +139,11 @@ const definition = {
 							{
 								enabled: bool,
 								modelID: str,
+								name: str,
 								position: num,
 								providerID: str,
 							},
-							["providerID", "position", "enabled"],
+							["providerID", "position", "enabled", "name"],
 						),
 						type: "array",
 					},
@@ -96,13 +168,6 @@ const definition = {
 			input: object({ enabled: bool, providerID: str }, [
 				"providerID",
 				"enabled",
-			]),
-			output: result,
-		},
-		setModel: {
-			input: object({ modelID: str, providerID: str }, [
-				"providerID",
-				"modelID",
 			]),
 			output: result,
 		},
