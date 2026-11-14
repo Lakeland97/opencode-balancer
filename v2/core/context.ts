@@ -36,6 +36,12 @@ const legacyModelKey = (familyKey: string) => `model_percent:${familyKey}`;
 const legacyPerProviderPrefix = "context_percent:";
 /** The room to keep free below the window, as the user typed it. */
 const bufferKey = "context_buffer";
+/**
+ * When the reserve is enforced: always, or only where the limit has run into what
+ * the model can hold and there is no room left to give. Absent means always, so an
+ * installation that predates the switch keeps the reserve it had.
+ */
+const bufferEnforceKey = "context_buffer_enforce";
 
 /** Whether a value is a share the balancer would accept from the user. */
 function isValidPercent(percent: number | undefined): percent is number {
@@ -198,6 +204,27 @@ export function setBuffer(db: Database, value: string): void {
 }
 
 /**
+ * When the reserve is enforced. `always` takes it off any cut; `necessary` takes
+ * it only where the limit has run into what the model can hold, which is the one
+ * place a cut with nothing left behind it trips the overflow the reserve prevents.
+ */
+export type BufferEnforcement = "always" | "necessary";
+
+/** Always, unless the user asked for the reserve only where it is needed. */
+export function readBufferEnforcement(db: Database): BufferEnforcement {
+	return readText(db, bufferEnforceKey) === "necessary"
+		? "necessary"
+		: "always";
+}
+
+export function setBufferEnforcement(
+	db: Database,
+	value: BufferEnforcement,
+): void {
+	writeText(db, bufferEnforceKey, value);
+}
+
+/**
  * An older value only ever meant a share, and was written as a bare number.
  *
  * A size has always carried a `%` or a unit, so a bare number on an old key is a
@@ -277,27 +304,29 @@ export function migrateLimits(db: Database) {
 }
 
 /**
- * The room the compaction itself needs.
+ * The room the compaction itself needs, taken off the cut.
  *
  * Compacting is another request against the same model, and it carries the
- * conversation with it, so triggering at the model's very last token leaves that
+ * conversation with it, so cutting at the model's very last token leaves that
  * request nowhere to go — which is how a compaction trips the overflow failure it
- * was meant to prevent. By default the reserve is a tenth of the window or 20k,
- * whichever is larger: the two agree at 200k, and the fixed floor is what a small
- * window needs. A model with a hard cap below what it reports wants to stop
- * earlier than that, so the user can name their own buffer in tokens or as a share
- * of the window. Either way it is capped at a quarter of the window, so a model
- * that reports very little is still left something to hold a conversation in.
+ * was meant to prevent. The reserve comes off the limit, so a share of it is a
+ * share of the cut the user asked for (`5%` of a 250k limit is 12.5k) and a size
+ * is that many tokens; the built-in one is a tenth of the limit or 20k, whichever
+ * is larger. It is capped at a quarter of the ceiling, so a window far smaller
+ * than the limit still leaves a conversation somewhere to live.
  */
-export function compactionReserve(
-	realContext: number,
-	buffer?: SizeOrShare,
-): number {
+export function compactionReserve(input: {
+	/** The cut the limit asks for, before the model's window clamps it. */
+	limit: number;
+	/** What the cut can actually land on: the model's window, or the limit. */
+	ceiling: number;
+	buffer?: SizeOrShare;
+}): number {
 	const requested =
-		buffer === undefined
-			? Math.max(Math.round(realContext / 10), 20_000)
-			: measure(buffer, realContext);
-	return Math.min(requested, Math.round(realContext / 4));
+		input.buffer === undefined
+			? Math.max(Math.round(input.limit / 10), 20_000)
+			: measure(input.buffer, input.limit);
+	return Math.min(requested, Math.round(input.ceiling / 4));
 }
 
 /** A size or a share, read as a count of tokens against one window. */
@@ -325,23 +354,35 @@ export function formatTokens(value: number): string {
 /**
  * The token count the balancer compacts a conversation at.
  *
- * The two limits measure different windows on purpose: the global one is a slice
- * of the declared 1M, so "20%" always means 200k whatever is serving, while a
- * per-model one is a slice of that model's own window, so 50% of a 200k model is
- * 100k. A per-model limit replaces the global for that model rather than being
- * capped against it. A size, in either place, is simply that many tokens.
+ * The limit picks the cut. The two limits measure different windows on purpose:
+ * the global one is a share of the declared 1M, so "20%" always means 200k
+ * whatever is serving, while a per-model one is a share of that model's own
+ * window, so 50% of a 200k model is 100k. A per-model limit replaces the global
+ * for that model rather than being capped against it. A size, in either place, is
+ * simply that many tokens.
  *
- * The model's real window is the hard ceiling underneath either one: a limit that
- * lands past what the model can actually hold is clamped to sit a reserve below it,
- * which is what makes "30%" mean 300k on a 1M model and 180k on a 200k one. A model
- * whose window is unknown has no ceiling to clamp against, so the limit stands alone
- * rather than the conversation being cut at nothing.
+ * What the model can actually hold is the outer bound on the cut, and the buffer
+ * comes off whatever survives it — so a 250k limit with a 5% buffer cuts at
+ * 237.5k, and the same limit on a 200k model cuts at 187.5k. A limit that asks
+ * for more than the model holds starts from the model's window instead.
+ *
+ * A limit below what the model holds leaves room of its own, and whether a
+ * reserve still comes off it is the user's call (`bufferEnforcement`); at or past
+ * what the model holds the cut sits on the model's own ceiling, where a reserve is
+ * not optional. A model whose window is not reported is measured against the
+ * declared one, which is what the balancer tells every model.
  */
 export function effectiveThreshold(input: {
 	globalLimit?: SizeOrShare;
 	modelLimit?: SizeOrShare;
 	realContext?: number;
 	buffer?: SizeOrShare;
+	/**
+	 * When the reserve is enforced. Defaults to `always`; `necessary` drops it
+	 * where the limit already sits below what the model can hold, and the ceiling
+	 * keeps its room either way.
+	 */
+	bufferEnforcement?: BufferEnforcement;
 }): number {
 	const real =
 		typeof input.realContext === "number" && input.realContext > 0
@@ -358,7 +399,15 @@ export function effectiveThreshold(input: {
 					DECLARED_CONTEXT,
 				);
 
-	if (real === undefined) return chosen;
-	// The ceiling is the window less what compacting the conversation will need.
-	return Math.min(chosen, real - compactionReserve(real, input.buffer));
+	const holds = real ?? DECLARED_CONTEXT;
+	const ceiling = Math.min(chosen, holds);
+
+	if (chosen < holds && (input.bufferEnforcement ?? "always") === "necessary") {
+		return ceiling;
+	}
+
+	return (
+		ceiling -
+		compactionReserve({ buffer: input.buffer, ceiling, limit: chosen })
+	);
 }

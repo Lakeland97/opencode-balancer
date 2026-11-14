@@ -18,10 +18,12 @@ import {
 	parseBuffer,
 	parseLimit,
 	readBuffer,
+	readBufferEnforcement,
 	readLimit,
 	readModelLimit,
 	type SizeOrShare,
 	setBuffer,
+	setBufferEnforcement,
 	setLimit,
 	setModelLimit,
 } from "../core/context";
@@ -215,7 +217,10 @@ export async function registerBalancerRpc({
 			return { message: "Cleared the log.", ok: true };
 		},
 
-		contextBuffer: async () => ({ value: readBuffer(db) ?? "" }),
+		contextBuffer: async () => ({
+			enforce: readBufferEnforcement(db),
+			value: readBuffer(db) ?? "",
+		}),
 
 		contextLimit: async () => ({ value: readLimit(db) ?? "" }),
 
@@ -311,6 +316,30 @@ export async function registerBalancerRpc({
 			recordLog("config", `automatic balancing ${enabled ? "on" : "off"}`);
 			return {
 				message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
+				ok: true,
+			};
+		},
+
+		setBufferEnforce: async (input) => {
+			const { value } = input as { value: string };
+			if (value !== "always" && value !== "necessary") {
+				return {
+					message: `"${value}" is not when the buffer is enforced: give "always" or "necessary".`,
+					ok: false,
+				};
+			}
+			setBufferEnforcement(db, value);
+			recordLog(
+				"config",
+				value === "necessary"
+					? "buffer enforced only where it is needed"
+					: "buffer always enforced",
+			);
+			return {
+				message:
+					value === "necessary"
+						? "The buffer is enforced only when the limit has reached what the model holds."
+						: "The buffer comes off every cut.",
 				ok: true,
 			};
 		},

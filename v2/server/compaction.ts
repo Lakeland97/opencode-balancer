@@ -2,6 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	effectiveThreshold,
+	readBufferEnforcement,
 	readBufferSpec,
 	readLimitSpec,
 	readModelLimitSpec,
@@ -67,6 +68,7 @@ export function createCompactionController(input: {
 	const thresholdFor = (target: SessionTarget) =>
 		effectiveThreshold({
 			buffer: readBufferSpec(input.db),
+			bufferEnforcement: readBufferEnforcement(input.db),
 			globalLimit: readLimitSpec(input.db),
 			modelLimit: readModelLimitSpec(input.db, target.familyKey),
 			realContext: target.context,

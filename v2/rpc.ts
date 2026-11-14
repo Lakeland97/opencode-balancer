@@ -140,7 +140,10 @@ export const balancerDefinition = {
 		clearLog: { input: empty, output: result },
 		contextBuffer: {
 			input: empty,
-			output: object({ value: str }, ["value"]),
+			// What the reserve below the cut is, as typed, empty for the built-in
+			// rule; `enforce` says whether it comes off every cut or only where
+			// the limit has reached what the model holds.
+			output: object({ enforce: str, value: str }, ["value", "enforce"]),
 		},
 		contextLimit: {
 			input: empty,
@@ -205,6 +208,10 @@ export const balancerDefinition = {
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),
+			output: result,
+		},
+		setBufferEnforce: {
+			input: object({ value: str }, ["value"]),
 			output: result,
 		},
 		setContextBuffer: {

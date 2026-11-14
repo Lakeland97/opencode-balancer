@@ -9,12 +9,14 @@ import {
 	parseBuffer,
 	parseLimit,
 	readBuffer,
+	readBufferEnforcement,
 	readBufferSpec,
 	readLimit,
 	readLimitSpec,
 	readModelLimit,
 	readModelLimitSpec,
 	setBuffer,
+	setBufferEnforcement,
 	setLimit,
 	setModelLimit,
 } from "../core/context";
@@ -27,26 +29,72 @@ function freshDb() {
 }
 
 describe("where the conversation is cut", () => {
-	test("the global share is measured against the declared window", () => {
-		// The balancer tells every model it holds 1M. A 20% request is 20% of
-		// that, and the host is left none the wiser.
+	test("the limit picks the cut, and the buffer comes off it", () => {
+		// The balancer tells every model it holds 1M, so a 25% limit asks for
+		// 250k. The buffer is a share of that limit, so 5% is 12.5k, and the
+		// conversation is compacted at 237.5k.
+		expect(
+			effectiveThreshold({
+				buffer: { percent: 5 },
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(237_500);
+	});
+
+	test("the buffer is a share of the limit, not of the window", () => {
+		// The reserve is 12.5k whatever the model holds, because the limit is
+		// the same either way; the window only clamps what is left of it.
+		expect(
+			effectiveThreshold({
+				buffer: { percent: 5 },
+				globalLimit: { percent: 25 },
+				realContext: 200_000,
+			}),
+		).toBe(187_500);
+		// The same limit on a model that can hold all of it.
+		expect(
+			effectiveThreshold({
+				buffer: { percent: 5 },
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(237_500);
+	});
+
+	test("with nothing set, the limit is a fifth of the declared window", () => {
+		// 20% of 1M asks for 200k; the built-in reserve is a tenth of that limit
+		// or 20k, whichever is larger, so the cut lands at 180k.
+		expect(effectiveThreshold({ realContext: 1_000_000 })).toBe(180_000);
 		expect(
 			effectiveThreshold({
 				globalLimit: { percent: 20 },
 				realContext: 1_000_000,
 			}),
-		).toBe(200_000);
+		).toBe(180_000);
+		expect(DEFAULT_PERCENT).toBe(20);
 	});
 
-	test("a share past the model's own window is clamped below it", () => {
-		// 30% of the declared 1M is 300k, but this model only holds 200k, and the
-		// cut keeps a reserve free, so it lands at 180k.
+	test("the global share is measured against the declared window", () => {
+		// 20% is a fifth of the 1M every balancer model declares, not of whatever
+		// a connector really holds.
+		expect(
+			effectiveThreshold({
+				globalLimit: { percent: 20 },
+				realContext: 500_000,
+			}),
+		).toBe(180_000);
+	});
+
+	test("a limit past the model's window is clamped to it first", () => {
+		// 30% of the declared 1M is 300k, but this model only holds 200k, so the
+		// cut starts from 200k and takes the 30k reserve off that.
 		expect(
 			effectiveThreshold({
 				globalLimit: { percent: 30 },
 				realContext: 200_000,
 			}),
-		).toBe(180_000);
+		).toBe(170_000);
 	});
 
 	test("a limit given in tokens is that size, wherever it is set", () => {
@@ -57,8 +105,14 @@ describe("where the conversation is cut", () => {
 				globalLimit: { tokens: 200_000 },
 				realContext: 1_000_000,
 			}),
-		).toBe(200_000);
-		// A model that holds less still keeps the room the compaction needs.
+		).toBe(180_000);
+		expect(
+			effectiveThreshold({
+				globalLimit: { tokens: 200_000 },
+				realContext: 200_000,
+			}),
+		).toBe(180_000);
+		// A model that holds half of it keeps its own room, a quarter of 100k.
 		expect(
 			effectiveThreshold({
 				globalLimit: { tokens: 200_000 },
@@ -67,7 +121,7 @@ describe("where the conversation is cut", () => {
 		).toBe(80_000);
 	});
 
-	test("the ceiling leaves the compaction its own room", () => {
+	test("the reserve never takes more than a quarter of what the model holds", () => {
 		// The cut may not sit at the model's last token: compacting is another
 		// request against the same model, and it carries the conversation with it.
 		expect(
@@ -75,14 +129,7 @@ describe("where the conversation is cut", () => {
 				globalLimit: { percent: 100 },
 				realContext: 200_000,
 			}),
-		).toBe(180_000);
-		// A tenth of a 1M window is the larger reserve, so the cut stops at 900k.
-		expect(
-			effectiveThreshold({
-				globalLimit: { percent: 100 },
-				realContext: 1_000_000,
-			}),
-		).toBe(900_000);
+		).toBe(150_000);
 		// A window too small to give up 20k gives up a quarter instead, rather
 		// than being left with nowhere to hold a conversation.
 		expect(
@@ -91,13 +138,13 @@ describe("where the conversation is cut", () => {
 				realContext: 32_000,
 			}),
 		).toBe(24_000);
-		// A share that already lands below the ceiling is untouched by it.
+		// A tenth of a 1M window is the larger built-in reserve: a hundred off it.
 		expect(
 			effectiveThreshold({
-				globalLimit: { percent: 20 },
+				globalLimit: { percent: 100 },
 				realContext: 1_000_000,
 			}),
-		).toBe(200_000);
+		).toBe(900_000);
 	});
 
 	test("a per-model limit is measured against that model's window", () => {
@@ -108,14 +155,14 @@ describe("where the conversation is cut", () => {
 				modelLimit: { percent: 50 },
 				realContext: 200_000,
 			}),
-		).toBe(100_000);
+		).toBe(80_000);
 		expect(
 			effectiveThreshold({
 				globalLimit: { percent: 90 },
 				modelLimit: { percent: 10 },
 				realContext: 1_000_000,
 			}),
-		).toBe(100_000);
+		).toBe(80_000);
 	});
 
 	test("a model's own size replaces the global, whichever form it takes", () => {
@@ -125,29 +172,96 @@ describe("where the conversation is cut", () => {
 				modelLimit: { tokens: 50_000 },
 				realContext: 200_000,
 			}),
-		).toBe(50_000);
+		).toBe(37_500);
 	});
 
 	test("an unknown window leaves the limit alone", () => {
 		// A provider that reports no window must still be cut, not left to grow
 		// until it is refused.
-		expect(effectiveThreshold({ globalLimit: { percent: 20 } })).toBe(200_000);
+		expect(effectiveThreshold({ globalLimit: { percent: 20 } })).toBe(180_000);
 		expect(
 			effectiveThreshold({
 				globalLimit: { percent: 20 },
 				modelLimit: { percent: 50 },
 				realContext: 0,
 			}),
-		).toBe(500_000);
+		).toBe(450_000);
 		// A size needs no window to mean something.
 		expect(effectiveThreshold({ globalLimit: { tokens: 150_000 } })).toBe(
-			150_000,
+			130_000,
 		);
 	});
+});
 
-	test("with nothing set, the cut is a fifth of the declared window", () => {
-		expect(effectiveThreshold({ realContext: 1_000_000 })).toBe(200_000);
-		expect(DEFAULT_PERCENT).toBe(20);
+describe("when the buffer is enforced", () => {
+	test("`always` takes the reserve off any cut", () => {
+		// The default, and what an installation predating the choice gets: a 25%
+		// limit asks for 250k and the built-in reserve of a tenth comes off it.
+		expect(
+			effectiveThreshold({
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(225_000);
+		expect(
+			effectiveThreshold({
+				bufferEnforcement: "always",
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(225_000);
+	});
+
+	test("`necessary` leaves a limit that already has room alone", () => {
+		// 250k of the 1M this model holds leaves three quarters of it free, so
+		// there is nothing to make room for and the limit stands alone.
+		expect(
+			effectiveThreshold({
+				bufferEnforcement: "necessary",
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(250_000);
+	});
+
+	test("`necessary` still keeps room where the limit has none", () => {
+		// 100% of what the model holds is a cut on its last token, the one place
+		// compacting cannot work from, so the reserve is kept regardless.
+		expect(
+			effectiveThreshold({
+				bufferEnforcement: "necessary",
+				globalLimit: { percent: 100 },
+				realContext: 1_000_000,
+			}),
+		).toBe(900_000);
+		// The same when the limit asks for more than a smaller model holds.
+		expect(
+			effectiveThreshold({
+				bufferEnforcement: "necessary",
+				globalLimit: { percent: 75 },
+				realContext: 200_000,
+			}),
+		).toBe(150_000);
+	});
+
+	test("it governs a buffer the user set just as much", () => {
+		expect(
+			effectiveThreshold({
+				buffer: { percent: 5 },
+				bufferEnforcement: "necessary",
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(250_000);
+		// Asked for `always`, the same buffer cuts.
+		expect(
+			effectiveThreshold({
+				buffer: { percent: 5 },
+				bufferEnforcement: "always",
+				globalLimit: { percent: 25 },
+				realContext: 1_000_000,
+			}),
+		).toBe(237_500);
 	});
 });
 
@@ -363,19 +477,44 @@ describe("the buffer", () => {
 		}
 	});
 
-	test("one share suits a small model and a large one alike", () => {
-		expect(compactionReserve(200_000, { percent: 10 })).toBe(20_000);
-		expect(compactionReserve(1_000_000, { percent: 10 })).toBe(100_000);
+	test("one share gives a tenth of the cut, whatever the cut is", () => {
+		expect(
+			compactionReserve({
+				buffer: { percent: 10 },
+				ceiling: 200_000,
+				limit: 200_000,
+			}),
+		).toBe(20_000);
+		expect(
+			compactionReserve({
+				buffer: { percent: 10 },
+				ceiling: 1_000_000,
+				limit: 1_000_000,
+			}),
+		).toBe(100_000);
 	});
 
-	test("a size is the size, unless it would swallow the window", () => {
-		expect(compactionReserve(200_000, { tokens: 40_000 })).toBe(40_000);
+	test("a size is the size, unless it would swallow the cut", () => {
+		expect(
+			compactionReserve({
+				buffer: { tokens: 40_000 },
+				ceiling: 200_000,
+				limit: 200_000,
+			}),
+		).toBe(40_000);
 		// A model that reports very little keeps room to hold a conversation.
-		expect(compactionReserve(100_000, { tokens: 40_000 })).toBe(25_000);
+		expect(
+			compactionReserve({
+				buffer: { tokens: 40_000 },
+				ceiling: 100_000,
+				limit: 100_000,
+			}),
+		).toBe(25_000);
 	});
 
 	test("it moves the cut, which is the whole point", () => {
-		// Global 90% of a 200k model would cut at 180k; a 40k buffer at 160k.
+		// A 90% limit asks for 900k of the declared 1M, but this model holds
+		// 200k, so the cut starts from 200k and a 40k buffer comes off it.
 		expect(
 			effectiveThreshold({
 				buffer: { tokens: 40_000 },
@@ -383,6 +522,24 @@ describe("the buffer", () => {
 				realContext: 200_000,
 			}),
 		).toBe(160_000);
+	});
+
+	test("the enforcement choice reads back, and defaults to always", () => {
+		const db = freshDb();
+		expect(readBufferEnforcement(db)).toBe("always");
+
+		setBufferEnforcement(db, "necessary");
+		expect(readBufferEnforcement(db)).toBe("necessary");
+
+		setBufferEnforcement(db, "always");
+		expect(readBufferEnforcement(db)).toBe("always");
+
+		// A row no setter would have written reads as the default, not as a
+		// third state that decides nothing.
+		db.query(
+			"INSERT INTO settings (key, value) VALUES ('context_buffer_enforce', 'sometimes') ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+		).run();
+		expect(readBufferEnforcement(db)).toBe("always");
 	});
 
 	test("a stored buffer reads back, and an unreadable one is the default", () => {

@@ -48,8 +48,8 @@ balancer model and compact it ourselves") removed the whole buffer mechanism:
   declares `DECLARED_CONTEXT` and keeps only the real `output`, the smallest a hop can
   answer.
 - Task 8 Step 1's "window 200k · declares 800k" line is gone with it: the panel now shows
-  a `context limit` field (a size in thousands or a share of the declared 1M, with the token
-  count it works out to).
+  a `context limit` field (a size in thousands or a share of the declared 1M, with the cut it
+  works out to).
 
 **What changed after this plan, and is not described below.** The unit of routing became
 the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
@@ -69,13 +69,13 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Four changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Five changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
   model once, and the panel's `%` field moved off each target line onto the model's own row (`997c6a2`).
 - The reserve kept free below a model's window is settable again (`context_buffer`), as a size in
-  thousands or as a share of each model's own window, in the field next to `context limit`
+  thousands or as a share, in the field next to `context limit`
   (`997c6a2`). This is **not** Task 2's `compaction.buffer`: nothing is read from or written to
   `opencode.json`, and Task 2 stays superseded as described above.
 - A failover trail older than a five-hour quota window is dropped, so a session that has been idle
@@ -86,6 +86,15 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   print is gone. The stored keys moved to `context_limit` / `model_limit:<row>` to match, and the
   migration puts a `%` back on any bare number an earlier version left, which would otherwise now read
   as thousands of tokens.
+- **The buffer is subtracted from the limit, not used as a ceiling below the window.** It was a slice of
+  the model's window that lowered the window; it is now a slice of the *limit* — or a size — taken off
+  the cut, so the live `25%` limit with a `5%` buffer cuts at 237.5k on any model that can hold 250k,
+  and the same limit on a 200k model cuts at 187.5k. A new `enforce buffer` choice
+  (`context_buffer_enforce`, `always` or `when necessary`) says whether the reserve comes off every cut
+  or only where the limit has reached what the model holds; it defaults to `always`, which is what the
+  rule was before the choice existed, and a reserve is kept regardless at or past the model's window.
+  The panel's limit field now shows the **cut** it works out to rather than the raw limit, which is the
+  number that prompted all of this.
 
 **Outstanding**
 

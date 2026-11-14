@@ -13,8 +13,7 @@ import {
 } from "@opencode/plugin/gui";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
 import {
-	DECLARED_CONTEXT,
-	DEFAULT_PERCENT,
+	effectiveThreshold,
 	formatTokens,
 	MAX_PERCENT,
 	parseBuffer,
@@ -42,6 +41,7 @@ type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
 type ContextState = { value: string };
+type BufferState = { enforce: string; value: string };
 
 type Target = {
 	modelID: string;
@@ -105,6 +105,7 @@ export default Plugin.define({
 		en: {
 			active: "active",
 			addTarget: "add target",
+			always: "always",
 			apply: "apply",
 			balancing: "balancing",
 			buffer: "buffer",
@@ -112,6 +113,7 @@ export default Plugin.define({
 			collapse: "collapse all",
 			contextLimit: "context limit",
 			diagnostics: "diagnostics",
+			enforceBuffer: "enforce buffer",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
@@ -120,6 +122,7 @@ export default Plugin.define({
 			limited: "limited",
 			logEmpty: "nothing yet",
 			models: "models",
+			necessary: "when necessary",
 			newChain: "new chain",
 			open: "Open Balancer",
 			pickProvider: "pick a provider first",
@@ -140,9 +143,12 @@ export default Plugin.define({
 		const [globalLimit, setGlobalLimit] = createSignal("");
 		const [globalLimitDraft, setGlobalLimitDraft] = createSignal("");
 		// The room kept free below a model's window, as typed: a size in
-		// thousands or a share like 10%. Empty means the built-in rule.
+		// thousands or a share like 10%. Empty means the built-in rule. The
+		// enforcement choice says whether that room comes off every cut or only
+		// where the limit has reached what the model holds.
 		const [buffer, setBuffer] = createSignal("");
 		const [bufferDraft, setBufferDraft] = createSignal("");
+		const [bufferEnforce, setBufferEnforce] = createSignal("always");
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		const [providers, setProviders] = createSignal<Provider[]>([]);
@@ -189,8 +195,13 @@ export default Plugin.define({
 				setProviders([...(order as Providers).entries]);
 				setGlobalLimit((settings as ContextState).value);
 				setGlobalLimitDraft((settings as ContextState).value);
-				setBuffer((room as { value: string }).value);
-				setBufferDraft((room as { value: string }).value);
+				setBuffer((room as BufferState).value);
+				setBufferDraft((room as BufferState).value);
+				setBufferEnforce(
+					(room as BufferState).enforce === "necessary"
+						? "necessary"
+						: "always",
+				);
 				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
@@ -224,26 +235,30 @@ export default Plugin.define({
 
 		const rpc = () => ctx.client.rpc(Balancer);
 
-		// What a limit works out to in tokens. A size already is one; a share is
-		// measured against the 1M every balancer model declares, which is the
-		// whole story for a 1M model — one whose real window is smaller is
-		// clamped to that window instead, which the field's title says. An empty
-		// field means the built-in default. Read from what is typed, so the
-		// number follows the field as it is written.
-		const limitTokens = (typed: string) => {
-			const parsed = parseLimit(typed);
-			if (!parsed.ok) return 0;
-			if (parsed.size === undefined)
-				return Math.round((DECLARED_CONTEXT * DEFAULT_PERCENT) / 100);
-			return "tokens" in parsed.size
-				? parsed.size.tokens
-				: Math.round((DECLARED_CONTEXT * parsed.size.percent) / 100);
-		};
-
 		const commitLimit = () => {
 			if (globalLimitDraft() === globalLimit()) return;
 			void run(() => rpc().setContextLimit({ value: globalLimitDraft() }));
 		};
+
+		// What a limit and a buffer work out to as an actual cut, by the same rule
+		// the balancer uses, against the declared 1M — the window a model that
+		// holds at least that much offers. A model that holds less is cut lower
+		// still, which the limit field's title says.
+		const cutFor = (limitText: string, bufferText: string, enforce: string) => {
+			const limit = parseLimit(limitText);
+			if (!limit.ok) return 0;
+			const room = parseBuffer(bufferText);
+			return effectiveThreshold({
+				buffer: room.ok ? room.size : undefined,
+				bufferEnforcement: enforce === "necessary" ? "necessary" : "always",
+				globalLimit: limit.size,
+			});
+		};
+
+		const cutTokens = () =>
+			cutFor(globalLimitDraft(), bufferDraft(), bufferEnforce());
+
+		const storedCut = () => cutFor(globalLimit(), buffer(), bufferEnforce());
 
 		// What the buffer being typed works out to in tokens, for the readout
 		// that confirms `20` means twenty thousand. A share has no single size,
@@ -433,7 +448,7 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="The limit the balancer compacts a conversation at. It compacts itself, so this is what actually trips. A size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%. Empty keeps the built-in default. A model can override it with a limit of its own."
+							title="The limit the balancer compacts a conversation at, and what it cuts at after the buffer comes off — the number beside the field. A size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%. Empty keeps the built-in 20%. A model can override it with a limit of its own."
 						>
 							{ctx.t("contextLimit")}
 						</span>
@@ -450,22 +465,22 @@ export default Plugin.define({
 							title="a size in thousands — 200 is two hundred thousand — or a share of the 1M window every balancer model declares, like 20%; empty restores the default"
 							value={globalLimitDraft()}
 						/>
-						{/* `200` meaning two hundred thousand is worth confirming, as
-						    is what a share lands on. */}
-						<Show when={limitTokens(globalLimitDraft()) > 0}>
+						{/* What the limit on screen actually cuts at, which is the
+						    number the buffer moves. */}
+						<Show when={cutTokens() > 0}>
 							<span
 								style={{ opacity: 0.6 }}
-								title="what this limit works out to in tokens"
+								title="what this actually cuts at: the limit, less the buffer when the buffer is enforced here. A model whose real window is smaller is cut below this."
 							>
-								{formatTokens(limitTokens(globalLimitDraft()))}
+								{formatTokens(cutTokens())}
 							</span>
 						</Show>
-						{/* The room to keep free below the window: what makes a model
-						    whose real cap is below what it reports compact before it
-						    is refused, rather than on its last token. */}
+						{/* The room to keep free: what makes a model whose real cap is
+						    below what it reports compact before it is refused, rather
+						    than on its last token. */}
 						<span
 							style={{ opacity: 0.7 }}
-							title="the room kept free below a model's window, so compacting never lands on its last token. A size in thousands — 0.5 is five hundred — or a share like 10% of each model's real window. Empty keeps the built-in rule: 10% or 20k, whichever is larger."
+							title="the room kept free below the cut, so compacting never lands on the model's last token. A size in thousands — 0.5 is five hundred — or a share of the limit, like 5%. Empty keeps the built-in rule: a tenth of the limit or 20k, whichever is larger."
 						>
 							{ctx.t("buffer")}
 						</span>
@@ -477,7 +492,7 @@ export default Plugin.define({
 							}}
 							placeholder="20"
 							style={{ width: "4.5em" }}
-							title="the room kept free below a model's window, so compacting never lands on its last token. A size in thousands — 0.5 is five hundred — or a share like 10% of each model's real window. Empty keeps the built-in rule: 10% or 20k, whichever is larger."
+							title="the room kept free below the cut, so compacting never lands on the model's last token. A size in thousands — 0.5 is five hundred — or a share of the limit, like 5%. Empty keeps the built-in rule: a tenth of the limit or 20k, whichever is larger."
 							value={bufferDraft()}
 						/>
 						{/* `20` meaning twenty thousand is worth confirming, since
@@ -490,6 +505,29 @@ export default Plugin.define({
 								{formatTokens(bufferTokens())}
 							</span>
 						</Show>
+						{/* Whether that room comes off a limit that already leaves
+						    plenty: the user's call, since only a limit that has run
+						    into the model needs it. */}
+						<span
+							style={{ opacity: 0.7 }}
+							title="when the buffer is enforced. `always` takes it off every cut; `when necessary` takes it only where the limit has reached what the model can hold, so a limit that already leaves room stands alone. At least that much is always kept, so a cut never lands on the model's last token."
+						>
+							{ctx.t("enforceBuffer")}
+						</span>
+						<select
+							onChange={(event) =>
+								void run(() =>
+									rpc().setBufferEnforce({
+										value: event.currentTarget.value,
+									}),
+								)
+							}
+							title="when the buffer is enforced: always takes it off every cut, when necessary only where the limit has reached what the model can hold"
+							value={bufferEnforce()}
+						>
+							<option value="always">{ctx.t("always")}</option>
+							<option value="necessary">{ctx.t("necessary")}</option>
+						</select>
 					</div>
 
 					<Show when={message()}>
@@ -1023,8 +1061,8 @@ export default Plugin.define({
 									lines
 								</span>
 								<span>
-									context limit {globalLimit() || `${DEFAULT_PERCENT}%`} ·{" "}
-									{formatTokens(limitTokens(globalLimit()))}
+									context limit {globalLimit() || "default"} ·{" "}
+									{formatTokens(storedCut())}
 								</span>
 							</div>
 							<Show when={logEntries().length > 0}>

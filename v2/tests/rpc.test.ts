@@ -450,13 +450,19 @@ describe("context limit rpc", () => {
 
 	test("the buffer round-trips, and what it cannot read it refuses", async () => {
 		const rpc = await handlers(freshDb());
-		expect(await rpc.contextBuffer({})).toEqual({ value: "" });
+		expect(await rpc.contextBuffer({})).toEqual({
+			enforce: "always",
+			value: "",
+		});
 
 		const set = (await rpc.setContextBuffer({ value: "20" })) as {
 			ok: boolean;
 		};
 		expect(set.ok).toBe(true);
-		expect(await rpc.contextBuffer({})).toEqual({ value: "20" });
+		expect(await rpc.contextBuffer({})).toEqual({
+			enforce: "always",
+			value: "20",
+		});
 
 		// A refused value leaves the working one in place rather than clearing it.
 		const refused = (await rpc.setContextBuffer({ value: "lots" })) as {
@@ -465,10 +471,48 @@ describe("context limit rpc", () => {
 		};
 		expect(refused.ok).toBe(false);
 		expect(refused.message.length).toBeGreaterThan(0);
-		expect(await rpc.contextBuffer({})).toEqual({ value: "20" });
+		expect(await rpc.contextBuffer({})).toEqual({
+			enforce: "always",
+			value: "20",
+		});
 
 		await rpc.setContextBuffer({ value: "" });
-		expect(await rpc.contextBuffer({})).toEqual({ value: "" });
+		expect(await rpc.contextBuffer({})).toEqual({
+			enforce: "always",
+			value: "",
+		});
+	});
+
+	test("when the buffer is enforced round-trips, and a third state is refused", async () => {
+		const rpc = await handlers(freshDb());
+		expect(((await rpc.contextBuffer({})) as { enforce: string }).enforce).toBe(
+			"always",
+		);
+
+		const necessary = (await rpc.setBufferEnforce({
+			value: "necessary",
+		})) as { ok: boolean };
+		expect(necessary.ok).toBe(true);
+		// It changes the rule, not the value: an empty field stays empty.
+		expect(await rpc.contextBuffer({})).toEqual({
+			enforce: "necessary",
+			value: "",
+		});
+
+		const refused = (await rpc.setBufferEnforce({ value: "sometimes" })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(refused.ok).toBe(false);
+		expect(refused.message.length).toBeGreaterThan(0);
+		expect(((await rpc.contextBuffer({})) as { enforce: string }).enforce).toBe(
+			"necessary",
+		);
+
+		await rpc.setBufferEnforce({ value: "always" });
+		expect(((await rpc.contextBuffer({})) as { enforce: string }).enforce).toBe(
+			"always",
+		);
 	});
 
 	test("a limit is outside what it may be, and nothing is stored", async () => {

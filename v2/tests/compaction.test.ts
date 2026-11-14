@@ -71,10 +71,12 @@ describe("when a conversation is compacted", () => {
 		const db = freshDb();
 		const { compacted, handle } = harness(db, TARGET);
 
-		expect(await handle(step("s1", { input: 199_999 }))).toBe(false);
+		// 20% of the declared 1M asks for 200k, less the built-in reserve of a
+		// tenth of that limit.
+		expect(await handle(step("s1", { input: 179_999 }))).toBe(false);
 		expect(compacted).toEqual([]);
 
-		expect(await handle(step("s1", { input: 200_000 }))).toBe(true);
+		expect(await handle(step("s1", { input: 180_000 }))).toBe(true);
 		expect(compacted).toEqual(["s1"]);
 	});
 
@@ -97,12 +99,12 @@ describe("when a conversation is compacted", () => {
 	test("the share is clamped by the model that is actually serving", async () => {
 		const db = freshDb();
 		setLimit(db, "30%");
-		// 30% of the declared 1M is 300k, but this connector holds 200k, and the
-		// cut stays a reserve below it so the compaction request itself fits.
+		// 30% of the declared 1M is 300k, but this connector holds 200k, so the
+		// cut starts there and takes the 30k reserve off it.
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
 
-		expect(await handle(step("s1", { input: 179_999 }))).toBe(false);
-		expect(await handle(step("s1", { input: 180_000 }))).toBe(true);
+		expect(await handle(step("s1", { input: 169_999 }))).toBe(false);
+		expect(await handle(step("s1", { input: 170_000 }))).toBe(true);
 		expect(compacted).toEqual(["s1"]);
 	});
 
@@ -112,9 +114,10 @@ describe("when a conversation is compacted", () => {
 		setModelLimit(db, "deepseek-v4.1-flash", "50%");
 		const { compacted, handle } = harness(db, { ...TARGET, context: 200_000 });
 
-		// 50% of this model's own 200k is 100k, not 90% of the declared window.
-		expect(await handle(step("s1", { input: 99_999 }))).toBe(false);
-		expect(await handle(step("s1", { input: 100_000 }))).toBe(true);
+		// 50% of this model's own 200k is 100k, not 90% of the declared window,
+		// and it takes the built-in 20k reserve off that.
+		expect(await handle(step("s1", { input: 79_999 }))).toBe(false);
+		expect(await handle(step("s1", { input: 80_000 }))).toBe(true);
 		expect(compacted).toEqual(["s1"]);
 	});
 
@@ -130,8 +133,8 @@ describe("when a conversation is compacted", () => {
 			providerID: "p2",
 		});
 
-		expect(await handle(step("s1", { input: 99_999 }))).toBe(false);
-		expect(await handle(step("s1", { input: 100_000 }))).toBe(true);
+		expect(await handle(step("s1", { input: 79_999 }))).toBe(false);
+		expect(await handle(step("s1", { input: 80_000 }))).toBe(true);
 	});
 
 	test("an unknown window still compacts on the share", async () => {
