@@ -30,6 +30,19 @@ export function selectHealthyAccount(
 }
 
 /**
+ * The credentials of one provider that are switched on, in the balancer's order.
+ *
+ * A park is deliberately *not* filtered out. It is temporary and the row's own
+ * marker already says when a credential is sitting one out, while what a row
+ * says it is set up to send must not flicker as credentials are parked and
+ * unparked — a row that cannot say "this one sends the free model" while its key
+ * is parked is a row that has stopped saying it at all.
+ */
+export function enabledAccounts(db: Database, providerID: string): Account[] {
+	return orderedAccounts(db, providerID).filter((account) => !account.disabled);
+}
+
+/**
  * Every healthy credential, in the balancer's order, whichever provider it is.
  *
  * This is the order an automatic row routes in: with no chain of its own, the

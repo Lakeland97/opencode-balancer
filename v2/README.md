@@ -117,7 +117,12 @@ as free when it is priced at zero or its id carries a `free` marker; unknown pri
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
 pickers, and a `reset` on any customised row. Each target carries a `%` field for the share of that
-model's own window at which it should be compacted; see [Context and compaction](#context-and-compaction).
+model's own window at which it should be compacted, and names the model it will actually be sent to —
+the `-free` spelling where the credential that would serve is set to spend nothing. That stays on
+screen while the credential sits out a park, because what a row is set up to send does not change just
+because its key is briefly out of service; the row's own marker reports the park. Nested rows are
+indented one step per level, so the contents of an expanded row read as inside it rather than beside
+it.
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
 healthy. A failure moves forward to a credential this session has not tried since its last answer,

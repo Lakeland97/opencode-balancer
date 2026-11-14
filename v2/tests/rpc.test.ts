@@ -11,6 +11,7 @@ import { getStoredChain } from "../core/chains";
 import { migrate } from "../core/schema";
 import { balancerDefinition } from "../rpc";
 import { invalidateCatalog } from "../server/connectors";
+import { markRateLimited } from "../server/request-state";
 import { registerBalancerRpc } from "../server/rpc";
 
 type Schema = {
@@ -327,6 +328,62 @@ describe("chain rpc", () => {
 		const paid = row?.targets.find((target) => target.providerID === "p1");
 		expect(paid?.modelID).toBe("deepseek-v4.1-flash");
 		expect(paid?.resolved).toBe("deepseek-v4.1-flash-free");
+	});
+
+	test("a parked free-only credential still shows the free model it will use", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		const rpc = (await registerBalancerRpc({
+			ctx: workingCtx([
+				...connectors,
+				model("p1", "deepseek-v4.1-flash-free", 200_000),
+				model("p3", "deepseek-v4.1-flash", 1_000_000),
+			]),
+			db,
+		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+		setAccountFreeOnly(db, "p1", "a", true);
+		invalidateCatalog();
+		// The row must keep saying which model this target sends while its key
+		// sits out a park: the park is temporary and the `state` marker already
+		// reports it, so losing the free spelling here is losing the answer to
+		// "is a free model in play".
+		markRateLimited(db, "p1", "a");
+
+		const listed = (await rpc.chains({})) as {
+			rows: {
+				key: string;
+				targets: { modelID: string; providerID: string; resolved: string }[];
+			}[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		const free = row?.targets.find((target) => target.providerID === "p1");
+		expect(free?.resolved).toBe("deepseek-v4.1-flash-free");
+	});
+
+	test("a free-only credential whose provider has no free spelling keeps the paid id", async () => {
+		const db = freshDb();
+		const rpc = (await registerBalancerRpc({
+			ctx: workingCtx(connectors),
+			db,
+		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+		setAccountFreeOnly(db, "p1", "a", true);
+		invalidateCatalog();
+
+		const listed = (await rpc.chains({})) as {
+			rows: {
+				key: string;
+				targets: { modelID: string; providerID: string; resolved: string }[];
+			}[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		const paid = row?.targets.find((target) => target.providerID === "p1");
+		// p1 offers no `-free` spelling, so free-only cannot substitute and the
+		// id it was configured with is the one the row must show.
+		expect(paid?.resolved).toBe("deepseek-v4.1-flash");
 	});
 
 	test("chainModels lists only routable models for a provider", async () => {

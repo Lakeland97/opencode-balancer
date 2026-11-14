@@ -38,7 +38,7 @@ import {
 } from "./connectors";
 import { clearLog, readLog, recordLog } from "./log";
 import { chooseRoute } from "./routing";
-import { selectHealthyAccount } from "./selection";
+import { enabledAccounts, selectHealthyAccount } from "./selection";
 
 type Pair = { providerID: string; alias: string };
 
@@ -46,13 +46,24 @@ type Pair = { providerID: string; alias: string };
  * The model a target will actually be sent to.
  *
  * `free` is a property of the credential now, so the row shows the free spelling
- * when the credential that would serve next is told to spend nothing, and the id
- * it was configured with otherwise.
+ * when the credential that would serve is told to spend nothing, and the id it
+ * was configured with otherwise. The walk is the one routing makes: down the
+ * credentials in the balancer's order, stopping at the first that can answer, so
+ * a free-only credential whose provider has no free spelling is passed over
+ * exactly as routing passes it over.
+ *
+ * A park is not a reason to stop saying it. The park is temporary and the row's
+ * `state` already reports it; consulting only *healthy* credentials meant the
+ * free spelling vanished the moment the key was parked, which is how the panel
+ * stopped telling the user that a free model was the one in play.
  */
 function resolvedModelID(db: Database, target: FamilyRoute): string {
-	const serves = selectHealthyAccount(db, target.providerID);
-	if (target.free !== false || !serves?.freeOnly) return target.modelID;
-	return target.freeVariant?.modelID ?? target.modelID;
+	if (target.free !== false) return target.modelID;
+	for (const account of enabledAccounts(db, target.providerID)) {
+		if (!account.freeOnly) return target.modelID;
+		if (target.freeVariant) return target.freeVariant.modelID;
+	}
+	return target.modelID;
 }
 
 function targetState(

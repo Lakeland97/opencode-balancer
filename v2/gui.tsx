@@ -332,6 +332,17 @@ export default Plugin.define({
 			"flex-wrap": "wrap",
 			gap: "6px",
 		} as const;
+		// A submenu's contents sit one step in from the row that owns them. At the
+		// same left edge, an expanded row's targets read as siblings of their own
+		// header instead of as what is inside it, which is what made the models
+		// list hard to scan. The step matches the width of a fold button.
+		const stair = (depth: number) =>
+			({
+				display: "flex",
+				"flex-direction": "column",
+				gap: "4px",
+				"padding-left": `${depth * 1.4}em`,
+			}) as const;
 		// Narrow panels must wrap instead of pushing controls off the edge.
 		const field = { flex: "1 1 120px", "min-width": 0 } as const;
 		// A hairline between segments, drawn in the text colour so it follows
@@ -646,265 +657,271 @@ export default Plugin.define({
 										</div>
 									</Show>
 									<Show when={!isGroupCollapsed(group.brand ?? "")}>
-										<For each={group.rows}>
-											{(chain) => (
-												<div
-													style={{
-														"border-top": "1px solid rgba(128,128,128,0.25)",
-														display: "flex",
-														"flex-direction": "column",
-														gap: "4px",
-														"padding-top": "6px",
-													}}
-												>
-													<div style={row}>
-														<button
-															onClick={() => toggleCollapsed(chain.key)}
-															style={{ "min-width": "1.4em" }}
-															title={
-																isCollapsed(chain.key) ? "expand" : "collapse"
-															}
-														>
-															{isCollapsed(chain.key) ? "▸" : "▾"}
-														</button>
-														<span
-															style={{
-																flex: "1 1 140px",
-																"min-width": 0,
-																"overflow-wrap": "anywhere",
-															}}
-														>
-															{chain.label}
-														</span>
-														<span style={{ opacity: 0.6 }}>
-															{chain.targets.length} ·{" "}
-															{chain.stored ? "custom" : "automatic"}
-														</span>
-														<Show when={chain.stored}>
+										<div style={stair(group.brand ? 1 : 0)}>
+											<For each={group.rows}>
+												{(chain) => (
+													<div
+														style={{
+															"border-top": "1px solid rgba(128,128,128,0.25)",
+															display: "flex",
+															"flex-direction": "column",
+															gap: "4px",
+															"padding-top": "6px",
+														}}
+													>
+														<div style={row}>
 															<button
-																onClick={() =>
-																	void run(() =>
-																		rpc().chainReset({ key: chain.key }),
-																	)
+																onClick={() => toggleCollapsed(chain.key)}
+																style={{ "min-width": "1.4em" }}
+																title={
+																	isCollapsed(chain.key) ? "expand" : "collapse"
 																}
 															>
-																{ctx.t("reset")}
+																{isCollapsed(chain.key) ? "▸" : "▾"}
 															</button>
-														</Show>
-													</div>
-
-													<Show when={!isCollapsed(chain.key)}>
-														<For each={chain.targets}>
-															{(target, index) => (
-																<div style={row}>
-																	<span
-																		style={{
-																			flex: "1 1 140px",
-																			"min-width": 0,
-																			"overflow-wrap": "anywhere",
-																		}}
-																	>
-																		{index() + 1}. {target.providerID} ·{" "}
-																		{target.modelID}
-																		<Show
-																			when={
-																				target.resolved &&
-																				target.resolved !== target.modelID
-																			}
-																		>
-																			<span style={{ opacity: 0.6 }}>
-																				{" "}
-																				→ {target.resolved}
-																			</span>
-																		</Show>
-																		<Show when={target.state === "next"}>
-																			<span style={{ opacity: 0.6 }}>
-																				{" "}
-																				· next
-																			</span>
-																		</Show>
-																		<Show
-																			when={
-																				target.state !== "next" &&
-																				target.state !== "available"
-																			}
-																		>
-																			<span style={{ opacity: 0.6 }}>
-																				{" "}
-																				· {target.state}
-																			</span>
-																		</Show>
-																	</span>
-																	<input
-																		inputMode="numeric"
-																		onBlur={(event) => {
-																			const value = event.currentTarget.value;
-																			void run(() =>
-																				rpc().setTargetPercent({
-																					key: chain.key,
-																					providerID: target.providerID,
-																					value,
-																				}),
-																			);
-																		}}
-																		onKeyDown={(event) => {
-																			if (event.key === "Enter")
-																				event.currentTarget.blur();
-																		}}
-																		placeholder={ctx.t("globalShare")}
-																		style={{ width: "6em" }}
-																		title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
-																		value={
-																			target.percent
-																				? String(target.percent)
-																				: ""
-																		}
-																	/>
-																	<button
-																		disabled={index() === 0}
-																		onClick={() =>
-																			void run(() =>
-																				rpc().chainMove({
-																					direction: "up",
-																					key: chain.key,
-																					providerID: target.providerID,
-																				}),
-																			)
-																		}
-																		title="move up"
-																	>
-																		↑
-																	</button>
-																	<button
-																		disabled={
-																			index() === chain.targets.length - 1
-																		}
-																		onClick={() =>
-																			void run(() =>
-																				rpc().chainMove({
-																					direction: "down",
-																					key: chain.key,
-																					providerID: target.providerID,
-																				}),
-																			)
-																		}
-																		title="move down"
-																	>
-																		↓
-																	</button>
-																	<button
-																		onClick={() =>
-																			void run(() =>
-																				rpc().chainRemove({
-																					key: chain.key,
-																					providerID: target.providerID,
-																				}),
-																			)
-																		}
-																		title="remove target"
-																	>
-																		×
-																	</button>
-																</div>
-															)}
-														</For>
-
-														<div style={{ opacity: 0.6 }}>
-															{ctx.t("targetHint")}
-														</div>
-
-														<Show
-															fallback={
+															<span
+																style={{
+																	flex: "1 1 140px",
+																	"min-width": 0,
+																	"overflow-wrap": "anywhere",
+																}}
+															>
+																{chain.label}
+															</span>
+															<span style={{ opacity: 0.6 }}>
+																{chain.targets.length} ·{" "}
+																{chain.stored ? "custom" : "automatic"}
+															</span>
+															<Show when={chain.stored}>
 																<button
-																	disabled={
-																		addableProviders(chain).length === 0
-																	}
-																	onClick={() => void startAdd(chain.key)}
-																	title={
-																		addableProviders(chain).length === 0
-																			? ctx.t("everyProviderUsed")
-																			: undefined
+																	onClick={() =>
+																		void run(() =>
+																			rpc().chainReset({ key: chain.key }),
+																		)
 																	}
 																>
-																	+ {ctx.t("addTarget")}
+																	{ctx.t("reset")}
 																</button>
-															}
-															when={adding() === chain.key}
-														>
-															<Show
-																fallback={
-																	<div style={row}>
-																		<span style={{ opacity: 0.6 }}>
-																			{ctx.t("everyProviderUsed")}
-																		</span>
-																		<button onClick={() => setAdding("")}>
-																			cancel
-																		</button>
-																	</div>
-																}
-																when={addableProviders(chain).length > 0}
-															>
-																<div style={row}>
-																	<select
-																		onChange={(event) =>
-																			void chooseProvider(
-																				event.currentTarget.value,
-																			)
-																		}
-																		style={field}
-																		value={addProvider()}
-																	>
-																		<option value="">provider</option>
-																		<For each={addableProviders(chain)}>
-																			{(entry) => (
-																				<option value={entry.providerID}>
-																					{entry.name}
-																				</option>
-																			)}
-																		</For>
-																	</select>
-																	<select
-																		disabled={!addProvider()}
-																		onChange={(event) =>
-																			void (async () => {
-																				await run(() =>
-																					rpc().chainAdd({
-																						key: chain.key,
-																						modelID: event.currentTarget.value,
-																						providerID: addProvider(),
-																					}),
-																				);
-																				setAdding("");
-																			})()
-																		}
-																		style={field}
-																		value=""
-																	>
-																		<option value="">
-																			{addProvider()
-																				? addModels().length > 0
-																					? "model"
-																					: "no models to add"
-																				: ctx.t("pickProvider")}
-																		</option>
-																		<For each={addModels()}>
-																			{(model) => (
-																				<option value={model.modelID}>
-																					{model.name}
-																				</option>
-																			)}
-																		</For>
-																	</select>
-																	<button onClick={() => setAdding("")}>
-																		cancel
-																	</button>
-																</div>
 															</Show>
+														</div>
+
+														<Show when={!isCollapsed(chain.key)}>
+															<div style={stair(1)}>
+																<For each={chain.targets}>
+																	{(target, index) => (
+																		<div style={row}>
+																			<span
+																				style={{
+																					flex: "1 1 140px",
+																					"min-width": 0,
+																					"overflow-wrap": "anywhere",
+																				}}
+																			>
+																				{index() + 1}. {target.providerID} ·{" "}
+																				{target.modelID}
+																				<Show
+																					when={
+																						target.resolved &&
+																						target.resolved !== target.modelID
+																					}
+																				>
+																					<span style={{ opacity: 0.6 }}>
+																						{" "}
+																						→ {target.resolved}
+																					</span>
+																				</Show>
+																				<Show when={target.state === "next"}>
+																					<span style={{ opacity: 0.6 }}>
+																						{" "}
+																						· next
+																					</span>
+																				</Show>
+																				<Show
+																					when={
+																						target.state !== "next" &&
+																						target.state !== "available"
+																					}
+																				>
+																					<span style={{ opacity: 0.6 }}>
+																						{" "}
+																						· {target.state}
+																					</span>
+																				</Show>
+																			</span>
+																			<input
+																				inputMode="numeric"
+																				onBlur={(event) => {
+																					const value =
+																						event.currentTarget.value;
+																					void run(() =>
+																						rpc().setTargetPercent({
+																							key: chain.key,
+																							providerID: target.providerID,
+																							value,
+																						}),
+																					);
+																				}}
+																				onKeyDown={(event) => {
+																					if (event.key === "Enter")
+																						event.currentTarget.blur();
+																				}}
+																				placeholder={ctx.t("globalShare")}
+																				style={{ width: "6em" }}
+																				title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
+																				value={
+																					target.percent
+																						? String(target.percent)
+																						: ""
+																				}
+																			/>
+																			<button
+																				disabled={index() === 0}
+																				onClick={() =>
+																					void run(() =>
+																						rpc().chainMove({
+																							direction: "up",
+																							key: chain.key,
+																							providerID: target.providerID,
+																						}),
+																					)
+																				}
+																				title="move up"
+																			>
+																				↑
+																			</button>
+																			<button
+																				disabled={
+																					index() === chain.targets.length - 1
+																				}
+																				onClick={() =>
+																					void run(() =>
+																						rpc().chainMove({
+																							direction: "down",
+																							key: chain.key,
+																							providerID: target.providerID,
+																						}),
+																					)
+																				}
+																				title="move down"
+																			>
+																				↓
+																			</button>
+																			<button
+																				onClick={() =>
+																					void run(() =>
+																						rpc().chainRemove({
+																							key: chain.key,
+																							providerID: target.providerID,
+																						}),
+																					)
+																				}
+																				title="remove target"
+																			>
+																				×
+																			</button>
+																		</div>
+																	)}
+																</For>
+
+																<div style={{ opacity: 0.6 }}>
+																	{ctx.t("targetHint")}
+																</div>
+
+																<Show
+																	fallback={
+																		<button
+																			disabled={
+																				addableProviders(chain).length === 0
+																			}
+																			onClick={() => void startAdd(chain.key)}
+																			title={
+																				addableProviders(chain).length === 0
+																					? ctx.t("everyProviderUsed")
+																					: undefined
+																			}
+																		>
+																			+ {ctx.t("addTarget")}
+																		</button>
+																	}
+																	when={adding() === chain.key}
+																>
+																	<Show
+																		fallback={
+																			<div style={row}>
+																				<span style={{ opacity: 0.6 }}>
+																					{ctx.t("everyProviderUsed")}
+																				</span>
+																				<button onClick={() => setAdding("")}>
+																					cancel
+																				</button>
+																			</div>
+																		}
+																		when={addableProviders(chain).length > 0}
+																	>
+																		<div style={row}>
+																			<select
+																				onChange={(event) =>
+																					void chooseProvider(
+																						event.currentTarget.value,
+																					)
+																				}
+																				style={field}
+																				value={addProvider()}
+																			>
+																				<option value="">provider</option>
+																				<For each={addableProviders(chain)}>
+																					{(entry) => (
+																						<option value={entry.providerID}>
+																							{entry.name}
+																						</option>
+																					)}
+																				</For>
+																			</select>
+																			<select
+																				disabled={!addProvider()}
+																				onChange={(event) =>
+																					void (async () => {
+																						await run(() =>
+																							rpc().chainAdd({
+																								key: chain.key,
+																								modelID:
+																									event.currentTarget.value,
+																								providerID: addProvider(),
+																							}),
+																						);
+																						setAdding("");
+																					})()
+																				}
+																				style={field}
+																				value=""
+																			>
+																				<option value="">
+																					{addProvider()
+																						? addModels().length > 0
+																							? "model"
+																							: "no models to add"
+																						: ctx.t("pickProvider")}
+																				</option>
+																				<For each={addModels()}>
+																					{(model) => (
+																						<option value={model.modelID}>
+																							{model.name}
+																						</option>
+																					)}
+																				</For>
+																			</select>
+																			<button onClick={() => setAdding("")}>
+																				cancel
+																			</button>
+																		</div>
+																	</Show>
+																</Show>
+															</div>
 														</Show>
-													</Show>
-												</div>
-											)}
-										</For>
+													</div>
+												)}
+											</For>
+										</div>
 									</Show>
 								</div>
 							)}
