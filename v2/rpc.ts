@@ -55,8 +55,6 @@ const account = object(
 		alias: str,
 		disabled: bool,
 		failures: num,
-		/** The credential OpenCode itself is pointed at, when it is imported. */
-		hostActive: bool,
 		inUse: bool,
 		lastUsedAt: num,
 		limited: bool,

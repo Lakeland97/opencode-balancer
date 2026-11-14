@@ -100,38 +100,6 @@ export function clearLimitedReason(
 	);
 }
 
-/** Where the host's own active credential for a provider is remembered. */
-function hostActiveKey(providerID: string) {
-	return `host_active_source:${providerID}`;
-}
-
-/**
- * Remember which credential OpenCode itself is pointed at, so the panel can
- * show when the balancer's own choice and the host's have gone their separate
- * ways.
- */
-export function setHostActiveSource(
-	db: Database,
-	providerID: string,
-	sourceID: string,
-) {
-	db.query<unknown, [string, string]>(
-		`INSERT INTO settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-	).run(hostActiveKey(providerID), sourceID);
-}
-
-export function readHostActiveSource(
-	db: Database,
-	providerID: string,
-): string | undefined {
-	return db
-		.query<{ value: string }, [string]>(
-			"SELECT value FROM settings WHERE key = ?",
-		)
-		.get(hostActiveKey(providerID))?.value;
-}
-
 /**
  * The single account that served the most recent request anywhere. The panel
  * shows exactly one account as "in use", so this is provider-independent.

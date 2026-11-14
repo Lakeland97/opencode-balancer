@@ -5,7 +5,6 @@ import {
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
-	readHostActiveSource,
 	readLimitedReason,
 	setActiveAccount,
 } from "../core/accounts";
@@ -232,12 +231,6 @@ export async function registerBalancerRpc({
 						alias: account.alias,
 						disabled: account.disabled,
 						failures: account.failures,
-						// True when this is the credential OpenCode itself is
-						// pointed at, so the panel can show the two sides
-						// agreeing or drifting apart.
-						hostActive:
-							account.sourceID !== undefined &&
-							account.sourceID === readHostActiveSource(db, account.providerID),
 						inUse:
 							!account.disabled &&
 							used?.providerID === account.providerID &&

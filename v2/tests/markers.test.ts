@@ -2,14 +2,16 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
+	ensureActiveAlias,
 	getAccount,
-	importAccount,
+	getActiveAccount,
 	listAccounts,
 	markAccountUsed,
 	mostRecentlyUsed,
 	readLimitedReason,
+	removeAccount,
 	saveAccount,
-	setHostActiveSource,
+	setActiveAccount,
 } from "../core/accounts";
 import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
@@ -246,35 +248,23 @@ describe("account markers", () => {
 		expect(account?.active).toBe(true);
 	});
 
-	test("the account OpenCode is pointed at is marked as such", async () => {
+	test("a sync fills an empty selection but never steals a live one", () => {
 		const db = freshDb();
-		importAccount(db, {
-			auth: { key: "k1", type: "api" },
-			label: "Personal",
-			providerID: "p1",
-			sourceID: "cred_1",
-		});
-		importAccount(db, {
-			auth: { key: "k2", type: "api" },
-			label: "Work",
-			providerID: "p1",
-			sourceID: "cred_2",
-		});
-		setHostActiveSource(db, "p1", "cred_2");
-		const rpc = await handlers(db);
+		// p1 already points at `b`; the host's pick must not take that away.
+		setActiveAccount(db, "p1", "b");
+		ensureActiveAlias(db, "p1", "a");
+		expect(getActiveAccount(db, "p1")?.alias).toBe("b");
 
-		const listed = (await rpc.list({})) as {
-			accounts: { alias: string; hostActive: boolean; providerID: string }[];
-		};
-		const hostActive = (alias: string) =>
-			listed.accounts.find(
-				(entry) => entry.providerID === "p1" && entry.alias === alias,
-			)?.hostActive;
+		// With nothing selected, the host's pick becomes the selection.
+		saveAccount(db, "p4", "a", { key: "k", type: "api" });
+		saveAccount(db, "p4", "b", { key: "k", type: "api" });
+		removeAccount(db, "p4", "a");
+		ensureActiveAlias(db, "p4", "b");
+		expect(getActiveAccount(db, "p4")?.alias).toBe("b");
 
-		expect(hostActive("work")).toBe(true);
-		expect(hostActive("personal")).toBe(false);
-		// A hand-added or never-imported account has no credential behind it.
-		expect(hostActive("a")).toBe(false);
+		// A name with nothing behind it changes nothing.
+		ensureActiveAlias(db, "p3", "ghost");
+		expect(getActiveAccount(db, "p3")).toBeUndefined();
 	});
 
 	test("only the most recently used account is in use", async () => {

@@ -23,8 +23,6 @@ type Account = {
 	alias: string;
 	/** The stored default for this provider. */
 	active: boolean;
-	/** The credential OpenCode itself is pointed at, when it is imported. */
-	hostActive: boolean;
 	/** What would authorise the next request, fallback included. */
 	inUse: boolean;
 	disabled: boolean;
@@ -111,7 +109,6 @@ export default Plugin.define({
 			expand: "expand all",
 			free: "free",
 			globalShare: "global",
-			inOpenCode: "in opencode",
 			inUse: "in use",
 			limited: "limited",
 			log: "log",
@@ -482,11 +479,6 @@ export default Plugin.define({
 													: account().active
 														? ` · ${ctx.t("active")}`
 														: ""}
-												<Show when={account().hostActive && !account().active}>
-													<span title="the credential OpenCode itself is pointed at">
-														{` · ${ctx.t("inOpenCode")}`}
-													</span>
-												</Show>
 												<Show when={account().limited}>
 													<span title={account().limitedReason || undefined}>
 														{` · ${ctx.t("limited")}`}

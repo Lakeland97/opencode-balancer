@@ -5,7 +5,6 @@ import {
 	getAccountBySourceID,
 	importAccount,
 	pruneImportedAccounts,
-	setHostActiveSource,
 } from "../core/accounts";
 import { credentialToAuth } from "./credentials";
 import { recordLog } from "./log";
@@ -105,7 +104,6 @@ export async function syncAccounts(
 		}
 		if (active?.type !== "credential" || !active.id) continue;
 
-		setHostActiveSource(db, providerID, active.id);
 		const account = getAccountBySourceID(db, providerID, active.id);
 		if (account) ensureActiveAlias(db, providerID, account.alias);
 	}
