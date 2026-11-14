@@ -1,165 +1,21 @@
 import type { Database } from "bun:sqlite";
-import { getActiveAccount, listAccounts } from "./accounts";
-import { now } from "./time";
-import type { Account } from "./types";
+import { orderedAccounts } from "./accounts";
 
-export type PriorityEntry = {
-	providerID: string;
-	position: number;
-	modelID?: string;
-	enabled: boolean;
-	/** When set, only models that cost nothing may serve this provider. */
-	freeOnly: boolean;
-};
-
-export type ActiveSelection = {
-	providerID: string;
-	modelID: string;
-	account: Account;
-};
-
-type PriorityRow = {
-	provider_id: string;
-	position: number;
-	model_id: string | null;
-	enabled: number;
-};
-
-function storedRows(db: Database): Map<string, PriorityRow> {
-	const rows = db
-		.query<PriorityRow, []>(
-			"SELECT provider_id, position, model_id, enabled FROM provider_priority",
-		)
-		.all();
-	return new Map(rows.map((row) => [row.provider_id, row]));
-}
-
-function providersWithAccounts(db: Database): string[] {
-	return [...new Set(listAccounts(db).map((account) => account.providerID))];
-}
-
-function nextPosition(stored: Map<string, PriorityRow>): number {
-	let max = -1;
-	for (const row of stored.values()) max = Math.max(max, row.position);
-	return max + 1;
-}
-
-function upsert(
-	db: Database,
-	providerID: string,
-	patch: { position?: number; modelID?: string | null; enabled?: boolean },
-) {
-	const stored = storedRows(db);
-	const existing = stored.get(providerID);
-	const position = patch.position ?? existing?.position ?? nextPosition(stored);
-	const modelID =
-		patch.modelID !== undefined ? patch.modelID : (existing?.model_id ?? null);
-	const enabled =
-		patch.enabled !== undefined
-			? patch.enabled
-				? 1
-				: 0
-			: (existing?.enabled ?? 1);
-
-	db.query<unknown, [string, number, string | null, number, number]>(
-		`INSERT INTO provider_priority (provider_id, position, model_id, enabled, updated_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(provider_id) DO UPDATE SET
-             position = excluded.position,
-             model_id = excluded.model_id,
-             enabled = excluded.enabled,
-             updated_at = excluded.updated_at`,
-	).run(providerID, position, modelID, enabled, now());
-}
-
-const freeOnlyKey = (providerID: string) => `free_only:${providerID}`;
-
-function settingValue(db: Database, key: string): string | undefined {
-	return db
-		.query<{ value: string }, [string]>(
-			"SELECT value FROM settings WHERE key = ?",
-		)
-		.get(key)?.value;
-}
-
-/** Whether this provider may serve only free models. Absent means no. */
-export function isFreeOnly(db: Database, providerID: string): boolean {
-	return settingValue(db, freeOnlyKey(providerID)) === "1";
-}
-
-export function setFreeOnly(
-	db: Database,
-	providerID: string,
-	enabled: boolean,
-): void {
-	db.query<unknown, [string, string]>(
-		`INSERT INTO settings (key, value) VALUES (?, ?)
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-	).run(freeOnlyKey(providerID), enabled ? "1" : "0");
-}
-
-export function listProviderPriority(db: Database): PriorityEntry[] {
-	const stored = storedRows(db);
-	const providers = providersWithAccounts(db);
-
-	const ordered = providers.slice().sort((a, b) => {
-		const ra = stored.get(a);
-		const rb = stored.get(b);
-		if (ra && rb) return ra.position - rb.position || a.localeCompare(b);
-		if (ra) return -1;
-		if (rb) return 1;
-		return a.localeCompare(b);
-	});
-
-	return ordered.map((providerID, index) => {
-		const row = stored.get(providerID);
-		return {
-			enabled: row ? row.enabled === 1 : true,
-			freeOnly: isFreeOnly(db, providerID),
-			modelID: row?.model_id ?? undefined,
-			position: index,
-			providerID,
-		};
-	});
-}
-
-export function setProviderModel(
-	db: Database,
-	providerID: string,
-	modelID: string,
-) {
-	upsert(db, providerID, { modelID });
-}
-
-export function setProviderEnabled(
-	db: Database,
-	providerID: string,
-	enabled: boolean,
-) {
-	upsert(db, providerID, { enabled });
-}
-
-export function moveProvider(
-	db: Database,
-	providerID: string,
-	direction: -1 | 1,
-) {
-	const list = listProviderPriority(db);
-	const index = list.findIndex((entry) => entry.providerID === providerID);
-	if (index === -1) return;
-	const target = index + direction;
-	if (target < 0 || target >= list.length) return;
-
-	const reordered = list.slice();
-	const [moved] = reordered.splice(index, 1);
-	reordered.splice(target, 0, moved);
-
-	const persist = db.transaction(() => {
-		for (const [position, entry] of reordered.entries()) {
-			upsert(db, entry.providerID, { position });
-		}
-	});
-	persist();
+/**
+ * Which provider comes first, derived from the credentials the router walks.
+ *
+ * A credential is the unit of order — the panel lists one row per credential and
+ * `↑ ↓` moves that row — so a provider's place is simply where its earliest
+ * credential sits. The stored `provider_priority` table this used to read is not
+ * consulted any more; `migrateProviderSettings` empties it.
+ */
+export function providerOrder(db: Database): Map<string, number> {
+	const order = new Map<string, number>();
+	for (const account of orderedAccounts(db)) {
+		if (!order.has(account.providerID))
+			order.set(account.providerID, order.size);
+	}
+	return order;
 }
 
 export function getBalancingEnabled(db: Database): boolean {
@@ -179,44 +35,45 @@ export function setBalancingEnabled(db: Database, enabled: boolean) {
 	).run(enabled ? "1" : "0");
 }
 
-function chooseHealthyAccount(
-	db: Database,
-	providerID: string,
-	nowMs: number,
-): Account | undefined {
-	const healthy = listAccounts(db, providerID).filter(
-		(account) =>
-			!account.disabled &&
-			(!account.rateLimitedUntil || account.rateLimitedUntil <= nowMs),
-	);
-	if (healthy.length === 0) return undefined;
+const freeOnlyPrefix = "free_only:";
 
-	const active = getActiveAccount(db, providerID);
-	if (active && healthy.some((account) => account.alias === active.alias))
-		return active;
-	return healthy[0];
-}
-
-export function resolveActiveSelection(
-	db: Database,
-	nowMs: number = now(),
-	preferredProviderID?: string,
-): ActiveSelection | undefined {
-	const entries = listProviderPriority(db);
-	const ordered = preferredProviderID
-		? entries.slice().sort((a, b) => {
-				if (a.providerID === preferredProviderID) return -1;
-				if (b.providerID === preferredProviderID) return 1;
-				return a.position - b.position;
-			})
-		: entries;
-
-	for (const entry of ordered) {
-		if (!entry.enabled) continue;
-		if (!entry.modelID) continue;
-		const account = chooseHealthyAccount(db, entry.providerID, nowMs);
-		if (!account) continue;
-		return { account, modelID: entry.modelID, providerID: entry.providerID };
+/**
+ * Move the switches that used to belong to a provider onto its credentials.
+ *
+ * This fork once kept `free models only` as a setting per provider and the
+ * on/off switch as a row in `provider_priority`. Both are per credential now, so
+ * this copies each provider-level answer onto the credentials it applied to and
+ * then forgets it. Running it on every boot is harmless: the settings are gone
+ * after the first pass, so a credential added later is not dragged back to a
+ * choice the user made about the provider rather than about it.
+ */
+export function migrateProviderSettings(db: Database) {
+	const freeSettings = db
+		.query<{ key: string; value: string }, []>(
+			`SELECT key, value FROM settings WHERE key LIKE '${freeOnlyPrefix}%'`,
+		)
+		.all();
+	for (const row of freeSettings) {
+		if (row.value === "1") {
+			db.query<unknown, [string]>(
+				"UPDATE accounts SET free_only = 1 WHERE provider_id = ?",
+			).run(row.key.slice(freeOnlyPrefix.length));
+		}
+		db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(
+			row.key,
+		);
 	}
-	return undefined;
+
+	const switchedOff = db
+		.query<{ provider_id: string }, []>(
+			"SELECT provider_id FROM provider_priority WHERE enabled = 0",
+		)
+		.all();
+	for (const row of switchedOff) {
+		db.query<unknown, [string]>(
+			"UPDATE accounts SET disabled = 1 WHERE provider_id = ?",
+		).run(row.provider_id);
+	}
+	// Positions come from the credentials now, so nothing is left to read here.
+	db.query<unknown, []>("DELETE FROM provider_priority").run();
 }

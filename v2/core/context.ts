@@ -11,6 +11,13 @@ export const DECLARED_CONTEXT = 1_000_000;
 /** The share of the declared window used when the user has not said otherwise. */
 export const DEFAULT_PERCENT = 20;
 
+/**
+ * The most a share may be. A hundred percent would put the cut on the model's
+ * very last token, which is the one place compaction cannot work from, so the
+ * field stops one short of it.
+ */
+export const MAX_PERCENT = 99;
+
 const globalKey = "context_percent";
 const targetKey = (familyKey: string, providerID: string) =>
 	`context_percent:${familyKey}:${providerID}`;
@@ -28,7 +35,7 @@ function readPercent(db: Database, key: string): number | undefined {
 		.get(key)?.value;
 	if (value === undefined) return undefined;
 	const percent = Number(value);
-	return Number.isFinite(percent) && percent > 0 && percent <= 100
+	return Number.isFinite(percent) && percent > 0 && percent <= MAX_PERCENT
 		? percent
 		: undefined;
 }
@@ -42,7 +49,7 @@ function writePercent(
 		percent === undefined ||
 		!Number.isFinite(percent) ||
 		percent <= 0 ||
-		percent > 100
+		percent > MAX_PERCENT
 	) {
 		db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(key);
 		return;
@@ -58,7 +65,7 @@ export function readGlobalPercent(db: Database): number {
 	return readPercent(db, globalKey) ?? DEFAULT_PERCENT;
 }
 
-/** Setting the share to undefined, or outside 1–100, restores the default. */
+/** Setting the share to undefined, or outside 1–99, restores the default. */
 export function setGlobalPercent(
 	db: Database,
 	percent: number | undefined,
@@ -75,7 +82,7 @@ export function readTargetPercent(
 	return readPercent(db, targetKey(familyKey, providerID));
 }
 
-/** Setting the share to undefined, or outside 1–100, removes the override. */
+/** Setting the share to undefined, or outside 1–99, removes the override. */
 export function setTargetPercent(
 	db: Database,
 	familyKey: string,

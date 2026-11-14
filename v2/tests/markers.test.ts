@@ -17,6 +17,7 @@ import {
 	setAccountFreeOnly,
 	setActiveAccount,
 } from "../core/accounts";
+import { migrateProviderSettings, providerOrder } from "../core/priority";
 import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
 import {
@@ -358,5 +359,63 @@ describe("the credential order", () => {
 		setAccountFreeOnly(db, "p1", "b", false);
 		expect(getAccount(db, "p1", "b")?.disabled).toBe(false);
 		expect(getAccount(db, "p1", "b")?.freeOnly).toBe(false);
+	});
+});
+
+describe("the provider's place in the order", () => {
+	test("a provider sits where its earliest credential does", () => {
+		const db = freshDb();
+		// p1/a is first, so p1 leads even after p2's own row moves past p1/b.
+		expect([...providerOrder(db).keys()]).toEqual(["p1", "p2"]);
+		moveAccount(db, "p2", "a", -1);
+		expect([...providerOrder(db).keys()]).toEqual(["p1", "p2"]);
+		moveAccount(db, "p2", "a", -1);
+		expect([...providerOrder(db).keys()]).toEqual(["p2", "p1"]);
+	});
+
+	test("a switch that belonged to a provider is copied onto its credentials", () => {
+		const db = freshDb();
+		db.query(
+			"INSERT INTO settings (key, value) VALUES ('free_only:p1', '1')",
+		).run();
+		db.query(
+			`INSERT INTO provider_priority (provider_id, position, model_id, enabled, updated_at)
+             VALUES ('p1', 0, NULL, 0, 0)`,
+		).run();
+
+		migrateProviderSettings(db);
+
+		// Every credential that provider had takes the answer it was given, and
+		// no other provider is touched.
+		expect(getAccount(db, "p1", "a")?.freeOnly).toBe(true);
+		expect(getAccount(db, "p1", "b")?.freeOnly).toBe(true);
+		expect(getAccount(db, "p1", "a")?.disabled).toBe(true);
+		expect(getAccount(db, "p2", "a")?.freeOnly).toBe(false);
+		expect(getAccount(db, "p2", "a")?.disabled).toBe(false);
+	});
+
+	test("the provider-level answers are forgotten, not reapplied", () => {
+		const db = freshDb();
+		db.query(
+			"INSERT INTO settings (key, value) VALUES ('free_only:p1', '1')",
+		).run();
+		db.query(
+			`INSERT INTO provider_priority (provider_id, position, model_id, enabled, updated_at)
+             VALUES ('p1', 0, NULL, 1, 0)`,
+		).run();
+		migrateProviderSettings(db);
+
+		expect(
+			db.query("SELECT key FROM settings WHERE key LIKE 'free_only:%'").all(),
+		).toEqual([]);
+		expect(db.query("SELECT provider_id FROM provider_priority").all()).toEqual(
+			[],
+		);
+
+		// A credential added afterwards is not dragged back to the old answer.
+		migrateProviderSettings(db);
+		saveAccount(db, "p1", "c", { key: "k9", type: "api" });
+		migrateProviderSettings(db);
+		expect(getAccount(db, "p1", "c")?.freeOnly).toBe(false);
 	});
 });

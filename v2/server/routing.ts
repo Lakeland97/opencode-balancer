@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { isFreeOnly, listProviderPriority } from "../core/priority";
+import { accountKey } from "../core/accounts";
 import type { Account } from "../core/types";
 import {
 	BALANCER_BASE_URL,
@@ -7,7 +7,7 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
-import { selectHealthyAccount } from "./selection";
+import { healthyAccounts, healthyAccountsInOrder } from "./selection";
 
 export type ChosenRoute = FamilyRoute & { account: Account };
 
@@ -26,18 +26,25 @@ function freeVariantOf(route: FamilyRoute): FamilyRoute | undefined {
 	};
 }
 
-/** Whether the user has switched this provider off in the balancer. */
-export function isProviderEnabled(db: Database, providerID: string): boolean {
-	const entry = listProviderPriority(db).find(
-		(row) => row.providerID === providerID,
-	);
-	return entry ? entry.enabled : true;
-}
-
 /**
- * The next target able to answer for this row, in chain order. Limited,
- * disabled, withdrawn, and excluded targets are skipped, which is what makes a
- * retry hop connectors instead of repeating the same one.
+ * The next target able to answer for this row.
+ *
+ * The credential — not the provider — is what is tried and parked, which is why
+ * `exclude` holds credential keys: two credentials on one provider are two
+ * chances to answer, and a failure on the first must not write off the second.
+ * Limited, disabled, withdrawn and excluded credentials are skipped, which is
+ * what makes a retry hop forward instead of repeating the same one.
+ *
+ * A hand-built row *is* an order of providers, so it is walked as written and
+ * each provider's credentials are tried in the balancer's order within it. A row
+ * in automatic order has no order of its own, so it follows the credential order
+ * itself — the same list the panel shows, which makes `↑ ↓` mean what it looks
+ * like it means and lifting a credential above another provider's move it above
+ * that provider.
+ *
+ * Free-only is a property of the credential, so a credential the user keeps no
+ * credits on is pointed at its provider's own free spelling of the model when
+ * there is one, and skipped when there is not.
  *
  * Nothing here looks at the conversation's size. The balancer reports one large
  * window and compacts the conversation itself, so a request is never held back
@@ -48,22 +55,51 @@ export function chooseRouteForRequest(
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
 ): ChosenRoute | undefined {
-	for (const route of resolveChain(db, family)) {
-		if (exclude.has(route.providerID)) continue;
-		if (route.available === false) continue;
-		if (!isProviderEnabled(db, route.providerID)) continue;
-		// A provider whose credits the user does not top up must not be handed a
-		// paid model just because the family matched by name. Its own free
-		// spelling of the model takes over when it has one.
-		const target =
-			route.free === false && isFreeOnly(db, route.providerID)
-				? freeVariantOf(route)
-				: route;
-		if (!target) continue;
+	return family.stored
+		? walkStoredChain(db, family, exclude)
+		: walkCredentialOrder(db, family, exclude);
+}
 
-		const account = selectHealthyAccount(db, route.providerID);
-		if (!account) continue;
-		return { ...target, account };
+/** The route to send for one credential, or undefined if free-only blocks it. */
+function targetFor(
+	route: FamilyRoute,
+	account: Account,
+): ChosenRoute | undefined {
+	const target =
+		route.free === false && account.freeOnly ? freeVariantOf(route) : route;
+	return target ? { ...target, account } : undefined;
+}
+
+function walkStoredChain(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string>,
+): ChosenRoute | undefined {
+	for (const route of resolveChain(db, family)) {
+		if (route.available === false) continue;
+		for (const account of healthyAccounts(db, route.providerID)) {
+			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
+			const chosen = targetFor(route, account);
+			if (chosen) return chosen;
+		}
+	}
+	return undefined;
+}
+
+function walkCredentialOrder(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string>,
+): ChosenRoute | undefined {
+	const byProvider = new Map(
+		family.targets.map((route) => [route.providerID, route]),
+	);
+	for (const account of healthyAccountsInOrder(db)) {
+		if (exclude.has(accountKey(account.providerID, account.alias))) continue;
+		const route = byProvider.get(account.providerID);
+		if (!route || route.available === false) continue;
+		const chosen = targetFor(route, account);
+		if (chosen) return chosen;
 	}
 	return undefined;
 }
@@ -77,12 +113,16 @@ export function chooseRoute(
 	return chooseRouteForRequest(db, family, exclude);
 }
 
+/**
+ * Whether anything else could answer for this row, ignoring one credential the
+ * session has already tried.
+ */
 export function hasAlternativeRoute(
 	db: Database,
 	family: ModelFamily,
-	excludeProviderID: string,
+	excludeKey: string,
 ) {
-	return chooseRoute(db, family, new Set([excludeProviderID])) !== undefined;
+	return chooseRoute(db, family, new Set([excludeKey])) !== undefined;
 }
 
 /**

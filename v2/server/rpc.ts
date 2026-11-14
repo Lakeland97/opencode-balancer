@@ -2,27 +2,25 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	clearAccountPark,
+	getAccount,
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
+	moveAccount,
+	orderedAccounts,
 	readLimitedReason,
-	setActiveAccount,
+	setAccountEnabled,
+	setAccountFreeOnly,
+	useAccount,
 } from "../core/accounts";
 import {
+	MAX_PERCENT,
 	readGlobalPercent,
 	readTargetPercent,
 	setGlobalPercent,
 	setTargetPercent,
 } from "../core/context";
-import {
-	getBalancingEnabled,
-	isFreeOnly,
-	listProviderPriority,
-	moveProvider,
-	setBalancingEnabled,
-	setFreeOnly,
-	setProviderEnabled,
-} from "../core/priority";
+import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
 import {
@@ -40,20 +38,21 @@ import {
 	resolveChain,
 } from "./connectors";
 import { clearLog, readLog, recordLog } from "./log";
-import { chooseRoute, isProviderEnabled } from "./routing";
+import { chooseRoute } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
 type Pair = { providerID: string; alias: string };
 
 /**
- * The model a target will actually be sent to. A free-only provider is handed
- * its own free spelling of the model, which the row should show rather than the
- * paid id it was configured with.
+ * The model a target will actually be sent to.
+ *
+ * `free` is a property of the credential now, so the row shows the free spelling
+ * when the credential that would serve next is told to spend nothing, and the id
+ * it was configured with otherwise.
  */
 function resolvedModelID(db: Database, target: FamilyRoute): string {
-	if (target.free !== false || !isFreeOnly(db, target.providerID)) {
-		return target.modelID;
-	}
+	const serves = selectHealthyAccount(db, target.providerID);
+	if (target.free !== false || !serves?.freeOnly) return target.modelID;
 	return target.freeVariant?.modelID ?? target.modelID;
 }
 
@@ -66,7 +65,8 @@ function targetState(
 	const serving =
 		live?.providerID === target.providerID && live.modelID === target.modelID;
 	if (target.available === false) return "unavailable";
-	if (!isProviderEnabled(db, target.providerID)) return "disabled";
+	// No healthy credential means the provider is switched off entirely, or every
+	// one of its credentials is disabled, parked, or waiting on a cooldown.
 	const account = selectHealthyAccount(db, target.providerID);
 	if (!account) return "unavailable";
 	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
@@ -80,7 +80,7 @@ function targetState(
 /**
  * A share the panel typed. An empty field clears it — for a whole-row default
  * that means back to the built-in one, for a model it means back to following
- * the default. Anything that is not a share from 1% to 100% is refused rather
+ * the default. Anything that is not a share from 1% to 99% is refused rather
  * than stored as a NaN that would leave nothing able to hold a conversation.
  */
 function parsePercent(
@@ -89,8 +89,11 @@ function parsePercent(
 	const trimmed = value.trim().replace(/%$/, "");
 	if (trimmed === "") return { ok: true, percent: undefined };
 	const percent = Number(trimmed);
-	if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
-		return { message: `"${value}" is not a share from 1% to 100%.`, ok: false };
+	if (!Number.isFinite(percent) || percent <= 0 || percent > MAX_PERCENT) {
+		return {
+			message: `"${value}" is not a share from 1% to ${MAX_PERCENT}%.`,
+			ok: false,
+		};
 	}
 	return { ok: true, percent };
 }
@@ -253,12 +256,16 @@ export async function registerBalancerRpc({
 		log: async () => ({ entries: readLog() }),
 
 		move: async (input) => {
-			const { providerID, direction } = input as {
+			const { providerID, alias, direction } = input as {
 				providerID: string;
+				alias: string;
 				direction: "up" | "down";
 			};
-			moveProvider(db, providerID, direction === "up" ? -1 : 1);
-			return { message: `Moved ${providerID} ${direction}.`, ok: true };
+			moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
+			return {
+				message: `Moved ${providerID}/${alias} ${direction}.`,
+				ok: true,
+			};
 		},
 
 		priority: async () => {
@@ -273,14 +280,17 @@ export async function registerBalancerRpc({
 			} catch {
 				// Ids are the fallback.
 			}
+			// One entry per credential, in the balancer's order: the panel lists
+			// these directly, and the credential — not the provider — is what the
+			// order, the switches and the arrows act on.
 			return {
-				entries: listProviderPriority(db).map((entry) => ({
-					enabled: entry.enabled,
-					freeOnly: entry.freeOnly,
-					name: names.get(entry.providerID) ?? entry.providerID,
-					position: entry.position,
-					providerID: entry.providerID,
-					...(entry.modelID ? { modelID: entry.modelID } : {}),
+				entries: orderedAccounts(db).map((account, position) => ({
+					alias: account.alias,
+					enabled: !account.disabled,
+					freeOnly: account.freeOnly,
+					name: names.get(account.providerID) ?? account.providerID,
+					position,
+					providerID: account.providerID,
 				})),
 			};
 		},
@@ -303,42 +313,48 @@ export async function registerBalancerRpc({
 			recordLog(
 				"config",
 				parsed.percent === undefined
-					? "context share back to the default"
-					: `context share ${parsed.percent}% of the declared window`,
+					? "context limit back to the default"
+					: `context limit ${parsed.percent}% of the declared window`,
 			);
 			return {
 				message:
 					parsed.percent === undefined
-						? `Context share is back to the default (${readGlobalPercent(db)}%).`
-						: `Context share is ${parsed.percent}% of the declared window.`,
+						? `Context limit is back to the default (${readGlobalPercent(db)}%).`
+						: `Context limit is ${parsed.percent}% of the declared window.`,
 				ok: true,
 			};
 		},
 
 		setEnabled: async (input) => {
-			const { providerID, enabled } = input as {
+			const { providerID, alias, enabled } = input as {
 				providerID: string;
+				alias: string;
 				enabled: boolean;
 			};
-			setProviderEnabled(db, providerID, enabled);
+			setAccountEnabled(db, providerID, alias, enabled);
+			recordLog(
+				"config",
+				`${providerID}/${alias} ${enabled ? "enabled" : "disabled"}`,
+			);
 			return {
-				message: `${providerID} ${enabled ? "enabled" : "disabled"}.`,
+				message: `${providerID}/${alias} ${enabled ? "enabled" : "disabled"}.`,
 				ok: true,
 			};
 		},
 
 		setFreeOnly: async (input) => {
-			const { providerID, enabled } = input as {
+			const { providerID, alias, enabled } = input as {
 				providerID: string;
+				alias: string;
 				enabled: boolean;
 			};
-			setFreeOnly(db, providerID, enabled);
+			setAccountFreeOnly(db, providerID, alias, enabled);
 			recordLog(
 				"config",
-				`${providerID} ${enabled ? "free models only" : "paid models too"}`,
+				`${providerID}/${alias} ${enabled ? "free models only" : "paid models too"}`,
 			);
 			return {
-				message: `${providerID} uses ${enabled ? "free models only" : "paid models too"}.`,
+				message: `${providerID}/${alias} uses ${enabled ? "free models only" : "paid models too"}.`,
 				ok: true,
 			};
 		},
@@ -355,13 +371,13 @@ export async function registerBalancerRpc({
 			recordLog(
 				"config",
 				parsed.percent === undefined
-					? `${key} ${providerID} follows the global share`
+					? `${key} ${providerID} follows the global limit`
 					: `${key} ${providerID} compacts at ${parsed.percent}% of its own window`,
 			);
 			return {
 				message:
 					parsed.percent === undefined
-						? `${providerID} in ${key} follows the global share again.`
+						? `${providerID} in ${key} follows the global limit again.`
 						: `${providerID} in ${key} compacts at ${parsed.percent}% of its own window.`,
 				ok: true,
 			};
@@ -380,23 +396,22 @@ export async function registerBalancerRpc({
 
 		use: async (input) => {
 			const { providerID, alias } = input as Pair;
-			try {
-				const account = setActiveAccount(db, providerID, alias);
-				// Picking an account is the retry it was waiting for: a parked
-				// one becomes eligible again, so the marker moves and the next
-				// call actually goes there.
-				clearAccountPark(db, account.providerID, account.alias);
-				recordLog("config", `active account ${providerID}/${account.alias}`);
-				return {
-					message: `Active account is ${providerID}/${account.alias}.`,
-					ok: true,
-				};
-			} catch (error) {
-				return {
-					message: error instanceof Error ? error.message : "Not found.",
-					ok: false,
-				};
+			const account = getAccount(db, providerID, alias);
+			if (!account) {
+				return { message: `No credential ${providerID}/${alias}.`, ok: false };
 			}
+			// Picking a credential is how its provider is told to serve with it:
+			// the row moves ahead of that provider's other credentials, and the
+			// stored alias names it. Routing reads the order, so the two agree.
+			useAccount(db, providerID, alias);
+			// It is also the retry a park was waiting for, so a parked credential
+			// becomes eligible again and the next call actually goes there.
+			clearAccountPark(db, account.providerID, account.alias);
+			recordLog("config", `serving with ${providerID}/${account.alias}`);
+			return {
+				message: `Serving with ${providerID}/${account.alias}.`,
+				ok: true,
+			};
 		},
 	});
 

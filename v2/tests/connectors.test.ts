@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { saveChain } from "../core/chains";
-import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
 	invalidateCatalog,
@@ -128,9 +127,8 @@ describe("catalog rows", () => {
 		);
 	});
 
-	test("a free-only provider's route carries the window it will really use", async () => {
+	test("a route carries the free spelling a credential may be pointed at", async () => {
 		const db = freshDb();
-		setFreeOnly(db, "p1", true);
 		const catalog = await loadCatalog(
 			ctxWith([
 				model("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
@@ -153,15 +151,19 @@ describe("catalog rows", () => {
 		);
 		const p1 = family?.targets.find((route) => route.providerID === "p1");
 
-		// This provider is handed the free spelling, so that is the window the
-		// compaction share is clamped by — not the paid id it is configured with.
-		expect(p1?.context).toBe(200_000);
-		expect(p1?.output).toBe(32_000);
+		// Whether the free spelling is sent is a per-credential decision, so the
+		// route is the model it names and carries the free one beside it. A
+		// credential told to spend nothing gets the variant, whose window is what
+		// the compaction share is then clamped by.
+		expect(p1?.modelID).toBe("deepseek-v4.1-flash");
+		expect(p1?.context).toBe(1_000_000);
+		expect(p1?.freeVariant?.modelID).toBe("deepseek-v4.1-flash-free");
+		expect(p1?.freeVariant?.context).toBe(200_000);
+		expect(p1?.freeVariant?.output).toBe(32_000);
 	});
 
-	test("a stored chain is also sized by the free model it will use", async () => {
+	test("a stored chain target carries its free spelling too", async () => {
 		const db = freshDb();
-		setFreeOnly(db, "p1", true);
 		saveChain(db, {
 			familyKey: "deepseek-v4.1-flash",
 			label: "DeepSeek V4.1 Flash",
@@ -191,8 +193,11 @@ describe("catalog rows", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 
-		expect(family?.targets[0]?.context).toBe(200_000);
-		expect(family?.targets[0]?.output).toBe(32_000);
+		expect(family?.targets[0]?.context).toBe(1_000_000);
+		expect(family?.targets[0]?.freeVariant?.modelID).toBe(
+			"deepseek-v4.1-flash-free",
+		);
+		expect(family?.targets[0]?.freeVariant?.context).toBe(200_000);
 	});
 
 	test("a stored target keeps its own baseURL", async () => {

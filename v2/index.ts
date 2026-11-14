@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin";
 import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
+import { migrateProviderSettings } from "./core/priority";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
 import { registerCompaction } from "./server/compaction";
@@ -50,6 +51,9 @@ export default Plugin.define({
 		// nothing has to be added here by hand. Import before the provider is
 		// registered, because the registration reads the accounts.
 		await syncAccounts(ctx, db);
+		// Fold any provider-level switches left by an earlier version onto the
+		// credentials they now belong to, once the credentials are all here.
+		migrateProviderSettings(db);
 
 		await registerHooks({ ctx, db });
 		const rpc = await registerBalancerRpc({ ctx, db });

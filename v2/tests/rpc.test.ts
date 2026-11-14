@@ -1,9 +1,13 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { saveAccount } from "../core/accounts";
+import {
+	getAccount,
+	orderedAccounts,
+	saveAccount,
+	setAccountFreeOnly,
+} from "../core/accounts";
 import { getStoredChain } from "../core/chains";
-import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import { balancerDefinition } from "../rpc";
 import { invalidateCatalog } from "../server/connectors";
@@ -235,6 +239,45 @@ describe("chain rpc", () => {
 		expect(entry?.freeOnly).toBe(false);
 	});
 
+	test("priority lists one row per credential, in the routing order", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		const rpc = await handlers(db);
+
+		const listed = (await rpc.priority({})) as {
+			entries: { alias: string; providerID: string; position: number }[];
+		};
+		expect(
+			listed.entries.map((row) => `${row.providerID}/${row.alias}`),
+		).toEqual(["p1/a", "p2/a", "p1/b"]);
+		expect(listed.entries.map((row) => row.position)).toEqual([0, 1, 2]);
+	});
+
+	test("the switches apply to one credential, not its provider", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		const rpc = await handlers(db);
+
+		await rpc.setFreeOnly({ alias: "b", enabled: true, providerID: "p1" });
+		await rpc.setEnabled({ alias: "b", enabled: false, providerID: "p1" });
+
+		expect(getAccount(db, "p1", "b")?.freeOnly).toBe(true);
+		expect(getAccount(db, "p1", "b")?.disabled).toBe(true);
+		expect(getAccount(db, "p1", "a")?.freeOnly).toBe(false);
+		expect(getAccount(db, "p1", "a")?.disabled).toBe(false);
+	});
+
+	test("an arrow moves one credential through the order", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		await rpc.move({ alias: "a", direction: "down", providerID: "p1" });
+
+		expect(
+			orderedAccounts(db).map((row) => `${row.providerID}/${row.alias}`),
+		).toEqual(["p2/a", "p1/a"]);
+	});
+
 	test("chainCreate starts a custom row from one model", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
@@ -258,7 +301,7 @@ describe("chain rpc", () => {
 		expect(row?.targets.length).toBe(1);
 	});
 
-	test("a free-only provider shows the model it will actually use", async () => {
+	test("a free-only credential shows the model it will actually use", async () => {
 		const db = freshDb();
 		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
 		const rpc = (await registerBalancerRpc({
@@ -269,7 +312,7 @@ describe("chain rpc", () => {
 			]),
 			db,
 		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
-		setFreeOnly(db, "p1", true);
+		setAccountFreeOnly(db, "p1", "a", true);
 		invalidateCatalog();
 
 		const listed = (await rpc.chains({})) as {

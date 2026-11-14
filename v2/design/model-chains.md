@@ -2,6 +2,12 @@
 
 Status: implemented. Scope: OpenCode 2 plugin (`v2/`).
 
+> Later change: the order is now the **credential** order, one row per credential, not a
+> stored provider priority. Chains still name providers and are still authoritative for a
+> row that has one; an automatic row follows the credential order instead. Where this
+> document says "provider priority", read "the credential order" — `provider_priority` is
+> emptied by `migrateProviderSettings` and no longer consulted.
+
 ## Intent
 
 Today a `Balancer · …` picker row is one model *family*: the same model offered by several

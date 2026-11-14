@@ -430,6 +430,8 @@ export function setAccountEnabled(
 		`UPDATE accounts SET disabled = ?, updated_at = ?
          WHERE provider_id = ? AND alias = ?`,
 	).run(enabled ? 0 : 1, now(), providerID, normalizeAlias(alias));
+	// Switching off the leader hands the provider to the next one along.
+	syncActiveAlias(db, [providerID]);
 }
 
 /** Whether this credential may only be sent models that cost nothing. */
@@ -445,10 +447,47 @@ export function setAccountFreeOnly(
 	).run(freeOnly ? 1 : 0, now(), providerID, normalizeAlias(alias));
 }
 
+/** How a credential is named in a set of ones already tried. */
+export function accountKey(providerID: string, alias: string) {
+	return `${providerID}/${alias}`;
+}
+
+/** The credential a provider would serve with: the first one it may use. */
+export function firstCredential(
+	db: Database,
+	providerID: string,
+): Account | undefined {
+	return orderedAccounts(db, providerID).find((account) => !account.disabled);
+}
+
 /**
- * Move one credential a step through the order, swapping it with the row it
- * passes and renumbering densely, so a later move always has a neighbour to
- * trade places with.
+ * Point each provider's stored active alias at the credential that leads it.
+ *
+ * That alias is what the panel calls `active` and what decides whether OpenCode's
+ * own credential is kept, so it must agree with the order. It used to be the
+ * order's rival, set by `use` and consulted first; now the order is the answer
+ * and this follows it.
+ */
+function syncActiveAlias(db: Database, providerIDs: Iterable<string>) {
+	for (const providerID of new Set(providerIDs)) {
+		const first = firstCredential(db, providerID);
+		if (first) setActiveAlias(db, providerID, first.alias);
+	}
+}
+
+/** Write a whole order back, densely, so a later step has a neighbour to swap. */
+function renumber(db: Database, accounts: readonly Account[]) {
+	for (const [position, account] of accounts.entries()) {
+		db.query<unknown, [number, number, string, string]>(
+			`UPDATE accounts SET position = ?, updated_at = ?
+             WHERE provider_id = ? AND alias = ?`,
+		).run(position, now(), account.providerID, account.alias);
+	}
+}
+
+/**
+ * Move one credential a step through the order, trading places with the row it
+ * passes.
  */
 export function moveAccount(
 	db: Database,
@@ -470,12 +509,39 @@ export function moveAccount(
 	reordered.splice(to, 0, moved);
 
 	const write = db.transaction(() => {
-		for (const [position, account] of reordered.entries()) {
-			db.query<unknown, [number, number, string, string]>(
-				`UPDATE accounts SET position = ?, updated_at = ?
-                 WHERE provider_id = ? AND alias = ?`,
-			).run(position, now(), account.providerID, account.alias);
+		renumber(db, reordered);
+		syncActiveAlias(
+			db,
+			reordered.map((account) => account.providerID),
+		);
+	});
+	write();
+}
+
+/**
+ * Make one credential the one its provider serves with: it moves ahead of that
+ * provider's other rows, and the stored active alias follows it.
+ */
+export function useAccount(db: Database, providerID: string, alias: string) {
+	const all = orderedAccounts(db);
+	const wanted = normalizeAlias(alias);
+	const from = all.findIndex(
+		(account) => account.providerID === providerID && account.alias === wanted,
+	);
+	if (from < 0) return;
+	const head = all.findIndex((account) => account.providerID === providerID);
+
+	const write = db.transaction(() => {
+		if (from !== head) {
+			const reordered = all.slice();
+			const [moved] = reordered.splice(from, 1);
+			reordered.splice(head, 0, moved);
+			renumber(db, reordered);
 		}
+		// The pick is the point: the stored alias must name this credential even
+		// when it was already the top row, because saving an account leaves that
+		// alias on whichever row was written last.
+		setActiveAlias(db, providerID, wanted);
 	});
 	write();
 }

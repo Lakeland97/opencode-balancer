@@ -4,7 +4,7 @@ import { listAccounts } from "../core/accounts";
 import { listStoredChains } from "../core/chains";
 import { DECLARED_CONTEXT } from "../core/context";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
-import { isFreeOnly, listProviderPriority } from "../core/priority";
+import { providerOrder } from "../core/priority";
 
 /** The provider this plugin registers; sessions pin it and never change. */
 export const BALANCER_PROVIDER_ID = "balancer";
@@ -119,12 +119,10 @@ export async function loadCatalog(
 	const models = await ctx.model.list();
 
 	// A provider often offers the same model twice, once paid and once with a
-	// free marker. Free-only providers are pointed at the free spelling of
-	// whatever the family matched, instead of being handed the paid one.
+	// free marker. Which one is sent is a per-credential decision, so the row
+	// carries the free spelling alongside the paid one and routing picks between
+	// them; a credential told to spend nothing is pointed at the sibling.
 	const freeSiblings = new Map<string, ModelRecord>();
-	const freeOnlyProviders = new Set(
-		[...connectorIDs].filter((providerID) => isFreeOnly(db, providerID)),
-	);
 	for (const model of models.data) {
 		if (!connectorIDs.has(model.providerID)) continue;
 		if (typeof model.settings?.baseURL !== "string") continue;
@@ -178,15 +176,10 @@ export async function loadCatalog(
 		const sibling = free
 			? undefined
 			: freeSiblings.get(`${providerID}:${family}:${pkg}`);
-		// A free-only provider will be sent the sibling, so its real window is
-		// the sibling's: sizing the row by the model it will not use would let a
-		// conversation grow past what the model that serves it can hold.
-		const served =
-			freeOnlyProviders.has(providerID) && sibling ? sibling : undefined;
 		const route: FamilyRoute = {
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
-			context: served?.limit?.context ?? model.limit?.context,
+			context: model.limit?.context,
 			free,
 			...(sibling && typeof sibling.settings?.baseURL === "string"
 				? {
@@ -199,7 +192,7 @@ export async function loadCatalog(
 					}
 				: {}),
 			modelID: model.modelID,
-			output: served?.limit?.output ?? model.limit?.output,
+			output: model.limit?.output,
 			package: pkg,
 			providerID,
 		};
@@ -254,22 +247,34 @@ export async function loadCatalog(
 		if (chain.targets.length === 0) continue;
 		const targets: FamilyRoute[] = chain.targets.map((target) => {
 			const record = byRef.get(`${target.providerID}:${target.modelID}`);
-			// The stored id may be paid while the provider is free-only, in which
-			// case the free spelling is what serves and what sizes the row.
-			const sibling = freeOnlyProviders.has(target.providerID)
+			// The stored id may be paid while the credential serving it is told to
+			// spend nothing, in which case the provider's free spelling is what is
+			// sent. Carry it on the target so routing can swap it in.
+			const family = modelFamily(normalizeModel(target.modelID));
+			const sibling = family
 				? freeSiblings.get(
-						`${target.providerID}:${modelFamily(normalizeModel(target.modelID))}:${record?.package ?? ""}`,
+						`${target.providerID}:${family}:${record?.package ?? ""}`,
 					)
 				: undefined;
 			return {
 				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
-				context: sibling?.limit?.context ?? record?.limit?.context,
+				context: record?.limit?.context,
 				free: record
 					? isFreeModel({ cost: record.cost, modelID: target.modelID })
 					: undefined,
+				...(sibling && typeof sibling.settings?.baseURL === "string"
+					? {
+							freeVariant: {
+								baseURL: stripTrailingSlash(sibling.settings.baseURL),
+								context: sibling.limit?.context,
+								modelID: sibling.modelID,
+								output: sibling.limit?.output,
+							},
+						}
+					: {}),
 				modelID: target.modelID,
-				output: sibling?.limit?.output ?? record?.limit?.output,
+				output: record?.limit?.output,
 				package: chain.package,
 				providerID: target.providerID,
 			};
@@ -302,12 +307,6 @@ export async function loadCatalog(
 	return catalog;
 }
 
-function priorityOrder(db: Database): Map<string, number> {
-	return new Map(
-		listProviderPriority(db).map((entry) => [entry.providerID, entry.position]),
-	);
-}
-
 /** The order a row routes in: a stored chain as written, or provider priority. */
 export function resolveChain(db: Database, family: ModelFamily): FamilyRoute[] {
 	return family.stored
@@ -320,7 +319,7 @@ export function sortRoutes(
 	routes: readonly FamilyRoute[],
 	db: Database,
 ): FamilyRoute[] {
-	const order = priorityOrder(db);
+	const order = providerOrder(db);
 	return routes.slice().sort((a, b) => {
 		const left = order.get(a.providerID) ?? Number.MAX_SAFE_INTEGER;
 		const right = order.get(b.providerID) ?? Number.MAX_SAFE_INTEGER;

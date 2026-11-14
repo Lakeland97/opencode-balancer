@@ -2,22 +2,19 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	clearAccountPark,
+	getAccount,
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
-	setActiveAccount,
+	moveAccount,
+	orderedAccounts,
+	setAccountEnabled,
+	setAccountFreeOnly,
 	type UsedAccount,
+	useAccount,
 } from "../core/accounts";
 import { matchModel } from "../core/models";
-import {
-	getBalancingEnabled,
-	isFreeOnly,
-	listProviderPriority,
-	moveProvider,
-	setBalancingEnabled,
-	setFreeOnly,
-	setProviderEnabled,
-} from "../core/priority";
+import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import type { Account } from "../core/types";
 import {
@@ -30,7 +27,7 @@ import {
 } from "./chain-actions";
 import { invalidateCatalog } from "./connectors";
 import { syncAccounts } from "./import-credentials";
-import { chooseRoute, isProviderEnabled } from "./routing";
+import { chooseRoute } from "./routing";
 import { selectHealthyAccount } from "./selection";
 
 function parseArgs(input: string) {
@@ -86,10 +83,24 @@ function statusSummary(db: Database) {
 }
 
 function accountList(db: Database, providerID?: string) {
-	const accounts = providerID ? listAccounts(db, providerID) : listAccounts(db);
+	// The order is the routing order, so the list reads as what would be tried
+	// first rather than alphabetically.
+	const accounts = orderedAccounts(db, providerID);
 	if (accounts.length === 0) return "No accounts saved.";
 	const used = mostRecentlyUsed(db);
 	return accounts.map((account) => accountLine(db, account, used)).join("\n");
+}
+
+/**
+ * The credentials a command names. A bare provider means every credential it
+ * has — `free opencode off` is the whole account, not an arbitrary one of them —
+ * and `provider/alias` means exactly that credential.
+ */
+function namedAccounts(db: Database, token: string): Account[] {
+	const slash = token.indexOf("/");
+	if (slash === -1) return orderedAccounts(db, token);
+	const account = getAccount(db, token.slice(0, slash), token.slice(slash + 1));
+	return account ? [account] : [];
 }
 
 type ResolvedModel = { modelID: string; name?: string } | { error: string };
@@ -150,19 +161,20 @@ export async function runCommand({
 		return [
 			"Balancer commands:",
 			"  gui                          Open the Desktop panel",
-			"  list [provider]              Accounts, with active/limited markers",
+			"  list [provider]              Credentials, in the order they are tried",
 			"  status                       Balancing state and account totals",
-			"  use <provider> <alias>       Make an account active",
+			"  use <provider> <alias>       Serve this provider with that credential",
 			"  import                       Re-read the credentials OpenCode holds",
 			"  on | off                     Toggle automatic failover",
-			"  priority                     Provider order and on/off state",
+			"  priority                     Credential order, with each one's switches",
 			"  chain <model>                Targets for a row, in the order they are tried",
 			"  chain <model> add <provider> <model>",
 			"  chain <model> remove|up|down <provider>",
-			"  chain <model> reset          Hand the row back to provider priority",
-			"  enable <provider> | disable <provider>",
-			"  free <provider> on | off     Use only that provider's free models",
-			"  up <provider> | down <provider>",
+			"  chain <model> reset          Hand the row back to the credential order",
+			"  enable <credential> | disable <credential>",
+			"  free <credential> on | off   Use only that credential's free models",
+			"  up <credential> | down <credential>",
+			"  <credential> is <provider>, meaning all its credentials, or <provider>/<alias>.",
 		].join("\n");
 	}
 
@@ -201,14 +213,14 @@ export async function runCommand({
 	if (action === "use") {
 		const [providerID, alias] = args;
 		if (!providerID || !alias) return "Usage: /balancer use <provider> <alias>";
-		try {
-			const account = setActiveAccount(db, providerID, alias);
-			// Choosing an account is the retry a park was waiting for.
-			clearAccountPark(db, account.providerID, account.alias);
-			return `Active account changed to ${providerID}/${account.alias}`;
-		} catch (error) {
-			return error instanceof Error ? error.message : "Account not found.";
-		}
+		const account = getAccount(db, providerID, alias);
+		if (!account) return `No credential ${providerID}/${alias}.`;
+		// Picking a credential is how its provider is told to serve with it: the
+		// row moves ahead of that provider's others, which is what routing reads.
+		useAccount(db, providerID, alias);
+		// Choosing an account is the retry a park was waiting for.
+		clearAccountPark(db, account.providerID, account.alias);
+		return `${providerID}/${account.alias} serves ${providerID} now.`;
 	}
 
 	if (action === "active") {
@@ -238,14 +250,14 @@ export async function runCommand({
 	}
 
 	if (action === "priority") {
-		const entries = listProviderPriority(db);
+		const entries = orderedAccounts(db);
 		if (entries.length === 0) return "No providers saved.";
 		return entries
 			.map(
-				(entry, index) =>
-					`${index + 1}. ${entry.providerID}  ${entry.enabled ? "on" : "off"}${
-						isFreeOnly(db, entry.providerID) ? "  free-only" : ""
-					}`,
+				(account, index) =>
+					`${index + 1}. ${account.providerID}/${account.alias}  ${
+						account.disabled ? "off" : "on"
+					}${account.freeOnly ? "  free-only" : ""}`,
 			)
 			.join("\n");
 	}
@@ -270,7 +282,6 @@ export async function runCommand({
 				) {
 					marks.push("next");
 				}
-				if (!isProviderEnabled(db, target.providerID)) marks.push("disabled");
 				const account = selectHealthyAccount(db, target.providerID);
 				if (!account) marks.push("no healthy account");
 				else if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
@@ -319,27 +330,62 @@ export async function runCommand({
 	}
 
 	if (action === "free") {
-		const [providerID, toggle] = args;
-		if (!providerID || (toggle !== "on" && toggle !== "off")) {
-			return "Usage: /balancer free <provider> on | off";
+		const [token, toggle] = args;
+		if (!token || (toggle !== "on" && toggle !== "off")) {
+			return "Usage: /balancer free <credential> on | off";
 		}
-		setFreeOnly(db, providerID, toggle === "on");
+		const targets = namedAccounts(db, token);
+		if (targets.length === 0) return `No credential matches "${token}".`;
+		for (const account of targets) {
+			setAccountFreeOnly(
+				db,
+				account.providerID,
+				account.alias,
+				toggle === "on",
+			);
+		}
 		invalidateCatalog();
-		return `${providerID} uses ${toggle === "on" ? "free models only" : "paid models too"}.`;
+		return `${targets.length} credential${targets.length === 1 ? "" : "s"} use ${
+			toggle === "on" ? "free models only" : "paid models too"
+		}.`;
 	}
 
 	if (action === "enable" || action === "disable") {
-		const [providerID] = args;
-		if (!providerID) return `Usage: /balancer ${action} <provider>`;
-		setProviderEnabled(db, providerID, action === "enable");
-		return `${providerID} ${action}d.`;
+		const [token] = args;
+		if (!token) return `Usage: /balancer ${action} <credential>`;
+		const targets = namedAccounts(db, token);
+		if (targets.length === 0) return `No credential matches "${token}".`;
+		for (const account of targets) {
+			setAccountEnabled(
+				db,
+				account.providerID,
+				account.alias,
+				action === "enable",
+			);
+		}
+		return `${targets.length} credential${targets.length === 1 ? "" : "s"} ${
+			action === "enable" ? "enabled" : "disabled"
+		}.`;
 	}
 
 	if (action === "up" || action === "down") {
-		const [providerID] = args;
-		if (!providerID) return `Usage: /balancer ${action} <provider>`;
-		moveProvider(db, providerID, action === "up" ? -1 : 1);
-		return `Moved ${providerID} ${action}.`;
+		const [token] = args;
+		if (!token) return `Usage: /balancer ${action} <provider>/<alias>`;
+		// Moving is only meaningful for one credential: `down` on a whole
+		// provider would have to guess which of its rows the user pointed at.
+		const targets = namedAccounts(db, token);
+		if (targets.length === 0) return `No credential matches "${token}".`;
+		if (targets.length > 1) {
+			return `Say which credential: /balancer ${action} <provider>/<alias>.`;
+		}
+		const [account] = targets;
+		moveAccount(
+			db,
+			account.providerID,
+			account.alias,
+			action === "up" ? -1 : 1,
+		);
+		return `Moved ${account.providerID}/${account.alias} ${action}.`;
 	}
 
 	return `Unknown command: ${action}. Use /balancer help.`;

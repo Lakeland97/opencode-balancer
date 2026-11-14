@@ -34,7 +34,7 @@ re-implements the integration on the V2 hook surface.
 
 | Part | Status |
 |---|---|
-| `core/` account store, schema, priority | unchanged from upstream |
+| `core/` account store and schema | keeps the upstream store; the credential order it routes by is ours |
 | Credential capture | V2 `integration.list` / `connection.resolve`, synced on credential events |
 | Credential injection | `session.hook("http.request")` instead of a global `fetch` patch |
 | Rate-limit detection | `session.hook("http.response")` |
@@ -51,10 +51,10 @@ session. It registers its own provider instead:
    collapsing the per-provider spellings (`deepseek/deepseek-v4.1-flash` and
    `deepseek-v4.1-flash`) into a single picker row.
 2. Picking it pins the session to `balancer`, permanently.
-3. On `model.request` the plugin chooses the connector in provider-priority order, then rewrites
-   the API root, the credential, and the body's `model` field to that connector's own id.
-4. `http.response` parks a limited connector; `retry` moves the call to the next like-for-like
-   connector, so failover crosses providers.
+3. On `model.request` the plugin chooses the credential in the balancer's order, then rewrites
+   the API root, that credential's auth, and the body's `model` field to the connector's own id.
+4. `http.response` parks a limited credential; `retry` moves the call to the next like-for-like
+   target, so failover crosses providers and steps over credentials without the session noticing.
 
 Families never mix wire formats: a model offered as `anthropic-compatible` gets its own row,
 because routing only rewrites the `model` field and the request shape stays whatever the package
@@ -71,57 +71,65 @@ same provider and they become two accounts, each with its own `use`, its own par
 own line in the log. The account's name is the credential's own label, so nothing has to be typed.
 
 Deleting a credential in OpenCode removes the account on the next sync; renaming one renames the
-account, because the two are matched by the credential's id rather than its text. `use` picks which
-of a provider's accounts the balancer sends to, and the panel marks the one OpenCode itself is pointed
-at (`in opencode`) when the two differ. Picking an account is also the retry a park was waiting for,
-so `use` clears that account's cooldown — it is how you test whether a limit has lifted.
+account, because the two are matched by the credential's id rather than its text.
+
+**The credential is the unit the balancer routes by.** The panel lists one row per credential, in the
+order the router walks them, and every row carries its own three switches:
+
+- `enabled` — a switched-off credential is never chosen, and its row still shows what is parked on it;
+- `free` — only models that cost nothing may be sent to it, see below;
+- `↑ ↓` — where the row sits in the order, which is the order automatic rows route in.
+
+`use` tells a provider to serve with that credential: the row moves to the top of that provider's
+rows, and picking a parked row is the retry it was waiting for, so `use` clears that credential's
+cooldown. It is how you test whether a limit has lifted.
 
 ## Model chains
 
 Each row is an ordered list of **targets**, one per provider. A row starts in **automatic** order,
-which is just the provider priority. Editing the order — by adding, moving or removing a target —
-stores the list, and from then on the row routes exactly as written until you `reset` it.
+which follows the credential order: the first credential whose provider offers the model takes the
+request, and lifting a row above another provider's moves it above that provider. Editing the order —
+by adding, moving or removing a target — stores the list, and from then on the row routes exactly as
+written until you `reset` it.
 
-A target is any model the provider can actually route, so a chain may hold unrelated models.
-Providers are still the unit of health: the same provider cannot appear twice, because the second
-target would never be reached.
+A target is any model the provider can actually route, so a chain may hold unrelated models. A chain
+names **providers**, so the same provider cannot appear twice; each provider's credentials are tried
+in the order the panel shows them.
 
 ```sh
 /balancer chain deepseek-v4.1-flash                        # targets, in the order they are tried
 /balancer chain deepseek-v4.1-flash add commandcode deepseek-v4.1-flash
 /balancer chain deepseek-v4.1-flash up commandcode
 /balancer chain deepseek-v4.1-flash remove commandcode
-/balancer chain deepseek-v4.1-flash reset                  # back to provider priority
+/balancer chain deepseek-v4.1-flash reset                  # back to the credential order
 ```
 
-A provider can also be told to serve **free models only** — useful when you keep no
-credits on an account. The balancer then points that provider at its own free spelling
-of the model the chain matched (`deepseek-v4.1-flash` becomes
-`deepseek-v4.1-flash-free` where the provider offers one) and skips the target when it
-has none. A model counts as free when it is priced at zero or its id carries a `free`
-marker.
+A credential can also be told to use **free models only** — useful when you keep no credits on it. The
+balancer then points that credential at its provider's own free spelling of the model the row matched
+(`deepseek-v4.1-flash` becomes `deepseek-v4.1-flash-free` where the provider offers one) and skips
+that credential when it has none, so the next credential in the order answers instead. A model counts
+as free when it is priced at zero or its id carries a `free` marker; unknown pricing is **not** free.
 
 ```sh
-/balancer free opencode on           # paid models are never sent to this provider
-/balancer free opencode off
+/balancer free opencode on           # every credential of opencode: free models only
+/balancer free opencode/work off     # just the one named `work`
 ```
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
-pickers, and a `reset` on any customised row. Every provider is one block: its own `enabled` and `free`
-checkboxes and `↑ ↓` ordering on the header line, with its accounts — each with a `use` button, filled
-from OpenCode — nested underneath. Each target carries a `%` field for the share of that model's own
-window at which it should be compacted; see [Context and compaction](#context-and-compaction).
+pickers, and a `reset` on any customised row. Each target carries a `%` field for the share of that
+model's own window at which it should be compacted; see [Context and compaction](#context-and-compaction).
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
-healthy. A failure moves forward to a provider this session has not tried since its last answer,
-rather than restarting at the top of the chain and parking every provider on the way down. When
-everything has been tried, the chain wraps back to the head.
+healthy. A failure moves forward to a credential this session has not tried since its last answer,
+rather than restarting at the top of the order and parking everything on the way down. When everything
+has been tried, the order wraps back to the head. A provider's second credential is a second chance:
+parking one is what sends the next request to the other, not an error the session has to see.
 
 `limited` therefore means **failed, and not yet tried again** — it is cleared by the next routing
-attempt, or by picking the account again, not by a clock. Hovering the marker shows what the endpoint
-actually reported: the HTTP status, or the host's typed error when it raised one.
+attempt, or by picking the credential again, not by a clock. Hovering the marker shows what the
+endpoint actually reported: the HTTP status, or the host's typed error when it raised one.
 
-The panel's segments are separated by hairlines, in the order `Balancer`, `context share`, `providers`,
+The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
 `models`, `log`.
 
 A `log` at the bottom records what the balancer actually did during this run: which model went to
@@ -133,12 +141,12 @@ The panel lists only rows that route between providers, or that you built by han
 under their brand where a brand has more than one, and every row, group and the whole section can be
 folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
 
-The `context share` field at the top is the share of **1M** — the window every balancer model declares
-— at which the balancer compacts a conversation. It is stored in the plugin's own database, never in
-`opencode.json`, and nothing needs to reload for it to take effect: the balancer watches the
-conversation and asks the host to compact when it reaches the threshold. A field whose model needs its
-own share overrides it, see below. Enter a number from `1` to `100`; an empty field restores the
-default of `20`.
+The `context limit` field at the top is the share of **1M** — the window every balancer model declares
+— at which the balancer compacts a conversation, with the number of tokens that works out to beside
+it. It is stored in the plugin's own database, never in `opencode.json`, and nothing needs to reload
+for it to take effect: the balancer watches the conversation and asks the host to compact when it
+reaches the threshold. A field whose model needs its own share overrides it, see below. Enter a number
+from `1` to `99`; an empty field restores the default of `20`.
 
 ### Context and compaction
 
@@ -213,18 +221,21 @@ well, with its reason, so a cut-off in the conversation is always explained here
 ```
 /balancer help                        command list
 /balancer status                      balancing state, account totals, rate-limited count
-/balancer list [provider]             accounts with active/disabled/limited markers
-/balancer use <provider> <alias>      make an account active
+/balancer list [provider]             credentials in tried order, with markers
+/balancer use <provider> <alias>      serve this provider with that credential
 /balancer import                       re-read the credentials OpenCode holds
 /balancer on | off                    toggle automatic failover
-/balancer priority                     provider order and on/off state
+/balancer priority                     credential order with each one's switches
 /balancer chain <model>                targets for a row, in the order they are tried
 /balancer chain <model> add <provider> <model>
 /balancer chain <model> remove|up|down <provider>
-/balancer chain <model> reset          hand the row back to provider priority
-/balancer enable <provider> | disable <provider>
-/balancer free <provider> on | off     use only that provider's free models
-/balancer up <provider> | down <provider>
+/balancer chain <model> reset          hand the row back to the credential order
+/balancer enable <credential> | disable <credential>
+/balancer free <credential> on | off   use only that credential's free models
+/balancer up <credential> | down <credential>
+
+`<credential>` is `<provider>`, meaning every credential that provider has, or `<provider>/<alias>`
+for one of them.
 ```
 
 Balancing defaults to **off**. Run `/balancer on` once accounts exist.

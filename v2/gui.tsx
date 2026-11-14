@@ -12,7 +12,7 @@ import {
 	TitlebarItem,
 } from "@opencode/plugin/gui";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
-import { DECLARED_CONTEXT } from "./core/context";
+import { DECLARED_CONTEXT, MAX_PERCENT } from "./core/context";
 import { groupByBrand } from "./core/models";
 import { Balancer } from "./rpc";
 
@@ -55,8 +55,11 @@ type Chain = {
 };
 type Chains = { rows: Chain[] };
 type Provider = {
+	/** The credential's own name within the provider. */
+	alias: string;
 	enabled: boolean;
 	freeOnly: boolean;
+	/** The provider's display name. */
 	name: string;
 	position: number;
 	providerID: string;
@@ -103,7 +106,7 @@ export default Plugin.define({
 			balancing: "balancing",
 			clear: "clear",
 			collapse: "collapse all",
-			contextLimit: "context share",
+			contextLimit: "context limit",
 			disabled: "disabled",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
@@ -214,7 +217,8 @@ export default Plugin.define({
 			const typed = globalDraft().replace("%", "").trim();
 			if (typed === "") return 0;
 			const percent = Number(typed);
-			if (!Number.isFinite(percent) || percent <= 0 || percent > 100) return 0;
+			if (!Number.isFinite(percent) || percent <= 0 || percent > MAX_PERCENT)
+				return 0;
 			return Math.round((DECLARED_CONTEXT * percent) / 100);
 		};
 
@@ -326,32 +330,18 @@ export default Plugin.define({
 			opacity: 0.15,
 		} as const;
 
-		// The providers section reads as one entry per credential: a provider
-		// contributes a row for every credential OpenCode holds for it, and its
-		// own settings (enabled, free-only, priority) ride the first of those
-		// rows. A provider with no imported credential still gets one row, so
-		// its settings stay reachable.
-		const providerEntries = () => {
-			const entries: {
-				account?: Account;
-				first: boolean;
-				index: number;
-				provider: Provider;
-			}[] = [];
-			providers().forEach((provider, index) => {
-				const mine = accounts().filter(
-					(account) => account.providerID === provider.providerID,
-				);
-				if (mine.length === 0) {
-					entries.push({ first: true, index, provider });
-					return;
-				}
-				mine.forEach((account, position) => {
-					entries.push({ account, first: position === 0, index, provider });
-				});
-			});
-			return entries;
-		};
+		// The providers section is one row per credential, in the balancer's
+		// order: the order, the switches and the arrows all act on the
+		// credential, so nothing rides a provider header row.
+		const providerEntries = () =>
+			providers().map((entry) => ({
+				account: accounts().find(
+					(account) =>
+						account.providerID === entry.providerID &&
+						account.alias === entry.alias,
+				),
+				entry,
+			}));
 
 		const View = () => {
 			onMount(() => {
@@ -412,7 +402,7 @@ export default Plugin.define({
 							{ctx.t("contextLimit")}
 						</span>
 						<span
-							style={{ "align-items": "center", display: "flex", gap: "4px" }}
+							style={{ "align-items": "center", display: "flex", gap: "2px" }}
 						>
 							<input
 								onBlur={commitPercent}
@@ -421,20 +411,22 @@ export default Plugin.define({
 									if (event.key === "Enter") event.currentTarget.blur();
 								}}
 								placeholder="20"
-								style={{ width: "3.5em" }}
-								title="a share from 1% to 100% of the 1M window every balancer model declares; empty restores the default"
+								style={{ width: "2.5em" }}
+								title={`a share from 1% to ${MAX_PERCENT}% of the 1M window every balancer model declares; empty restores the default`}
 								value={globalDraft()}
 							/>
 							<span style={{ opacity: 0.7 }}>%</span>
-							<Show when={draftTokens() > 0}>
-								<span
-									style={{ opacity: 0.6 }}
-									title="what this share works out to: the share of the declared 1M the balancer compacts at. A model whose real window is smaller is compacted below it, with the room compaction needs kept free."
-								>
-									= {size(draftTokens())}
-								</span>
-							</Show>
 						</span>
+						{/* What the share on screen works out to, at the far end of
+						    the line so the field itself stays small. */}
+						<Show when={draftTokens() > 0}>
+							<span
+								style={{ "margin-left": "auto", opacity: 0.6 }}
+								title="what this share works out to: the share of the declared 1M the balancer compacts at. A model whose real window is smaller is compacted below it, with the room compaction needs kept free."
+							>
+								{size(draftTokens())}
+							</span>
+						</Show>
 					</div>
 
 					<Show when={message()}>
@@ -448,110 +440,107 @@ export default Plugin.define({
 					</div>
 
 					<For each={providerEntries()}>
-						{(entry) => (
+						{(item, index) => (
 							<div style={row}>
-								<Show
-									fallback={<span style={{ width: "1.4em" }} />}
-									when={entry.first}
+								<label
+									style={{ display: "flex", gap: "4px" }}
+									title="route to this credential; a disabled one is never chosen"
 								>
 									<input
-										checked={entry.provider.enabled}
+										checked={item.entry.enabled}
 										onChange={(event) =>
 											void run(() =>
 												rpc().setEnabled({
+													alias: item.entry.alias,
 													enabled: event.currentTarget.checked,
-													providerID: entry.provider.providerID,
+													providerID: item.entry.providerID,
 												}),
 											)
 										}
 										type="checkbox"
 									/>
-								</Show>
-								<span style={field}>
-									{entry.account
-										? `${entry.provider.name} / ${entry.account.alias}`
-										: entry.provider.name}
-									<Show when={entry.account}>
-										{(account) => (
-											<>
-												{account().inUse
-													? ` · ${ctx.t("inUse")}`
-													: account().active
-														? ` · ${ctx.t("active")}`
-														: ""}
-												<Show when={account().limited}>
-													<span title={account().limitedReason || undefined}>
-														{` · ${ctx.t("limited")}`}
-													</span>
-												</Show>
-												{account().disabled ? ` · ${ctx.t("disabled")}` : ""}
-											</>
-										)}
-									</Show>
-								</span>
-								<Show when={entry.first}>
-									<label
-										style={{ display: "flex", gap: "4px" }}
-										title="use only this provider's free models"
-									>
-										<input
-											checked={entry.provider.freeOnly}
-											onChange={(event) =>
-												void run(() =>
-													rpc().setFreeOnly({
-														enabled: event.currentTarget.checked,
-														providerID: entry.provider.providerID,
-													}),
-												)
-											}
-											type="checkbox"
-										/>
-										{ctx.t("free")}
-									</label>
-									<button
-										disabled={entry.index === 0}
-										onClick={() =>
+									<span style={field}>
+										{`${item.entry.name} / ${item.entry.alias}`}
+										<Show when={item.account}>
+											{(account) => (
+												<>
+													{account().inUse
+														? ` · ${ctx.t("inUse")}`
+														: account().active
+															? ` · ${ctx.t("active")}`
+															: ""}
+													<Show when={account().limited}>
+														<span title={account().limitedReason || undefined}>
+															{` · ${ctx.t("limited")}`}
+														</span>
+													</Show>
+												</>
+											)}
+										</Show>
+									</span>
+								</label>
+								<label
+									style={{ display: "flex", gap: "4px" }}
+									title="use only this credential's free models"
+								>
+									<input
+										checked={item.entry.freeOnly}
+										onChange={(event) =>
 											void run(() =>
-												rpc().move({
-													direction: "up",
-													providerID: entry.provider.providerID,
+												rpc().setFreeOnly({
+													alias: item.entry.alias,
+													enabled: event.currentTarget.checked,
+													providerID: item.entry.providerID,
 												}),
 											)
 										}
-									>
-										↑
-									</button>
-									<button
-										disabled={entry.index === providers().length - 1}
-										onClick={() =>
-											void run(() =>
-												rpc().move({
-													direction: "down",
-													providerID: entry.provider.providerID,
-												}),
-											)
-										}
-									>
-										↓
-									</button>
-								</Show>
-								<Show when={entry.account}>
-									{(account) => (
-										<button
-											onClick={() =>
-												void run(() =>
-													rpc().use({
-														alias: account().alias,
-														providerID: account().providerID,
-													}),
-												)
-											}
-											title="send this provider's calls here; picking a parked account clears its cooldown"
-										>
-											{ctx.t("use")}
-										</button>
-									)}
-								</Show>
+										type="checkbox"
+									/>
+									{ctx.t("free")}
+								</label>
+								<button
+									disabled={index() === 0}
+									onClick={() =>
+										void run(() =>
+											rpc().move({
+												alias: item.entry.alias,
+												direction: "up",
+												providerID: item.entry.providerID,
+											}),
+										)
+									}
+									title="try this credential sooner"
+								>
+									↑
+								</button>
+								<button
+									disabled={index() === providers().length - 1}
+									onClick={() =>
+										void run(() =>
+											rpc().move({
+												alias: item.entry.alias,
+												direction: "down",
+												providerID: item.entry.providerID,
+											}),
+										)
+									}
+									title="try this credential later"
+								>
+									↓
+								</button>
+								<button
+									onClick={() =>
+										void run(() =>
+											rpc().use({
+												alias: item.entry.alias,
+												providerID: item.entry.providerID,
+											}),
+										)
+									}
+									title="serve this provider with this credential; picking a parked one clears its cooldown"
+								>
+									{ctx.t("use")}
+								</button>
 							</div>
 						)}
 					</For>
@@ -758,7 +747,7 @@ export default Plugin.define({
 																		}}
 																		placeholder={ctx.t("globalShare")}
 																		style={{ width: "6em" }}
-																		title="this model's own share of its real window, 1% to 100%; empty follows the global share"
+																		title={`this model's own share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
 																		value={
 																			target.percent
 																				? String(target.percent)

@@ -154,10 +154,11 @@ export const balancerDefinition = {
 		move: {
 			input: object(
 				{
+					alias: str,
 					direction: { enum: ["up", "down"], type: "string" },
 					providerID: str,
 				},
-				["providerID", "direction"],
+				["providerID", "alias", "direction"],
 			),
 			output: result,
 		},
@@ -168,14 +169,23 @@ export const balancerDefinition = {
 					entries: {
 						items: object(
 							{
+								/** The credential's own name within the provider. */
+								alias: str,
 								enabled: bool,
 								freeOnly: bool,
-								modelID: str,
+								/** The provider's display name. */
 								name: str,
 								position: num,
 								providerID: str,
 							},
-							["providerID", "position", "enabled", "freeOnly", "name"],
+							[
+								"providerID",
+								"alias",
+								"position",
+								"enabled",
+								"freeOnly",
+								"name",
+							],
 						),
 						type: "array",
 					},
@@ -192,15 +202,17 @@ export const balancerDefinition = {
 			output: result,
 		},
 		setEnabled: {
-			input: object({ enabled: bool, providerID: str }, [
+			input: object({ alias: str, enabled: bool, providerID: str }, [
 				"providerID",
+				"alias",
 				"enabled",
 			]),
 			output: result,
 		},
 		setFreeOnly: {
-			input: object({ enabled: bool, providerID: str }, [
+			input: object({ alias: str, enabled: bool, providerID: str }, [
 				"providerID",
+				"alias",
 				"enabled",
 			]),
 			output: result,

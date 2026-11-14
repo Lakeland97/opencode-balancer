@@ -1,6 +1,7 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
+	accountKey,
 	getAccount,
 	getActiveAccount,
 	markAccountUsed,
@@ -73,9 +74,11 @@ function isParked(db: Database, providerID: string, alias: string) {
 	return Boolean(account?.rateLimitedUntil && account.rateLimitedUntil > now());
 }
 
-// Providers this session has already tried since its last answer. A retry
-// reads this so it moves forward through the chain instead of starting again
-// at the first target and parking every provider on the way down.
+// Credentials this session has already tried since its last answer, named
+// `provider/alias`. A retry reads this so it moves forward through the chain
+// instead of starting again at the first target and parking everything on the
+// way down; naming the credential rather than the provider is what lets the
+// second credential of a provider still answer.
 const triedBySession = new Map<string, Set<string>>();
 
 function triedFor(sessionID: string) {
@@ -415,7 +418,9 @@ export async function registerHooks({
 			MAX_PARK_MS,
 		);
 		markRateLimited(db, tracked.providerID, tracked.alias, park, reported);
-		triedFor(event.sessionID).add(tracked.providerID);
+		triedFor(event.sessionID).add(
+			accountKey(tracked.providerID, tracked.alias),
+		);
 
 		if (!getBalancingEnabled(db)) {
 			recordLog(
@@ -430,7 +435,14 @@ export async function registerHooks({
 			? await familyFor(ctx, db, event.model.id)
 			: undefined;
 		const canContinue = routed
-			? Boolean(family && hasAlternativeRoute(db, family, tracked.providerID))
+			? Boolean(
+					family &&
+						hasAlternativeRoute(
+							db,
+							family,
+							accountKey(tracked.providerID, tracked.alias),
+						),
+				)
 			: hasAlternativeAccount(db, tracked.providerID, tracked.alias);
 		if (!canContinue) {
 			recordLog(

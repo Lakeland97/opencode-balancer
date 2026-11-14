@@ -1,14 +1,18 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
 
-import { saveAccount } from "../core/accounts";
+import {
+	accountKey,
+	saveAccount,
+	setAccountEnabled,
+	setAccountFreeOnly,
+} from "../core/accounts";
 import { saveChain } from "../core/chains";
 import { isFreeModel } from "../core/models";
-import { setFreeOnly, setProviderEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { invalidateCatalog, loadCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
-import { chooseRoute, isProviderEnabled } from "../server/routing";
+import { chooseRoute, hasAlternativeRoute } from "../server/routing";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -86,33 +90,83 @@ describe("chain routing", () => {
 		expect(chooseRoute(db, family)?.providerID).toBe("p2");
 	});
 
-	test("a disabled provider is skipped in a stored chain", async () => {
+	test("a disabled credential is skipped in a stored chain", async () => {
 		const db = freshDb();
 		store(db, [
 			{ modelID: "deepseek-v4.1-flash", providerID: "p1" },
 			{ modelID: "deepseek-v4.1-flash", providerID: "p2" },
 		]);
 		const family = await familyFor(db, ordinary);
-		setProviderEnabled(db, "p1", false);
+		setAccountEnabled(db, "p1", "a", false);
 
 		expect(chooseRoute(db, family)?.providerID).toBe("p2");
 	});
 
-	test("a disabled provider is skipped in an automatic chain", async () => {
+	test("a disabled credential is skipped in an automatic chain", async () => {
 		const db = freshDb();
 		const family = await familyFor(db, ordinary);
-		setProviderEnabled(db, "p1", false);
+		setAccountEnabled(db, "p1", "a", false);
 
 		expect(chooseRoute(db, family)?.providerID).toBe("p2");
 	});
 
-	test("a disabled provider comes back when re-enabled", async () => {
+	test("a disabled credential comes back when re-enabled", async () => {
 		const db = freshDb();
 		const family = await familyFor(db, ordinary);
-		setProviderEnabled(db, "p1", false);
-		setProviderEnabled(db, "p1", true);
+		setAccountEnabled(db, "p1", "a", false);
+		setAccountEnabled(db, "p1", "a", true);
 
 		expect(chooseRoute(db, family)?.providerID).toBe("p1");
+	});
+
+	test("the other credential of a provider answers when one is limited", async () => {
+		// A provider's second credential is a second chance, not a provider the
+		// router writes off along with the first.
+		const db = freshDb();
+		store(db, [
+			{ modelID: "deepseek-v4.1-flash", providerID: "p1" },
+			{ modelID: "deepseek-v4.1-flash", providerID: "p2" },
+		]);
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		const family = await familyFor(db, ordinary);
+		markRateLimited(db, "p1", "a");
+
+		const route = chooseRoute(db, family);
+		expect(route?.providerID).toBe("p1");
+		expect(route?.account.alias).toBe("b");
+		// Which is exactly what the session is asked before handing it the
+		// failure: parking p1/a leaves p1/b to try.
+		expect(hasAlternativeRoute(db, family, accountKey("p1", "a"))).toBe(true);
+	});
+
+	test("the order the panel shows is the order routing walks", async () => {
+		const db = freshDb();
+		// The order is p1/a, p2/a, p1/b: p1's second credential sits below p2/a,
+		// because that is where the panel puts it and the list is the order.
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		const family = await familyFor(db, ordinary);
+
+		markRateLimited(db, "p1", "a");
+		expect(chooseRoute(db, family)?.providerID).toBe("p2");
+		markRateLimited(db, "p2", "a");
+		const next = chooseRoute(db, family);
+		expect(next?.providerID).toBe("p1");
+		expect(next?.account.alias).toBe("b");
+	});
+
+	test("a stored chain keeps the provider order it was written with", async () => {
+		const db = freshDb();
+		// Same credentials, but the row was handed an explicit order, so p1's
+		// other credential is tried before p2 is, as the chain says.
+		store(db, [
+			{ modelID: "deepseek-v4.1-flash", providerID: "p1" },
+			{ modelID: "deepseek-v4.1-flash", providerID: "p2" },
+		]);
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		const family = await familyFor(db, ordinary);
+		markRateLimited(db, "p1", "a");
+
+		expect(chooseRoute(db, family)?.account.alias).toBe("b");
 	});
 
 	test("an unavailable target does not break the row", async () => {
@@ -126,7 +180,7 @@ describe("chain routing", () => {
 		expect(chooseRoute(db, family)?.providerID).toBe("p2");
 	});
 
-	test("excluded providers are not retried", async () => {
+	test("excluded credentials are not retried", async () => {
 		const db = freshDb();
 		store(db, [
 			{ modelID: "deepseek-v4.1-flash", providerID: "p1" },
@@ -134,7 +188,9 @@ describe("chain routing", () => {
 		]);
 		const family = await familyFor(db, ordinary);
 
-		expect(chooseRoute(db, family, new Set(["p1"]))?.providerID).toBe("p2");
+		expect(
+			chooseRoute(db, family, new Set([accountKey("p1", "a")]))?.providerID,
+		).toBe("p2");
 	});
 
 	test("a conversation is never held back for being large", async () => {
@@ -153,7 +209,7 @@ describe("chain routing", () => {
 	});
 });
 
-describe("free-only providers", () => {
+describe("free-only credentials", () => {
 	test("free variants are recognised by id or zero cost", () => {
 		// No pricing data means unknown, which must not be read as free.
 		expect(isFreeModel({ cost: [], modelID: "openai/gpt-5" })).toBe(false);
@@ -181,34 +237,56 @@ describe("free-only providers", () => {
 		).toBe(true);
 	});
 
-	test("a free-only provider is skipped for a paid target", async () => {
+	test("a free-only credential is skipped for a paid target", async () => {
 		const db = freshDb();
 		const family = await familyFor(db, [
 			paid("p1", "deepseek-v4.1-flash"),
 			paid("p2", "deepseek-v4.1-flash"),
 		]);
-		setFreeOnly(db, "p1", true);
+		setAccountFreeOnly(db, "p1", "a", true);
 
 		expect(chooseRoute(db, family)?.providerID).toBe("p2");
 	});
 
-	test("a free-only provider serves its own free spelling instead", async () => {
+	test("a free-only credential serves its own free spelling instead", async () => {
 		const db = freshDb();
 		const family = await familyFor(db, [
 			paid("p1", "deepseek-v4.1-flash"),
 			free("p1", "deepseek-v4.1-flash-free"),
 			paid("p2", "deepseek-v4.1-flash"),
 		]);
-		setFreeOnly(db, "p1", true);
+		setAccountFreeOnly(db, "p1", "a", true);
 
 		expect(chooseRoute(db, family)?.modelID).toBe("deepseek-v4.1-flash-free");
 		expect(chooseRoute(db, family)?.providerID).toBe("p1");
 	});
-});
 
-describe("provider state", () => {
-	test("a provider with no stored row is enabled", () => {
+	test("free-only belongs to the credential, not the provider", async () => {
 		const db = freshDb();
-		expect(isProviderEnabled(db, "p1")).toBe(true);
+		const family = await familyFor(db, [
+			paid("p1", "deepseek-v4.1-flash"),
+			free("p1", "deepseek-v4.1-flash-free"),
+			paid("p2", "deepseek-v4.1-flash"),
+		]);
+		saveAccount(db, "p1", "b", { key: "k3", type: "api" });
+		// Only the first credential is told to spend nothing.
+		setAccountFreeOnly(db, "p1", "a", true);
+
+		expect(chooseRoute(db, family)?.account.alias).toBe("a");
+		expect(chooseRoute(db, family)?.modelID).toBe("deepseek-v4.1-flash-free");
+
+		// With that credential parked, the next row in the order serves: the
+		// panel's list is the routing order, and p2/a sits above p1/b.
+		markRateLimited(db, "p1", "a");
+		expect(chooseRoute(db, family)?.providerID).toBe("p2");
+
+		// Its neighbour is still a chance rather than written off with the
+		// provider, and it serves the paid spelling because only p1/a was told
+		// to spend nothing.
+		markRateLimited(db, "p2", "a");
+		const next = chooseRoute(db, family);
+		expect(next?.providerID).toBe("p1");
+		expect(next?.account.alias).toBe("b");
+		expect(next?.modelID).toBe("deepseek-v4.1-flash");
 	});
 });
