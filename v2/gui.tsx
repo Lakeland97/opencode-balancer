@@ -144,18 +144,20 @@ export default Plugin.define({
 									{account.limited ? ` · ${ctx.t("limited")}` : ""}
 									{account.disabled ? ` · ${ctx.t("disabled")}` : ""}
 								</span>
-								<button
-									onClick={() =>
-										void run(() =>
-											rpc().use({
-												alias: account.alias,
-												providerID: account.providerID,
-											}),
-										)
-									}
-								>
-									{ctx.t("use")}
-								</button>
+								<Show when={!account.inUse}>
+									<button
+										onClick={() =>
+											void run(() =>
+												rpc().use({
+													alias: account.alias,
+													providerID: account.providerID,
+												}),
+											)
+										}
+									>
+										{ctx.t("use")}
+									</button>
+								</Show>
 								<button
 									onClick={() =>
 										void run(() =>
