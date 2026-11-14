@@ -107,7 +107,6 @@ export default Plugin.define({
 			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
-			disabled: "disabled",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
