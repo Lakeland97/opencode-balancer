@@ -741,9 +741,9 @@ export default Plugin.define({
 																			if (event.key === "Enter")
 																				event.currentTarget.blur();
 																		}}
-																		placeholder="none"
-																		style={{ width: "6em" }}
-																		title="the most this target may hold, in tokens; empty means the provider's own window"
+																		placeholder="e.g. 200000"
+																		style={{ width: "8em" }}
+																		title="a token count, not a percentage; empty means the provider's own window"
 																		value={
 																			target.limit ? String(target.limit) : ""
 																		}
@@ -820,9 +820,9 @@ export default Plugin.define({
 																	if (event.key === "Enter")
 																		event.currentTarget.blur();
 																}}
-																placeholder="none"
-																style={{ width: "6em" }}
-																title="the most this row may hold, in tokens; empty means the smaller of the targets' own windows"
+																placeholder="e.g. 200000"
+																style={{ width: "8em" }}
+																title="a token count, not a percentage; empty means the smaller of the targets' own windows"
 																value={chain.limit ? String(chain.limit) : ""}
 															/>
 														</div>
