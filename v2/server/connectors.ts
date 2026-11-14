@@ -288,7 +288,17 @@ export async function registerBalancerProvider({
 			const source = catalog.sources.get(family.key);
 			const window = family.window;
 			return {
-				...(source ?? {}),
+				// A stored row outlives its family, so it may have no source
+				// record at all; the host sorts on these fields and crashes
+				// without them.
+				...(source ?? {
+					capabilities: { input: ["text"], output: ["text"], tools: true },
+					cost: [],
+					enabled: true,
+					status: "active" as const,
+					time: { released: 0 },
+					variants: [],
+				}),
 				id: family.key,
 				// The window is the smallest target's, declared so the host's
 				// buffer applies to that real limit instead of a fraction of it.
@@ -299,7 +309,7 @@ export async function registerBalancerProvider({
 								...(window.output > 0 ? { output: window.output } : {}),
 							},
 						}
-					: {}),
+					: { limit: { context: 0, output: 0 } }),
 				modelID: family.key,
 				name: `Balancer · ${family.name}`,
 				package: family.package,

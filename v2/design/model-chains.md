@@ -1,6 +1,6 @@
 # Model chains
 
-Status: proposed. Scope: OpenCode 2 plugin (`v2/`).
+Status: implemented. Scope: OpenCode 2 plugin (`v2/`).
 
 ## Intent
 

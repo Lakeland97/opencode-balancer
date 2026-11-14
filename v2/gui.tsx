@@ -38,7 +38,12 @@ type Chain = {
 	targets: Target[];
 };
 type Chains = { rows: Chain[] };
-type Provider = { enabled: boolean; name: string; position: number; providerID: string };
+type Provider = {
+	enabled: boolean;
+	name: string;
+	position: number;
+	providerID: string;
+};
 type Providers = { entries: Provider[] };
 type Models = { models: { modelID: string; name: string }[] };
 
@@ -57,23 +62,23 @@ export default Plugin.define({
 		en: {
 			active: "active",
 			add: "add",
+			addTarget: "add target",
 			alias: "alias",
 			balancing: "balancing",
 			declares: "declares",
 			disabled: "disabled",
 			inUse: "in use",
-			addTarget: "add target",
-			models: "models",
-			providers: "providers",
-			reset: "reset",
-			window: "window",
 			limited: "limited",
+			models: "models",
 			open: "Open Balancer",
 			provider: "provider",
+			providers: "providers",
 			refresh: "refresh",
 			remove: "remove",
+			reset: "reset",
 			title: "Balancer",
 			use: "use",
+			window: "window",
 		},
 	},
 	setup(ctx) {
@@ -128,7 +133,7 @@ export default Plugin.define({
 
 		// The picker's model list comes from the server, which only offers models
 		// the provider can actually route.
-		const chooseProvider = async (chain: Chain, providerID: string) => {
+		const chooseProvider = async (providerID: string) => {
 			setAddProvider(providerID);
 			setAddModels([]);
 			if (!providerID) return;
@@ -376,17 +381,17 @@ export default Plugin.define({
 								</div>
 
 								<Show
-									when={adding() === chain.key}
 									fallback={
 										<button onClick={() => void startAdd(chain.key)}>
 											+ {ctx.t("addTarget")}
 										</button>
 									}
+									when={adding() === chain.key}
 								>
 									<div style={row}>
 										<select
 											onChange={(event) =>
-												void chooseProvider(chain, event.currentTarget.value)
+												void chooseProvider(event.currentTarget.value)
 											}
 											style={field}
 											value={addProvider()}

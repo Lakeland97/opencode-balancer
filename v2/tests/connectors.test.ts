@@ -179,6 +179,49 @@ describe("catalog rows", () => {
 });
 
 describe("provider registration", () => {
+	test("a row with no source model still has the fields the host sorts on", async () => {
+		const db = freshDb();
+		saveChain(db, {
+			familyKey: "withdrawn-model",
+			label: "Withdrawn Model",
+			package: PACKAGE,
+			targets: [
+				{ baseURL: "https://p1.invalid/v1", modelID: "gone", providerID: "p1" },
+			],
+		});
+
+		let added: {
+			id?: string;
+			time?: { released: number };
+			cost?: unknown[];
+		}[] = [];
+		const ctx = {
+			model: { list: async () => ({ data: twoConnectors }) },
+			provider: {
+				transform: async (
+					fn: (editor: { add: (value: { models: unknown[] }) => void }) => void,
+				) => {
+					fn({
+						add: (value) => {
+							added = value.models as typeof added;
+						},
+					});
+				},
+			},
+		} as never;
+
+		await registerBalancerProvider({
+			buffer: { kind: "percent", percent: 0.75 },
+			ctx,
+			db,
+		});
+
+		const row = added.find((entry) => entry.id === "withdrawn-model");
+		expect(row).toBeDefined();
+		expect(typeof row?.time?.released).toBe("number");
+		expect(Array.isArray(row?.cost)).toBe(true);
+	});
+
 	test("the declared window is compensated for the buffer", async () => {
 		const db = freshDb();
 		saveChain(db, {
