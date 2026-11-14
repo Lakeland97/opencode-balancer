@@ -87,4 +87,11 @@ describe("modelBrand", () => {
 		expect(modelBrand("gpt-5")).toBe("gpt");
 		expect(modelBrand("5")).toBe("5");
 	});
+
+	test("a hyphenated label groups by what precedes the dash", () => {
+		expect(modelBrand("GLM-5.3")).toBe("GLM");
+		expect(modelBrand("Claude-Fable-5.2")).toBe("Claude");
+		expect(modelBrand("deepseek-v4.1-flash")).toBe("deepseek");
+		expect(modelBrand("kimi-k3.1-pro")).toBe("kimi");
+	});
 });
