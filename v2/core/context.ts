@@ -1,78 +1,122 @@
-export type CompactionBuffer =
-	| { kind: "percent"; percent: number }
-	| { kind: "tokens"; tokens: number }
-	| { kind: "none" };
-
-function clampReserve(percent: number): number {
-	return Number.isFinite(percent) ? Math.min(Math.max(percent, 0), 0.99) : 0;
-}
+import type { Database } from "bun:sqlite";
 
 /**
- * Where the host will compact: the window a row declares, less the reserve the
- * config keeps free. `compaction.buffer` is that reserve, so a 51% buffer makes
- * the host compact at 49% of the declared window. The file is the setting; the
- * panel writes it rather than inventing a declaration to compensate for it.
+ * What every balancer model tells the host its window is. The real connector
+ * windows differ wildly, and a host that knows them would compact on its own at
+ * a moment the balancer cannot choose; declaring one large window hands that
+ * decision to us, and the balancer compacts at its own threshold instead.
  */
-export function tripContext(
-	realContext: number,
-	buffer: CompactionBuffer,
-): number {
-	if (!(realContext > 0)) return 0;
-	if (buffer.kind === "percent") {
-		return Math.max(
-			Math.ceil(realContext * (1 - clampReserve(buffer.percent))),
-			0,
-		);
+export const DECLARED_CONTEXT = 1_000_000;
+
+/** The share of the declared window used when the user has not said otherwise. */
+export const DEFAULT_PERCENT = 20;
+
+const globalKey = "context_percent";
+const targetKey = (familyKey: string, providerID: string) =>
+	`context_percent:${familyKey}:${providerID}`;
+
+/**
+ * Reads a share, treating anything a setter would have cleared as absent. A
+ * malformed row must read as "unset" and fall back to the default, not as a NaN
+ * that would leave nothing able to hold a conversation.
+ */
+function readPercent(db: Database, key: string): number | undefined {
+	const value = db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(key)?.value;
+	if (value === undefined) return undefined;
+	const percent = Number(value);
+	return Number.isFinite(percent) && percent > 0 && percent <= 100
+		? percent
+		: undefined;
+}
+
+function writePercent(
+	db: Database,
+	key: string,
+	percent: number | undefined,
+): void {
+	if (
+		percent === undefined ||
+		!Number.isFinite(percent) ||
+		percent <= 0 ||
+		percent > 100
+	) {
+		db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(key);
+		return;
 	}
-	if (buffer.kind === "tokens") {
-		return Math.max(realContext - Math.max(buffer.tokens, 0), 0);
-	}
-	return realContext;
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(key, String(percent));
+}
+
+/** The share of the declared window to fill before compacting. */
+export function readGlobalPercent(db: Database): number {
+	return readPercent(db, globalKey) ?? DEFAULT_PERCENT;
+}
+
+/** Setting the share to undefined, or outside 1–100, restores the default. */
+export function setGlobalPercent(
+	db: Database,
+	percent: number | undefined,
+): void {
+	writePercent(db, globalKey, percent);
+}
+
+/** The share of one model's own window, or undefined when it follows the global. */
+export function readTargetPercent(
+	db: Database,
+	familyKey: string,
+	providerID: string,
+): number | undefined {
+	return readPercent(db, targetKey(familyKey, providerID));
+}
+
+/** Setting the share to undefined, or outside 1–100, removes the override. */
+export function setTargetPercent(
+	db: Database,
+	familyKey: string,
+	providerID: string,
+	percent: number | undefined,
+): void {
+	writePercent(db, targetKey(familyKey, providerID), percent);
 }
 
 /**
- * The share of a window left to use, which is what the panel edits: the reserve
- * reads the other way round, so a 51% buffer is a 49% limit. A token reserve
- * has no single share, and no reserve means the whole window.
+ * The token count the balancer compacts a conversation at.
+ *
+ * The two shares measure different windows on purpose: the global one is a
+ * slice of the declared 1M, so "20%" always means 200k whatever is serving,
+ * while a per-model share is a slice of that model's own window, so 50% of a
+ * 200k model is 100k. A per-model share replaces the global for that model
+ * rather than being capped against it.
+ *
+ * The model's real window is the hard ceiling underneath either one: a share of
+ * the declared window that lands past what the model can actually hold is
+ * clamped to it, which is what makes "30%" mean 300k on a 1M model and 200k on
+ * a 200k one. A model whose window is unknown has no ceiling to clamp against,
+ * so the share stands alone rather than the conversation being cut at nothing.
  */
-export function targetShare(buffer: CompactionBuffer): number {
-	if (buffer.kind === "percent") return 1 - clampReserve(buffer.percent);
-	return 1;
-}
+export function effectiveThreshold(input: {
+	globalPercent: number;
+	targetPercent?: number;
+	realContext?: number;
+}): number {
+	const real =
+		typeof input.realContext === "number" && input.realContext > 0
+			? input.realContext
+			: undefined;
 
-function formatShare(fraction: number): string {
-	return `${Number((fraction * 100).toFixed(2))}%`;
-}
+	// A per-model share has nothing but that model to measure against, so an
+	// unknown window falls back to the declared one rather than to zero.
+	const override = input.targetPercent;
+	const base =
+		override === undefined ? DECLARED_CONTEXT : (real ?? DECLARED_CONTEXT);
+	const percent = override === undefined ? input.globalPercent : override;
 
-/**
- * How much the config keeps free, shown beside the limit so the relationship is
- * visible: the panel's percentage and this reserve are the same fact, twice.
- */
-export function reserveLabel(buffer: CompactionBuffer): string {
-	if (buffer.kind === "percent") return formatShare(buffer.percent);
-	if (buffer.kind === "tokens") return `${buffer.tokens} tokens`;
-	return "none";
-}
-
-/**
- * The window across a row's targets: the smallest is what every hop must fit,
- * the largest is the most any hop can hold.
- */
-export function rowWindow(
-	targets: readonly { context?: number; output?: number }[],
-): { ceiling: number; context: number; output: number } | undefined {
-	const contexts = targets
-		.map((target) => target.context)
-		.filter((value): value is number => typeof value === "number" && value > 0);
-	if (contexts.length === 0) return undefined;
-
-	const outputs = targets
-		.map((target) => target.output)
-		.filter((value): value is number => typeof value === "number" && value > 0);
-
-	return {
-		ceiling: Math.max(...contexts),
-		context: Math.min(...contexts),
-		output: outputs.length > 0 ? Math.min(...outputs) : 0,
-	};
+	const chosen = Math.round((base * percent) / 100);
+	return real === undefined ? chosen : Math.min(chosen, real);
 }

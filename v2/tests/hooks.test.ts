@@ -11,11 +11,14 @@ import {
 import { setBalancingEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
-import { registerHooks } from "../server/hooks";
+import { invalidateCatalog } from "../server/connectors";
+import { balancerTargetFor, registerHooks } from "../server/hooks";
 import { markRateLimited } from "../server/request-state";
 
 const PROVIDER = "anthropic";
 const MODEL = { id: "claude-test", providerID: PROVIDER };
+const PACKAGE = "@opencode/ai/providers/openai-compatible";
+const BALANCER = { id: "deepseek-v4.1-flash", providerID: "balancer" };
 
 type HookCallback = (event: Record<string, unknown>) => unknown;
 
@@ -200,5 +203,65 @@ describe("retry hook", () => {
 		await registry.retry(event);
 
 		expect(event.decision).toEqual({ delay: 3_000, retry: false });
+	});
+});
+
+describe("the session's target", () => {
+	async function routedSetup() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						{
+							enabled: true,
+							limit: { context: 200_000, output: 4096 },
+							modelID: "deepseek-v4.1-flash",
+							name: "DeepSeek V4.1 Flash",
+							package: PACKAGE,
+							providerID: "p1",
+							settings: { baseURL: "https://p1.invalid/v1" },
+							type: "chat",
+						},
+					],
+				}),
+			},
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
+	test("a routed call records the row and the window it went through", async () => {
+		const { registry } = await routedSetup();
+		await registry["model.request"]({
+			agent: "build",
+			headers: {},
+			kind: "chat",
+			model: BALANCER,
+			sessionID: "routed-1",
+		});
+
+		// This is what the compaction watcher measures against: the row decides
+		// which per-model share applies, and the window is the ceiling the share
+		// is clamped by.
+		expect(balancerTargetFor("routed-1")).toEqual({
+			context: 200_000,
+			familyKey: "deepseek-v4.1-flash",
+			providerID: "p1",
+		});
+	});
+
+	test("a session that never routed here has nothing to compact", async () => {
+		await routedSetup();
+		expect(balancerTargetFor("never-routed")).toBeUndefined();
 	});
 });

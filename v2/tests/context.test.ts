@@ -1,119 +1,118 @@
+import { Database } from "bun:sqlite";
 import { describe, expect, test } from "bun:test";
+
 import {
-	type CompactionBuffer,
-	reserveLabel,
-	rowWindow,
-	targetShare,
-	tripContext,
+	DEFAULT_PERCENT,
+	effectiveThreshold,
+	readGlobalPercent,
+	readTargetPercent,
+	setGlobalPercent,
+	setTargetPercent,
 } from "../core/context";
+import { migrate } from "../core/schema";
 
-const percent = (value: number): CompactionBuffer => ({
-	kind: "percent",
-	percent: value,
+function freshDb() {
+	const db = new Database(":memory:");
+	migrate(db);
+	return db;
+}
+
+describe("where the conversation is cut", () => {
+	test("the global share is measured against the declared window", () => {
+		// The balancer tells every model it holds 1M. A 20% request is 20% of
+		// that, and the host is left none the wiser.
+		expect(
+			effectiveThreshold({ globalPercent: 20, realContext: 1_000_000 }),
+		).toBe(200_000);
+	});
+
+	test("a share past the model's own window is clamped to it", () => {
+		// 30% of the declared 1M is 300k, but this model only holds 200k.
+		expect(
+			effectiveThreshold({ globalPercent: 30, realContext: 200_000 }),
+		).toBe(200_000);
+	});
+
+	test("a per-model share is measured against that model's window", () => {
+		// 50% of a 200k model is 100k, whichever the global says.
+		expect(
+			effectiveThreshold({
+				globalPercent: 20,
+				realContext: 200_000,
+				targetPercent: 50,
+			}),
+		).toBe(100_000);
+		expect(
+			effectiveThreshold({
+				globalPercent: 90,
+				realContext: 1_000_000,
+				targetPercent: 10,
+			}),
+		).toBe(100_000);
+	});
+
+	test("an unknown window leaves the share alone", () => {
+		// A provider that reports no window must still be cut, not left to grow
+		// until it is refused.
+		expect(
+			effectiveThreshold({ globalPercent: 20, realContext: undefined }),
+		).toBe(200_000);
+		expect(
+			effectiveThreshold({
+				globalPercent: 20,
+				realContext: 0,
+				targetPercent: 50,
+			}),
+		).toBe(500_000);
+	});
 });
 
-describe("where the host trips", () => {
-	test("the trip is the window less the reserve", () => {
-		// The host keeps `metadata.buffer` free of whatever window it is told,
-		// so the file's reserve is the only thing between the window and the
-		// compaction trigger.
-		expect(tripContext(1_000_000, percent(0.51))).toBe(490_000);
-		expect(tripContext(1_000_000, percent(0.25))).toBe(750_000);
-		expect(tripContext(200_000, percent(0.51))).toBe(98_000);
+describe("the stored shares", () => {
+	test("the global share reads as its default until it is set", () => {
+		const db = freshDb();
+		expect(readGlobalPercent(db)).toBe(DEFAULT_PERCENT);
+		expect(DEFAULT_PERCENT).toBe(20);
 	});
 
-	test("no reserve trips at the whole window", () => {
-		expect(tripContext(1_000_000, { kind: "none" })).toBe(1_000_000);
+	test("a set global share survives a reload and clearing restores the default", () => {
+		const db = freshDb();
+		setGlobalPercent(db, 35);
+		expect(readGlobalPercent(db)).toBe(35);
+		setGlobalPercent(db, undefined);
+		expect(readGlobalPercent(db)).toBe(DEFAULT_PERCENT);
 	});
 
-	test("a token reserve is taken off the window", () => {
-		expect(tripContext(1_000_000, { kind: "tokens", tokens: 150_000 })).toBe(
-			850_000,
-		);
+	test("a per-model share reads back for that provider only", () => {
+		const db = freshDb();
+		setTargetPercent(db, "deepseek-v4.1-flash", "p1", 50);
+		expect(readTargetPercent(db, "deepseek-v4.1-flash", "p1")).toBe(50);
+		expect(readTargetPercent(db, "deepseek-v4.1-flash", "p2")).toBeUndefined();
+		expect(readTargetPercent(db, "other-row", "p1")).toBeUndefined();
 	});
 
-	test("a reserve larger than the window trips immediately", () => {
-		expect(tripContext(100_000, { kind: "tokens", tokens: 150_000 })).toBe(0);
-		// And a window of nothing never trips above nothing.
-		expect(tripContext(0, percent(0.5))).toBe(0);
+	test("the global and a per-model share are separate facts", () => {
+		const db = freshDb();
+		setGlobalPercent(db, 30);
+		setTargetPercent(db, "deepseek-v4.1-flash", "p1", 50);
+		expect(readGlobalPercent(db)).toBe(30);
+		expect(readTargetPercent(db, "deepseek-v4.1-flash", "p1")).toBe(50);
 	});
 
-	test("a nonsensical reserve is clamped, not trusted", () => {
-		expect(tripContext(1_000_000, percent(-1))).toBe(1_000_000);
-		expect(tripContext(1_000_000, percent(1))).toBeLessThan(11_000);
-		expect(tripContext(1_000_000, percent(1))).toBeGreaterThan(9_000);
-		expect(tripContext(1_000_000, percent(Number.NaN))).toBe(1_000_000);
-	});
-});
-
-describe("the share the panel edits", () => {
-	test("it is the remaining part of the window", () => {
-		expect(targetShare(percent(0.51))).toBeCloseTo(0.49, 5);
-		expect(targetShare(percent(0.25))).toBeCloseTo(0.75, 5);
-	});
-
-	test("a token reserve or none has no share to divide", () => {
-		expect(targetShare({ kind: "tokens", tokens: 150_000 })).toBe(1);
-		expect(targetShare({ kind: "none" })).toBe(1);
-	});
-
-	test("the file and the panel are the same fact, twice", () => {
-		// The invariant that replaces the old compensation arithmetic: the panel
-		// writes `100 − share` as the reserve, so the trip is the share.
-		for (const share of [0.05, 0.25, 0.49, 0.5, 0.75, 0.99]) {
-			const buffer = percent(1 - share);
-			const trip = tripContext(1_000_000, buffer);
-			expect(trip / 1_000_000).toBeCloseTo(share, 3);
-			expect(100 - Math.round(targetShare(buffer) * 100)).toBeCloseTo(
-				Math.round((1 - share) * 100),
-				0,
-			);
+	test("a share outside 1% to 100% is refused rather than stored", () => {
+		const db = freshDb();
+		for (const bad of [0, -5, 101, Number.NaN]) {
+			setGlobalPercent(db, bad);
+			setTargetPercent(db, "row", "p1", bad);
+			expect(readGlobalPercent(db)).toBe(DEFAULT_PERCENT);
+			expect(readTargetPercent(db, "row", "p1")).toBeUndefined();
 		}
 	});
-});
 
-describe("the reserve label", () => {
-	test("reads as the part kept free", () => {
-		expect(reserveLabel(percent(0.25))).toBe("25%");
-		expect(reserveLabel(percent(0.51))).toBe("51%");
-		expect(reserveLabel(percent(0.495))).toBe("49.5%");
-	});
-
-	test("a token reserve says so", () => {
-		expect(reserveLabel({ kind: "tokens", tokens: 150_000 })).toBe(
-			"150000 tokens",
-		);
-	});
-
-	test("no reserve is named as such", () => {
-		expect(reserveLabel({ kind: "none" })).toBe("none");
-	});
-});
-
-describe("row window", () => {
-	test("the smallest target wins", () => {
-		expect(rowWindow([{ context: 1_000_000 }, { context: 200_000 }])).toEqual({
-			ceiling: 1_000_000,
-			context: 200_000,
-			output: 0,
-		});
-	});
-
-	test("output is the smallest output limit", () => {
-		expect(
-			rowWindow([
-				{ context: 200_000, output: 32_000 },
-				{ context: 1_000_000, output: 384_000 },
-			]),
-		).toEqual({ ceiling: 1_000_000, context: 200_000, output: 32_000 });
-	});
-
-	test("targets without limits are ignored", () => {
-		expect(rowWindow([{}, { context: 200_000 }])).toEqual({
-			ceiling: 200_000,
-			context: 200_000,
-			output: 0,
-		});
-		expect(rowWindow([{}])).toBeUndefined();
+	test("a malformed stored value reads as unset", () => {
+		const db = freshDb();
+		db.query(
+			"INSERT INTO settings (key, value) VALUES ('context_percent', 'lots')",
+		).run();
+		expect(readGlobalPercent(db)).toBe(DEFAULT_PERCENT);
 	});
 });

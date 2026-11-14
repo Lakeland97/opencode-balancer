@@ -109,8 +109,8 @@ marker.
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
 pickers, and a `reset` on any customised row. Every provider is one block: its own `enabled` and `free`
 checkboxes and `↑ ↓` ordering on the header line, with its accounts — each with a `use` button, filled
-from OpenCode — nested underneath. A row's ceiling can be set in tokens per row and per target; each is
-described under Context windows.
+from OpenCode — nested underneath. Each target carries a `%` field for the share of that model's own
+window at which it should be compacted; see [Context and compaction](#context-and-compaction).
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
 healthy. A failure moves forward to a provider this session has not tried since its last answer,
@@ -121,7 +121,7 @@ everything has been tried, the chain wraps back to the head.
 attempt, or by picking the account again, not by a clock. Hovering the marker shows what the endpoint
 actually reported: the HTTP status, or the host's typed error when it raised one.
 
-The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
+The panel's segments are separated by hairlines, in the order `Balancer`, `context share`, `providers`,
 `models`, `log`.
 
 A `log` at the bottom records what the balancer actually did during this run: which model went to
@@ -133,47 +133,42 @@ The panel lists only rows that route between providers, or that you built by han
 under their brand where a brand has more than one, and every row, group and the whole section can be
 folded away; `collapse all` / `expand all` folds the lot at once. The panel opens folded.
 
-The `context limit` field at the top edits `compaction.buffer` in the config file directly — in place,
-so comments and every other setting survive, with a one-time `.bak` beside it and a parse check before
-anything lands — then asks the host and the current project to rebuild their model lists, so the change
-reaches a running chat without restarting OpenCode. It shows the share of a window left to use, while
-the file stores the part kept free, so a limit of `90%` is written as `"buffer": "10%"`. Enter a
-percentage from `1%` to `100%`; `100%` is stored as no buffer at all, which trips at the whole window.
+The `context share` field at the top is the share of **1M** — the window every balancer model declares
+— at which the balancer compacts a conversation. It is stored in the plugin's own database, never in
+`opencode.json`, and nothing needs to reload for it to take effect: the balancer watches the
+conversation and asks the host to compact when it reaches the threshold. A field whose model needs its
+own share overrides it, see below. Enter a number from `1` to `100`; an empty field restores the
+default of `20`.
 
-### Context windows
+### Context and compaction
 
-A row declares the **smallest** context window in its chain, because every target must be able to take
-over the same conversation. The number the host shows is therefore the window a model really has, and
-the only thing that moves the compaction trigger inside it is `compaction.buffer`: the host compacts at
-`declared × (1 − reserve)`. The panel's `context limit` and that reserve are the same fact, so the menu
-writes the file — `50%` stores a 50% buffer and the host trips at half the window. There is no
-arithmetic standing between the two, and no declaration larger than a model's real window.
+Every balancer model declares `context: 1000000`, whatever the connector behind it really holds. A host
+that knew the real window would compact on its own at a moment the balancer cannot choose; declaring
+one large window hands that decision to the balancer, which is what lets a session that hops between a
+200k model and a 1M model be trimmed at a sensible point rather than whenever the smallest hop happens
+to be reached. The declared **output** stays real: it caps one answer, not the conversation, so it is
+the smallest output limit among the row's targets.
 
-The same applies to output limits, which use the smallest output limit in the chain. A row limit is
-where a row may exceed its smallest window; the trip point then follows the declared number, so a
-200k limit beside a 51% buffer trips at 98k.
+Two shares decide where the conversation is cut, and they measure different windows on purpose:
 
-The buffer is read from `opencode.json[c]` (env, project, then global) when the plugin loads, and
-re-read on every read of the chain list and whenever the panel writes a new value, so the panel's
-numbers follow the file immediately — including a file you edited by hand, which the menu shows. With
-`compaction.auto: false` nothing trims the conversation, so routing also skips targets smaller than
-the request's estimated token count.
+- the **global share** is a slice of the declared 1M, so `20%` always means 200k whatever is serving;
+- a **per-model share** (the `%` field on a target) is a slice of that model's **own** window, so `50%`
+  on a 200k model is 100k. It *overrides* the global rather than being capped against it.
 
-### Limits
+The serving model's real window is the hard ceiling under either one, so a global `30%` means 300k
+on a 1M model but is clamped to 200k when a 200k model is serving — you cannot tell the host to cut
+past what the connector can hold. A model whose window the provider does not report has no ceiling to
+clamp against, so the share stands alone.
 
-A row can be given a token limit, and each target in it its own. With none set, the row behaves as
-above: the smallest target wins. A row limit lets the conversation grow past the smallest target,
-toward the largest one, but never past it — a conversation bigger than every target has nowhere to go.
-A per-target limit can only *lower* a target below the window the provider reports, never raise it, so
-it is how you say "this model is really only good for this much".
+The balancer watches `session.step.ended`, whose token counts are the same per-request figure the host
+shows against the model's limit, and sums input, output, reasoning, and both cache fields. A session
+the balancer never routed is never compacted, and a compaction already in flight is never doubled: the
+guard re-arms only once the conversation is back under the threshold, or a failed compaction is
+retried. Both shares are stored in the plugin's `settings` table (`context_percent`,
+`context_percent:<row>:<provider>`).
 
-Once a row limit is above a target's own window, that target can no longer take over the whole
-conversation, so routing skips it and keeps the rest. That skip only turns on when a limit actually
-creates a gap; without limits, nothing changes.
-
-Both limits are stored in the plugin's `settings` table (`row_limit:<row>`, `target_limit:<row>:<provider>`)
-and are edited from the panel by typing a token count, which saves when the field loses focus or you
-press Enter.
+There is no `compaction.buffer` any more: if you have one in your config, the balancer ignores it and
+you can delete it.
 
 ## Deliberate limits
 

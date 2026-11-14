@@ -25,8 +25,9 @@ the chains and the provider order.
 4. Failover walks the chain; recovery returns to the head of the chain.
 5. A chain outlives the model family it was built from: if DeepSeek disappears, the row still
    exists and serves MiMo.
-6. A row's context window is sized to the **smallest** target in it, compensated for the user's
-   configured compaction buffer, so every target in the chain can take over the same conversation.
+6. Every row declares the same **1M** context window and the balancer compacts the conversation
+   itself, so a session that hops between a 200k and a 1M target is trimmed at a point the
+   balancer chooses rather than whenever a small target is reached.
 
 ## Non-goals
 
@@ -148,39 +149,33 @@ for target in targets:
 The virtual model's package is the row's package, and every target shares it, so the request
 shape stays valid for every hop.
 
-### Context windows
+### Context windows and compaction
 
 A session stays pinned to the virtual row while the hop underneath changes, so the row can only
-declare one window. Declaring each target's own window would let compaction fire at the wrong
-point and let a request overflow the model it lands on.
+declare one window. Every row therefore declares the same `limit.context` of **1M**, whatever its
+targets really hold. A host that knew the real window would compact on its own at a moment the
+balancer cannot choose; declaring one large window hands that decision to the balancer.
 
-The row therefore declares the **smallest** `limit.context` among its targets, adjusted for the
-user's compaction buffer so that compaction fires at that real limit rather than a fraction of a
-lie:
+The balancer then compacts the conversation itself, from a watcher on `session.step.ended` (whose
+token counts are the per-request figure the host shows against the model's limit). Two shares decide
+the point, and they measure different windows on purpose:
 
-- `compaction.buffer` is a share of the declared window, so a buffer of `p` makes the host
-  compact at `context × (1 − p)`.
-- To fire at the real minimum `m`, the row declares `m / (1 − p)`. A 200k target under a 75%
-  buffer declares 800k and compacts at 200k.
-- An integer `buffer` is an absolute reservation, so the row declares `m + buffer`.
-- No buffer, or an unreadable config, means the row declares `m` unchanged.
+- the **global share** (`context_percent`) is a slice of the declared 1M, so `20%` always means 200k
+  whatever is serving;
+- a **per-model share** (`context_percent:<row>:<provider>`) is a slice of that model's own window, so
+  `50%` on a 200k model is 100k; it *overrides* the global rather than being capped against it.
 
-`limit.output` is the smallest output limit among the targets, since that is the most a hop can
-be asked to return.
+The serving model's real window is the hard ceiling under either one, so a global `30%` means 300k on
+a 1M model but clamps to 200k when a 200k model is serving. A model whose window is unreported has no
+ceiling, so the share stands alone. Nothing is written to `opencode.json`; the shares live in the
+plugin's `settings` table.
 
-Because the row's trigger sits at `m`, the conversation never exceeds `m` and every target in
-the chain — including the 1M ones — accepts it. The cost is that a big target is used up to `m`,
-not to its own ceiling; that is the trade the user chose for chains that mix sizes.
+Because the declaration is 1M, routing never has to hold a request back for being too large for one
+of the row's targets — the conversation is trimmed before it can reach that point. A session the
+balancer never routed is never compacted, and a compaction already in flight is never doubled.
 
-Compaction is disabled (`auto: false`): the guard above no longer holds, so routing additionally
-skips targets whose `limit.context` is below the conversation's last reported token count. The
-row stays usable and the request is never sent somewhere it cannot fit.
-
-`server/compaction-config.ts` reads the effective `compaction.buffer` because the plugin context
-exposes no config accessor. Sources, first match wins: `$OPENCODE_CONFIG`, the project's
-`opencode.json`/`opencode.jsonc`, then `~/.config/opencode/opencode.json`/`opencode.jsonc`.
-JSONC comments and trailing commas are tolerated. The value is cached with its file mtime, and a
-buffer change applies after the plugin reloads.
+`limit.output` is the smallest output limit among the targets, since that is the most a hop can be
+asked to return; the declaration stays real because output caps one answer, not the conversation.
 
 ### Panel
 
@@ -189,14 +184,14 @@ section lists one line per row:
 
 ```
 DeepSeek V4.1 Flash
-  1  commandcode · deepseek/deepseek-v4.1-flash     in use   ↑ ↓ ×
-  2  xiaomi-token-plan-sgp · mimo-v2.6-flash        limited  ↑ ↓ ×
+  1  commandcode · deepseek/deepseek-v4-flash    [  ]   in use   ↑ ↓ ×
+  2  xiaomi-token-plan-sgp · mimo-v2.6-flash     [ 50]  limited  ↑ ↓ ×
   [+ add target]  [reset]
-  window 200k · declares 800k (75% buffer)
+  compacts at the global share, or this model's own
 ```
 
-The window line states the real minimum and the compensated declaration, so a surprising
-compaction point is explained on the row rather than in the host's settings.
+The `%` field on a target is that model's own share of its real window; empty follows the global
+share set at the top of the panel.
 
 - `+ add target` reveals two selects: provider (only providers with accounts, not already in the
   chain, same package) and model (that provider's routable models). Adding appends.
@@ -253,10 +248,9 @@ reports near-miss rows (same first token, different remainder) in `/balancer cha
 | Chain edited mid-stream | next request uses the new chain |
 | Package mismatch on add | refused with the two package names |
 | Second target from one provider | refused: unreachable by design |
-| Chain mixes 200k and 1M targets | row declares the 200k minimum, compensated; compaction fires there |
-| `compaction.auto` is false | routing skips targets smaller than the conversation's token count |
-| Buffer config unreadable | row declares the real minimum; no compensation |
-| Target limit metadata missing | that target is ignored for sizing, still routable |
+| Chain mixes 200k and 1M targets | every row declares 1M; the balancer compacts itself, clamped by whichever target is serving |
+| Global share past a target's window | the share is clamped to that model's real window |
+| Target window metadata missing | that model still compacts, on the share alone |
 
 ## Tests
 
@@ -268,11 +262,9 @@ reports near-miss rows (same first token, different remainder) in `/balancer cha
 - Retry exclusion by provider prevents a same-provider hop.
 - Add refuses a duplicate provider, a foreign package, and an unroutable model.
 - Chain snapshot on first move (pure function, tested outside the component).
-- Row window is the smallest target's, and the declaration compensates percent, integer, and
-  absent buffers.
-- Config reader handles JSONC comments, trailing commas, `$OPENCODE_CONFIG`, and an unreadable
-  file.
-- A row with mixed 200k/1M targets compacts at 200k: the declaration is 800k under 75%.
+- Row window declarations: every model claims 1M, and `output` is the smallest target's.
+- A conversation is compacted at the lower of the requested share and the serving model's window,
+  and never for a session the balancer did not route.
 
 ## Decisions taken here (mine, not the user's)
 

@@ -3,6 +3,7 @@ import { openBalancerDatabase } from "./core/database";
 import { storePath } from "./core/path";
 import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
+import { registerCompaction } from "./server/compaction";
 import {
 	invalidateCatalog,
 	refreshBalancerProvider,
@@ -51,14 +52,11 @@ export default Plugin.define({
 		await syncAccounts(ctx, db);
 
 		await registerHooks({ ctx, db });
-		const rpc = await registerBalancerRpc({
-			ctx,
-			db,
-			// A buffer change only reaches the host once it rebuilds its models
-			// from the new value.
-			refresh: () => refreshBalancerProvider({ ctx, db }),
-		});
+		const rpc = await registerBalancerRpc({ ctx, db });
 		await registerBalancerProvider({ ctx, db });
+		// Watch the conversation ourselves: every model is declared at 1M, so
+		// the host will not trim on its own and the threshold is ours to hold.
+		await registerCompaction({ ctx, db });
 		const openGui = async () => {
 			await rpc.events.emit("open", {});
 		};

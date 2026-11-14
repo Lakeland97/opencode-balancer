@@ -1,8 +1,5 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { saveAccount } from "../core/accounts";
 import { getStoredChain } from "../core/chains";
@@ -48,6 +45,7 @@ describe("contract", () => {
 		await rpc.chains({});
 		await rpc.list({});
 		await rpc.priority({});
+		await rpc.contextPercent({});
 	});
 });
 
@@ -86,20 +84,9 @@ const connectors = [
 	model("p2", "mimo-v2.6-flash", 200_000, PACKAGE, "MiMo V2.6 Flash"),
 ];
 
-/** The registered handlers, as a client would call them. */
-async function handlers(
-	db: Database,
-	data: unknown[] = connectors,
-	options: { configPath?: string; refresh?: () => Promise<void> | void } = {},
-) {
-	// A default parameter turns an explicit `undefined` back into the machine's
-	// real config file, and these handlers write to whatever they are given.
-	if ("configPath" in options && options.configPath === undefined) {
-		throw new Error(
-			'pass configPath: "" for no file; undefined would write to the real config',
-		);
-	}
-	const ctx = {
+/** A client whose provider list answers normally. */
+function workingCtx(data: unknown[]) {
+	return {
 		model: { list: async () => ({ data }) },
 		provider: {
 			list: async () => ({
@@ -116,25 +103,14 @@ async function handlers(
 			}),
 		},
 	} as never;
-
-	return (await registerBalancerRpc({
-		buffer: { kind: "percent", percent: 0.75 },
-		// A file of our own: the panel reads the buffer at call time, so without
-		// one these tests would read the machine's real config.
-		configPath:
-			options.configPath ?? tempConfig('{"compaction":{"buffer":"75%"}}'),
-		...options,
-		ctx,
-		db,
-	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
 }
 
-/** A config file on disk, so the writer has something real to edit. */
-function tempConfig(text: string) {
-	const dir = mkdtempSync(join(tmpdir(), "balancer-rpc-"));
-	const file = join(dir, "opencode.json");
-	writeFileSync(file, text);
-	return file;
+/** The registered handlers, as a client would call them. */
+async function handlers(db: Database, data: unknown[] = connectors) {
+	return (await registerBalancerRpc({
+		ctx: workingCtx(data),
+		db,
+	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
 }
 
 /** A client whose provider list throws, as the Desktop panel's does. */
@@ -156,12 +132,10 @@ async function handlersFailingProviderList(db: Database) {
 			}),
 		},
 	} as never;
-	return (await registerBalancerRpc({
-		buffer: { kind: "percent", percent: 0.75 },
-		configPath: tempConfig('{"compaction":{"buffer":"75%"}}'),
-		ctx,
-		db,
-	})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+	return (await registerBalancerRpc({ ctx, db })) as unknown as Record<
+		string,
+		(input: unknown) => Promise<unknown>
+	>;
 }
 
 beforeEach(() => {
@@ -169,26 +143,25 @@ beforeEach(() => {
 });
 
 describe("chain rpc", () => {
-	test("chains reports stored order and the declared window", async () => {
+	test("chains carries targets and no window of its own", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
 		const listed = (await rpc.chains({})) as {
 			rows: {
-				context: number;
 				key: string;
-				targets: unknown[];
-				trip: number;
+				targets: { percent: number }[];
 			}[];
 		};
 		const row = listed.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// The window the host is told is the row's real one; the config's 75%
-		// reserve is what pulls the compaction trigger inside it.
-		expect(row?.context).toBe(1_000_000);
-		expect(row?.trip).toBe(250_000);
+		// The window is the same 1M declaration whatever the row holds, so a
+		// row has no window of its own to report; only the shares matter.
+		expect(row && "context" in row).toBe(false);
+		expect(row && "trip" in row).toBe(false);
 		expect(row?.targets.length).toBe(1);
+		expect(row?.targets[0]?.percent).toBe(0);
 
 		await rpc.chainAdd({
 			key: "deepseek-v4.1-flash",
@@ -196,20 +169,12 @@ describe("chain rpc", () => {
 			providerID: "p2",
 		});
 		const after = (await rpc.chains({})) as {
-			rows: {
-				context: number;
-				key: string;
-				targets: unknown[];
-				trip: number;
-			}[];
+			rows: { key: string; targets: { percent: number }[] }[];
 		};
 		const mixed = after.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(mixed?.targets.length).toBe(2);
-		expect(mixed?.context).toBe(200_000);
-
-		expect(mixed?.trip).toBe(50_000);
 	});
 
 	test("chainAdd appends a target and refuses a foreign wire format", async () => {
@@ -296,27 +261,12 @@ describe("chain rpc", () => {
 	test("a free-only provider shows the model it will actually use", async () => {
 		const db = freshDb();
 		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
-		const ctx = {
-			model: {
-				list: async () => ({
-					data: [
-						...connectors,
-						model("p1", "deepseek-v4.1-flash-free", 200_000),
-						model("p3", "deepseek-v4.1-flash", 1_000_000),
-					],
-				}),
-			},
-			provider: { list: async () => ({ data: [] }) },
-			rpc: {
-				register: async (
-					_definition: unknown,
-					registered: Record<string, unknown>,
-				) => ({ ...registered, events: { emit: async () => {} } }),
-			},
-		} as never;
 		const rpc = (await registerBalancerRpc({
-			buffer: { kind: "percent", percent: 0.75 },
-			ctx,
+			ctx: workingCtx([
+				...connectors,
+				model("p1", "deepseek-v4.1-flash-free", 200_000),
+				model("p3", "deepseek-v4.1-flash", 1_000_000),
+			]),
 			db,
 		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
 		setFreeOnly(db, "p1", true);
@@ -368,220 +318,110 @@ describe("log rpc", () => {
 	});
 });
 
-describe("limit rpc", () => {
-	test("setRowLimit is reported by chains and an empty value clears it", async () => {
-		const db = freshDb();
-		const rpc = await handlers(db);
+describe("context percent rpc", () => {
+	test("the global share reads as its default until it is set", async () => {
+		const rpc = await handlers(freshDb());
 
-		const set = (await rpc.setRowLimit({
-			key: "deepseek-v4.1-flash",
-			value: "600000",
-		})) as { ok: boolean };
+		const state = (await rpc.contextPercent({})) as { percent: number };
+		expect(state.percent).toBe(20);
+	});
+
+	test("a set share is reported back and an empty value restores the default", async () => {
+		const rpc = await handlers(freshDb());
+
+		const set = (await rpc.setContextPercent({ value: "35" })) as {
+			ok: boolean;
+		};
 		expect(set.ok).toBe(true);
+		const after = (await rpc.contextPercent({})) as { percent: number };
+		expect(after.percent).toBe(35);
 
-		const listed = (await rpc.chains({})) as {
-			rows: { key: string; limit: number }[];
-		};
-		const row = listed.rows.find(
-			(entry) => entry.key === "deepseek-v4.1-flash",
-		);
-		expect(row?.limit).toBe(600_000);
-
-		const cleared = (await rpc.setRowLimit({
-			key: "deepseek-v4.1-flash",
-			value: "",
-		})) as { ok: boolean };
-		expect(cleared.ok).toBe(true);
-
-		const after = (await rpc.chains({})) as {
-			rows: { key: string; limit: number }[];
-		};
-		expect(
-			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
-		).toBe(0);
+		await rpc.setContextPercent({ value: "" });
+		const cleared = (await rpc.contextPercent({})) as { percent: number };
+		expect(cleared.percent).toBe(20);
 	});
 
-	test("setRowLimit refuses a value that is not a token count", async () => {
+	test("a trailing percent sign is accepted", async () => {
+		const rpc = await handlers(freshDb());
+
+		const set = (await rpc.setContextPercent({ value: "45%" })) as {
+			ok: boolean;
+		};
+		expect(set.ok).toBe(true);
+		const after = (await rpc.contextPercent({})) as { percent: number };
+		expect(after.percent).toBe(45);
+	});
+
+	test("a share outside 1% to 100% is refused and nothing is stored", async () => {
+		const rpc = await handlers(freshDb());
+
+		for (const value of ["0%", "-5", "abc", "101"]) {
+			const result = (await rpc.setContextPercent({ value })) as {
+				message: string;
+				ok: boolean;
+			};
+			expect(result.ok).toBe(false);
+			expect(result.message.length).toBeGreaterThan(0);
+		}
+		const after = (await rpc.contextPercent({})) as { percent: number };
+		expect(after.percent).toBe(20);
+	});
+
+	test("a per-model share is reported on that target only", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
 
-		const refused = (await rpc.setRowLimit({
-			key: "deepseek-v4.1-flash",
-			value: "lots",
-		})) as { message: string; ok: boolean };
-		expect(refused.ok).toBe(false);
-		expect(refused.message.length).toBeGreaterThan(0);
-	});
-
-	test("setTargetLimit is reported per target", async () => {
-		const db = freshDb();
-		const rpc = await handlers(db);
-
-		const set = (await rpc.setTargetLimit({
+		const set = (await rpc.setTargetPercent({
 			key: "deepseek-v4.1-flash",
 			providerID: "p1",
-			value: "400000",
+			value: "50",
 		})) as { ok: boolean };
 		expect(set.ok).toBe(true);
 
 		const listed = (await rpc.chains({})) as {
-			rows: { key: string; targets: { providerID: string; limit: number }[] }[];
+			rows: {
+				key: string;
+				targets: { percent: number; providerID: string }[];
+			}[];
 		};
 		const row = listed.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		const target = row?.targets.find((entry) => entry.providerID === "p1");
-		expect(target?.limit).toBe(400_000);
-	});
+		expect(target?.percent).toBe(50);
 
-	test("a limit change asks the host to re-read its models", async () => {
-		const db = freshDb();
-		let refreshed = 0;
-		const rpc = await handlers(db, connectors, {
-			refresh: async () => {
-				refreshed++;
-			},
-		});
-
-		await rpc.setRowLimit({ key: "deepseek-v4.1-flash", value: "300000" });
-		await rpc.setTargetLimit({
+		// Clearing it hands the model back to the global share.
+		await rpc.setTargetPercent({
 			key: "deepseek-v4.1-flash",
 			providerID: "p1",
-			value: "200000",
+			value: "",
 		});
-
-		// Both are declared windows, so both must reach the host without a
-		// restart, exactly as the buffer field does.
-		expect(refreshed).toBe(2);
-	});
-
-	test("a limit still stands when the host cannot re-read its models", async () => {
-		const db = freshDb();
-		const rpc = await handlers(db, connectors, {
-			refresh: async () => {
-				throw new Error("this host cannot reload");
-			},
-		});
-
-		const set = (await rpc.setRowLimit({
-			key: "deepseek-v4.1-flash",
-			value: "300000",
-		})) as { ok: boolean };
-		expect(set.ok).toBe(true);
-
-		const listed = (await rpc.chains({})) as {
-			rows: { key: string; limit: number }[];
+		const after = (await rpc.chains({})) as {
+			rows: { key: string; targets: { percent: number }[] }[];
 		};
 		expect(
-			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
-		).toBe(300_000);
+			after.rows.find((entry) => entry.key === "deepseek-v4.1-flash")
+				?.targets[0]?.percent,
+		).toBe(0);
 	});
-});
 
-describe("context limit rpc", () => {
-	test("reports the share left to use and the reserve it is stored as", async () => {
-		const file = tempConfig(
-			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
-		);
-		const rpc = await handlers(freshDb(), connectors, { configPath: file });
+	test("a per-model share outside 1% to 100% is refused", async () => {
+		const rpc = await handlers(freshDb());
 
-		const state = (await rpc.contextTarget({})) as {
-			reserve: string;
-			target: number;
+		const refused = (await rpc.setTargetPercent({
+			key: "deepseek-v4.1-flash",
+			providerID: "p1",
+			value: "lots",
+		})) as { message: string; ok: boolean };
+		expect(refused.ok).toBe(false);
+		expect(refused.message.length).toBeGreaterThan(0);
+
+		const listed = (await rpc.chains({})) as {
+			rows: { key: string; targets: { percent: number }[] }[];
 		};
-		expect(state.reserve).toBe("75%");
-		expect(state.target).toBeCloseTo(0.25, 5);
-	});
-
-	test("setting the limit writes the reserve that leaves that share", async () => {
-		const file = tempConfig(
-			'{\n  // keep this\n  "compaction": { "buffer": "75%" }\n}',
-		);
-		const rpc = await handlers(freshDb(), connectors, { configPath: file });
-
-		const result = (await rpc.setContextTarget({ value: "95%" })) as {
-			ok: boolean;
-		};
-		expect(result.ok).toBe(true);
-
-		// The file keeps the part the host holds free, so 95% of the window is
-		// free to use and the host trips there.
-		const text = readFileSync(file, "utf8");
-		expect(text).toContain("// keep this");
-		expect(text).toContain('"buffer": "5%"');
-		const after = (await rpc.contextTarget({})) as { target: number };
-		expect(after.target).toBeCloseTo(0.95, 5);
-	});
-
-	test("clearing the limit removes the reserve entirely", async () => {
-		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
-		const rpc = await handlers(freshDb(), connectors, { configPath: file });
-
-		const result = (await rpc.setContextTarget({ value: "" })) as {
-			ok: boolean;
-		};
-		expect(result.ok).toBe(true);
-
-		const text = readFileSync(file, "utf8");
-		expect(text).not.toContain("buffer");
-		expect(JSON.parse(text)).toEqual({ compaction: {} });
-		const after = (await rpc.contextTarget({})) as { target: number };
-		expect(after.target).toBe(1);
-	});
-
-	test("a share outside 1% to 100% is refused and nothing is written", async () => {
-		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
-		const rpc = await handlers(freshDb(), connectors, { configPath: file });
-
-		for (const value of ["0%", "-5", "abc", "101"]) {
-			const result = (await rpc.setContextTarget({ value })) as {
-				message: string;
-				ok: boolean;
-			};
-			expect(result.ok).toBe(false);
-		}
-		expect(readFileSync(file, "utf8")).toContain('"buffer":"75%"');
-	});
-
-	test("setting the limit asks the host to re-read its models", async () => {
-		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
-		let refreshed = 0;
-		const rpc = await handlers(freshDb(), connectors, {
-			configPath: file,
-			refresh: async () => {
-				refreshed++;
-			},
-		});
-
-		await rpc.setContextTarget({ value: "95%" });
-
-		expect(refreshed).toBe(1);
-	});
-
-	test("a host that cannot re-read its models still keeps the new value", async () => {
-		const file = tempConfig('{"compaction":{"buffer":"75%"}}');
-		const rpc = await handlers(freshDb(), connectors, {
-			configPath: file,
-			refresh: async () => {
-				throw new Error("this host cannot reload");
-			},
-		});
-
-		const result = (await rpc.setContextTarget({ value: "95%" })) as {
-			ok: boolean;
-		};
-
-		expect(result.ok).toBe(true);
-		expect(readFileSync(file, "utf8")).toContain('"buffer": "5%"');
-	});
-
-	test("no config file means no limit to write, and it says so", async () => {
-		// An empty path, not `undefined`: a default parameter would resolve
-		// `undefined` to the machine's real config and write to it.
-		const rpc = await handlers(freshDb(), connectors, { configPath: "" });
-		const result = (await rpc.setContextTarget({ value: "50%" })) as {
-			ok: boolean;
-		};
-		expect(result.ok).toBe(false);
+		expect(
+			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")
+				?.targets[0]?.percent,
+		).toBe(0);
 	});
 });

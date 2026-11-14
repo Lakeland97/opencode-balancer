@@ -10,17 +10,11 @@ import {
 	setActiveAccount,
 } from "../core/accounts";
 import {
-	type CompactionBuffer,
-	reserveLabel,
-	targetShare,
-	tripContext,
+	readGlobalPercent,
+	readTargetPercent,
+	setGlobalPercent,
+	setTargetPercent,
 } from "../core/context";
-import {
-	readRowLimit,
-	readTargetLimit,
-	setRowLimit,
-	setTargetLimit,
-} from "../core/limits";
 import {
 	getBalancingEnabled,
 	isFreeOnly,
@@ -41,14 +35,7 @@ import {
 	shiftTarget,
 } from "./chain-actions";
 import {
-	compactionConfigPath,
-	readBufferAt,
-	readCompactionBuffer,
-	writeCompactionBuffer,
-} from "./compaction-config";
-import {
 	type FamilyRoute,
-	invalidateCatalog,
 	loadCatalog,
 	type ModelFamily,
 	resolveChain,
@@ -92,18 +79,21 @@ function targetState(
 }
 
 /**
- * A limit the panel typed. An empty field clears the limit; anything that is
- * not a whole token count is refused rather than stored as a NaN.
+ * A share the panel typed. An empty field clears it — for a whole-row default
+ * that means back to the built-in one, for a model it means back to following
+ * the default. Anything that is not a share from 1% to 100% is refused rather
+ * than stored as a NaN that would leave nothing able to hold a conversation.
  */
-function parseLimit(
+function parsePercent(
 	value: string,
-): { ok: true; tokens: number | undefined } | { ok: false; message: string } {
-	const trimmed = value.trim();
-	if (trimmed === "") return { ok: true, tokens: undefined };
-	if (!/^\d+$/.test(trimmed)) {
-		return { message: `"${value}" is not a token count.`, ok: false };
+): { ok: true; percent: number | undefined } | { ok: false; message: string } {
+	const trimmed = value.trim().replace(/%$/, "");
+	if (trimmed === "") return { ok: true, percent: undefined };
+	const percent = Number(trimmed);
+	if (!Number.isFinite(percent) || percent <= 0 || percent > 100) {
+		return { message: `"${value}" is not a share from 1% to 100%.`, ok: false };
 	}
-	return { ok: true, tokens: Number(trimmed) };
+	return { ok: true, percent };
 }
 
 /**
@@ -113,17 +103,9 @@ function parseLimit(
 export async function registerBalancerRpc({
 	ctx,
 	db,
-	buffer = readCompactionBuffer(),
-	configPath = compactionConfigPath(),
-	refresh,
 }: {
 	ctx: Context;
 	db: Database;
-	buffer?: CompactionBuffer;
-	/** The file a buffer change is written to. Defaults to the effective one. */
-	configPath?: string;
-	/** Re-reads models so a changed buffer reaches the host's declared limits. */
-	refresh?: () => Promise<void> | void;
 }) {
 	const registration = await ctx.rpc.register(Balancer, {
 		chainAdd: async (input) => {
@@ -201,32 +183,22 @@ export async function registerBalancerRpc({
 
 		chains: async () => {
 			const catalog = await loadCatalog(ctx, db);
-			// Read the buffer at call time: the panel redraws from here the
-			// moment after it writes a new value, and the captured one is stale.
-			const current = configPath ? readBufferAt(configPath) : buffer;
 			return {
-				rows: catalog.families.map((family) => {
-					const window = family.window;
-					return {
-						// The window the host is told the model holds, which is
-						// the row's smallest target as it really is; the config's
-						// reserve is what moves the trip inside it.
-						context: window?.context ?? 0,
-						key: family.key,
-						label: family.name,
-						limit: readRowLimit(db, family.key) ?? 0,
-						package: family.package,
-						stored: Boolean(family.stored),
-						targets: resolveChain(db, family).map((target) => ({
-							limit: readTargetLimit(db, family.key, target.providerID) ?? 0,
-							modelID: target.modelID,
-							providerID: target.providerID,
-							resolved: resolvedModelID(db, target),
-							state: targetState(db, family, target),
-						})),
-						trip: window ? tripContext(window.context, current) : 0,
-					};
-				}),
+				rows: catalog.families.map((family) => ({
+					key: family.key,
+					label: family.name,
+					package: family.package,
+					stored: Boolean(family.stored),
+					targets: resolveChain(db, family).map((target) => ({
+						modelID: target.modelID,
+						// The share of this model's own window, or 0 when it
+						// follows the global one.
+						percent: readTargetPercent(db, family.key, target.providerID) ?? 0,
+						providerID: target.providerID,
+						resolved: resolvedModelID(db, target),
+						state: targetState(db, family, target),
+					})),
+				})),
 			};
 		},
 
@@ -235,17 +207,7 @@ export async function registerBalancerRpc({
 			return { message: "Cleared the log.", ok: true };
 		},
 
-		contextTarget: async () => {
-			const current = configPath
-				? readBufferAt(configPath)
-				: readCompactionBuffer();
-			return {
-				// The share left to use and the reserve it is stored as are the
-				// same fact: the panel edits this, the host applies it.
-				reserve: reserveLabel(current),
-				target: targetShare(current),
-			};
-		},
+		contextPercent: async () => ({ percent: readGlobalPercent(db) }),
 
 		list: async (input) => {
 			const { providerID } = (input ?? {}) as { providerID?: string };
@@ -340,63 +302,22 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setContextTarget: async (input) => {
+		setContextPercent: async (input) => {
 			const { value } = input as { value: string };
-			if (!configPath) {
-				return {
-					message: "No OpenCode config file to write the limit into.",
-					ok: false,
-				};
-			}
-
-			const typed = value.trim().replace(/%$/, "");
-			// Empty means the whole window, which is the absence of a reserve.
-			const percent = typed === "" ? 100 : Number(typed);
-			if (!(percent >= 1 && percent <= 100)) {
-				return {
-					message: `"${value}" is not a share from 1% to 100%.`,
-					ok: false,
-				};
-			}
-
-			// The file stores the part kept free, so the host trips at the share
-			// the user typed. 100% means no reserve at all.
-			const reserve = 100 - percent;
-			try {
-				if (reserve <= 0) writeCompactionBuffer(configPath, undefined);
-				else writeCompactionBuffer(configPath, `${reserve}%`);
-			} catch (error) {
-				return {
-					message:
-						error instanceof Error
-							? `Could not write the limit: ${error.message}`
-							: "Could not write the limit.",
-					ok: false,
-				};
-			}
-
-			// Read back rather than trust the arithmetic: the file is the record.
-			const stored = readBufferAt(configPath);
+			const parsed = parsePercent(value);
+			if (!parsed.ok) return { message: parsed.message, ok: false };
+			setGlobalPercent(db, parsed.percent);
 			recordLog(
 				"config",
-				reserve <= 0
-					? "context limit cleared (whole window)"
-					: `context limit ${Math.round(targetShare(stored) * 100)}% (${reserveLabel(stored)} kept free)`,
+				parsed.percent === undefined
+					? "context share back to the default"
+					: `context share ${parsed.percent}% of the declared window`,
 			);
-
-			// The declared window does not move, but a running session reads the
-			// limit from its catalog, so both caches are refreshed anyway.
-			invalidateCatalog();
-			try {
-				await refresh?.();
-			} catch {
-				// Reported as success: the file is the change.
-			}
 			return {
 				message:
-					reserve <= 0
-						? "Context limit cleared: the whole window is used."
-						: `Context limit set to ${Math.round(targetShare(stored) * 100)}%; the config keeps ${reserveLabel(stored)} free.`,
+					parsed.percent === undefined
+						? `Context share is back to the default (${readGlobalPercent(db)}%).`
+						: `Context share is ${parsed.percent}% of the declared window.`,
 				ok: true,
 			};
 		},
@@ -429,65 +350,26 @@ export async function registerBalancerRpc({
 			};
 		},
 
-		setRowLimit: async (input) => {
-			const { key, value } = input as { key: string; value: string };
-			const parsed = parseLimit(value);
-			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setRowLimit(db, key, parsed.tokens);
-			recordLog(
-				"config",
-				parsed.tokens === undefined
-					? `${key} limit cleared`
-					: `${key} limited to ${parsed.tokens} tokens`,
-			);
-			// The catalog is cached, and a new limit must reach the next read of
-			// it: the panel redraws from `chains` and routing sizes the row.
-			invalidateCatalog();
-			// The declared window is what the limit changes, so the host has to
-			// rebuild its models for the new number to reach a running session.
-			// A host that cannot is fine: the value is already saved.
-			try {
-				await refresh?.();
-			} catch {
-				// Reported as success: the stored limit is the change.
-			}
-			return {
-				message:
-					parsed.tokens === undefined
-						? `Cleared the limit on ${key}.`
-						: `${key} is limited to ${parsed.tokens} tokens.`,
-				ok: true,
-			};
-		},
-
-		setTargetLimit: async (input) => {
+		setTargetPercent: async (input) => {
 			const { key, providerID, value } = input as {
 				key: string;
 				providerID: string;
 				value: string;
 			};
-			const parsed = parseLimit(value);
+			const parsed = parsePercent(value);
 			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setTargetLimit(db, key, providerID, parsed.tokens);
+			setTargetPercent(db, key, providerID, parsed.percent);
 			recordLog(
 				"config",
-				parsed.tokens === undefined
-					? `${key} ${providerID} limit cleared`
-					: `${key} ${providerID} limited to ${parsed.tokens} tokens`,
+				parsed.percent === undefined
+					? `${key} ${providerID} follows the global share`
+					: `${key} ${providerID} compacts at ${parsed.percent}% of its own window`,
 			);
-			invalidateCatalog();
-			// A per-target limit moves that target's window, so the host has to
-			// rebuild its models just as for a row limit.
-			try {
-				await refresh?.();
-			} catch {
-				// Reported as success: the stored limit is the change.
-			}
 			return {
 				message:
-					parsed.tokens === undefined
-						? `Cleared the limit on ${providerID} in ${key}.`
-						: `${providerID} in ${key} is limited to ${parsed.tokens} tokens.`,
+					parsed.percent === undefined
+						? `${providerID} in ${key} follows the global share again.`
+						: `${providerID} in ${key} compacts at ${parsed.percent}% of its own window.`,
 				ok: true,
 			};
 		},

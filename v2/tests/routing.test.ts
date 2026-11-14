@@ -6,18 +6,9 @@ import { saveChain } from "../core/chains";
 import { isFreeModel } from "../core/models";
 import { setFreeOnly, setProviderEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
-import {
-	invalidateCatalog,
-	loadCatalog,
-	type ModelFamily,
-} from "../server/connectors";
+import { invalidateCatalog, loadCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
-import {
-	chooseRoute,
-	chooseRouteForRequest,
-	estimateTokens,
-	isProviderEnabled,
-} from "../server/routing";
+import { chooseRoute, isProviderEnabled } from "../server/routing";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -145,6 +136,21 @@ describe("chain routing", () => {
 
 		expect(chooseRoute(db, family, new Set(["p1"]))?.providerID).toBe("p2");
 	});
+
+	test("a conversation is never held back for being large", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, [
+			model("p1", "deepseek-v4.1-flash", 200_000),
+			model("p2", "deepseek-v4.1-flash", 1_000_000),
+		]);
+
+		// Which connector is too small for the conversation is no longer a
+		// routing question: the balancer compacts the conversation itself, so
+		// the row keeps to the first healthy target and reports its window for
+		// the compaction threshold to be clamped by.
+		expect(chooseRoute(db, family)?.providerID).toBe("p1");
+		expect(chooseRoute(db, family)?.context).toBe(200_000);
+	});
 });
 
 describe("free-only providers", () => {
@@ -197,37 +203,6 @@ describe("free-only providers", () => {
 
 		expect(chooseRoute(db, family)?.modelID).toBe("deepseek-v4.1-flash-free");
 		expect(chooseRoute(db, family)?.providerID).toBe("p1");
-	});
-});
-
-describe("overflow guard", () => {
-	test("with auto compaction off, a target smaller than the conversation is skipped", async () => {
-		const db = freshDb();
-		const family: ModelFamily = await familyFor(db, [
-			model("p1", "deepseek-v4.1-flash", 200_000),
-			model("p2", "deepseek-v4.1-flash", 1_000_000),
-		]);
-		const body = "x".repeat(900_000);
-
-		expect(estimateTokens(body)).toBe(225_000);
-		expect(
-			chooseRouteForRequest(db, family, body, { guardOverflow: true })
-				?.providerID,
-		).toBe("p2");
-	});
-
-	test("the same request ignores the guard when auto compaction is on", async () => {
-		const db = freshDb();
-		const family = await familyFor(db, [
-			model("p1", "deepseek-v4.1-flash", 200_000),
-			model("p2", "deepseek-v4.1-flash", 1_000_000),
-		]);
-		const body = "x".repeat(900_000);
-
-		expect(
-			chooseRouteForRequest(db, family, body, { guardOverflow: false })
-				?.providerID,
-		).toBe("p1");
 	});
 });
 

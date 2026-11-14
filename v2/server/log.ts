@@ -1,6 +1,6 @@
 import { now } from "../core/time";
 
-export type LogKind = "route" | "failover" | "config" | "error";
+export type LogKind = "route" | "failover" | "config" | "compact" | "error";
 
 export type LogEntry = { at: number; kind: LogKind; text: string };
 

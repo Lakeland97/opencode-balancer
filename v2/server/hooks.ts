@@ -4,7 +4,6 @@ import { getActiveAccount, markAccountUsed } from "../core/accounts";
 import { getBalancingEnabled } from "../core/priority";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
-import { getCompactionAutoEnabled } from "./compaction-config";
 import {
 	BALANCER_PROVIDER_ID,
 	loadCatalog,
@@ -25,7 +24,14 @@ import {
 } from "./routing";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
 
-type Tracked = { providerID: string; alias: string; at: number };
+type Tracked = {
+	providerID: string;
+	alias: string;
+	at: number;
+	/** The row the call routed, and the window the connector that took it holds. */
+	familyKey?: string;
+	context?: number;
+};
 
 // The response hook receives the same Request instance the request hook saw.
 // Keep a per-session fallback too, in case opencode hands over a clone.
@@ -75,8 +81,6 @@ function chooseStickyRoute(input: {
 	db: Database;
 	family: ModelFamily;
 	sessionID: string;
-	body?: string;
-	guardOverflow: boolean;
 }) {
 	const { db, family, sessionID } = input;
 	const tried = triedFor(sessionID);
@@ -91,18 +95,33 @@ function chooseStickyRoute(input: {
 					),
 				}
 			: undefined;
-	const options = { exclude: tried, guardOverflow: input.guardOverflow };
 
 	return (
-		(pinned
-			? chooseRouteForRequest(db, pinned, input.body, options)
-			: undefined) ??
-		chooseRouteForRequest(db, family, input.body, options) ??
+		(pinned ? chooseRouteForRequest(db, pinned, tried) : undefined) ??
+		chooseRouteForRequest(db, family, tried) ??
 		// Everything has been tried since the last answer: wrap around.
-		chooseRouteForRequest(db, family, input.body, {
-			guardOverflow: input.guardOverflow,
-		})
+		chooseRouteForRequest(db, family)
 	);
+}
+
+/**
+ * The row and connector a session's latest routed call went through, which is
+ * what the compaction watcher measures the conversation against.
+ *
+ * Undefined when the session's calls never went through the balancer, or when
+ * it has not made one recently enough to still be on it: a session that has
+ * moved to a provider the balancer does not route must not be compacted here.
+ */
+export function balancerTargetFor(
+	sessionID: string,
+): { familyKey: string; providerID: string; context?: number } | undefined {
+	const tracked = bySession.get(sessionKey(sessionID, ROUTED));
+	if (!tracked || !fresh(tracked) || !tracked.familyKey) return undefined;
+	return {
+		context: tracked.context,
+		familyKey: tracked.familyKey,
+		providerID: tracked.providerID,
+	};
 }
 
 function lookupTracked(input: {
@@ -147,7 +166,6 @@ export async function registerHooks({
 		const route = chooseStickyRoute({
 			db,
 			family,
-			guardOverflow: false,
 			sessionID: event.sessionID,
 		});
 		if (!route) return;
@@ -161,6 +179,8 @@ export async function registerHooks({
 		track(event.sessionID, {
 			alias: route.account.alias,
 			at: now(),
+			context: route.context,
+			familyKey: family.key,
 			providerID: route.providerID,
 		});
 	});
@@ -175,20 +195,9 @@ export async function registerHooks({
 			const family = await familyFor(ctx, db, event.model.id);
 			if (!family) return;
 
-			// Without automatic compaction nothing trims the conversation, so a
-			// target that cannot hold it is skipped rather than sent the request.
-			// A row limit can also leave a smaller target unable to hold what the
-			// row now permits, which needs the same skip.
-			const guardOverflow =
-				!getCompactionAutoEnabled() || Boolean(family.guardOverflow);
-			const body = guardOverflow
-				? await event.request.clone().text()
-				: undefined;
 			const route = chooseStickyRoute({
-				body,
 				db,
 				family,
-				guardOverflow,
 				sessionID: event.sessionID,
 			});
 			if (!route) return;
@@ -211,11 +220,15 @@ export async function registerHooks({
 			byRequest.set(request, {
 				alias: route.account.alias,
 				at: now(),
+				context: route.context,
+				familyKey: family.key,
 				providerID: route.providerID,
 			});
 			track(event.sessionID, {
 				alias: route.account.alias,
 				at: now(),
+				context: route.context,
+				familyKey: family.key,
 				providerID: route.providerID,
 			});
 			return;

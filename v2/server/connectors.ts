@@ -2,8 +2,7 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import { listAccounts } from "../core/accounts";
 import { listStoredChains } from "../core/chains";
-import { rowWindow } from "../core/context";
-import { readRowLimit, readTargetLimit } from "../core/limits";
+import { DECLARED_CONTEXT } from "../core/context";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
 import { isFreeOnly, listProviderPriority } from "../core/priority";
 
@@ -24,7 +23,7 @@ export type FamilyRoute = {
 	/** The provider's API root, already normalised without a trailing slash. */
 	baseURL: string;
 	package: string;
-	/** The model's own window, used to size the row. */
+	/** The model's own window, which clamps the share it is compacted at. */
 	context?: number;
 	output?: number;
 	/** False when the connector no longer offers this model. */
@@ -51,10 +50,6 @@ export type ModelFamily = {
 	stored?: boolean;
 	/** The effective order: the stored chain, or the automatic routes. */
 	targets: readonly FamilyRoute[];
-	/** The smallest window every hop must fit, and the largest any hop holds. */
-	window?: { ceiling: number; context: number; output: number };
-	/** True when some target is smaller than the row now permits. */
-	guardOverflow: boolean;
 };
 
 type Catalog = {
@@ -89,40 +84,15 @@ function labelSuffix(pkg: string) {
 	return pkg === DEFAULT_PACKAGE ? "" : ` (${packageTag(pkg)})`;
 }
 
-/** A per-target limit can only lower the window the provider reports. */
-function boundedWindow(
-	realWindow: number | undefined,
-	targetLimit: number | undefined,
-): number | undefined {
-	if (realWindow === undefined) return undefined;
-	return targetLimit === undefined
-		? realWindow
-		: Math.min(targetLimit, realWindow);
-}
-
 /**
- * The row's declared window. A row limit lets the conversation grow past the
- * smallest target, toward the largest one; a conversation bigger than every
- * target has nowhere to go, so the largest is the clamp.
+ * The output any hop of this row can hold. The declared output is the smallest
+ * the row may be sent, so every target can answer it.
  */
-function limitedRowWindow(
-	window: { ceiling: number; context: number; output: number } | undefined,
-	rowLimit: number | undefined,
-): { ceiling: number; context: number; output: number } | undefined {
-	if (!window || rowLimit === undefined) return window;
-	return { ...window, context: Math.min(rowLimit, window.ceiling) };
-}
-
-/** True when a target cannot hold what the row now permits, so it is skipped. */
-function overflowsRow(
-	window: { ceiling: number; context: number; output: number } | undefined,
-	targets: readonly FamilyRoute[],
-): boolean {
-	if (!window) return false;
-	return targets.some(
-		(target) =>
-			typeof target.context === "number" && target.context < window.context,
-	);
+function rowOutput(targets: readonly FamilyRoute[]): number {
+	const outputs = targets
+		.map((target) => target.output)
+		.filter((value): value is number => typeof value === "number" && value > 0);
+	return outputs.length > 0 ? Math.min(...outputs) : 0;
 }
 
 /**
@@ -216,10 +186,7 @@ export async function loadCatalog(
 		const route: FamilyRoute = {
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
-			context: boundedWindow(
-				served?.limit?.context ?? model.limit?.context,
-				readTargetLimit(db, key, providerID),
-			),
+			context: served?.limit?.context ?? model.limit?.context,
 			free,
 			...(sibling && typeof sibling.settings?.baseURL === "string"
 				? {
@@ -266,18 +233,12 @@ export async function loadCatalog(
 	const families: ModelFamily[] = [];
 	const sources = new Map<string, ModelRecord>();
 	for (const [key, group] of groups) {
-		const window = limitedRowWindow(
-			rowWindow(group.routes),
-			readRowLimit(db, key),
-		);
 		families.push({
-			guardOverflow: overflowsRow(window, group.routes),
 			key,
 			name: `${group.label}${labelSuffix(group.package)}`,
 			package: group.package,
 			routes: group.routes,
 			targets: group.routes,
-			window,
 		});
 		if (group.source) sources.set(key, group.source);
 	}
@@ -303,10 +264,7 @@ export async function loadCatalog(
 			return {
 				available: Boolean(record),
 				baseURL: stripTrailingSlash(target.baseURL),
-				context: boundedWindow(
-					sibling?.limit?.context ?? record?.limit?.context,
-					readTargetLimit(db, chain.familyKey, target.providerID),
-				),
+				context: sibling?.limit?.context ?? record?.limit?.context,
 				free: record
 					? isFreeModel({ cost: record.cost, modelID: target.modelID })
 					: undefined,
@@ -316,11 +274,6 @@ export async function loadCatalog(
 				providerID: target.providerID,
 			};
 		});
-		const window = limitedRowWindow(
-			rowWindow(targets),
-			readRowLimit(db, chain.familyKey),
-		);
-		const guardOverflow = overflowsRow(window, targets);
 		const name = `${chain.label}${labelSuffix(chain.package)}`;
 		const existing = families.find((family) => family.key === chain.familyKey);
 
@@ -329,20 +282,16 @@ export async function loadCatalog(
 			existing.package = chain.package;
 			existing.stored = true;
 			existing.targets = targets;
-			existing.window = window;
-			existing.guardOverflow = guardOverflow;
 			continue;
 		}
 
 		families.push({
-			guardOverflow,
 			key: chain.familyKey,
 			name,
 			package: chain.package,
 			routes: [],
 			stored: true,
 			targets,
-			window,
 		});
 		const head = byRef.get(`${targets[0].providerID}:${targets[0].modelID}`);
 		if (head) sources.set(chain.familyKey, head);
@@ -392,7 +341,7 @@ let declarations: { catalog: Catalog } | undefined;
 function declaredModels(catalog: Catalog) {
 	return catalog.families.map((family) => {
 		const source = catalog.sources.get(family.key);
-		const window = family.window;
+		const output = rowOutput(family.targets);
 		return {
 			// A stored row outlives its family, so it may have no source
 			// record at all; the host sorts on these fields and crashes
@@ -406,17 +355,15 @@ function declaredModels(catalog: Catalog) {
 				variants: [],
 			}),
 			id: family.key,
-			// The window is the smallest target's, declared as it is: the host
-			// already keeps `compaction.buffer` free of whatever it is told, so
-			// the buffer belongs in the config, not in invented arithmetic.
-			...(window
-				? {
-						limit: {
-							context: window.context,
-							...(window.output > 0 ? { output: window.output } : {}),
-						},
-					}
-				: { limit: { context: 0, output: 0 } }),
+			// Every balancer model claims the same large window. The host trims
+			// a conversation when it reaches what it was told the model holds,
+			// so declaring the real window would hand it the timing; the
+			// balancer trims on its own threshold instead. The output stays
+			// real, because it caps one answer rather than the conversation.
+			limit: {
+				context: DECLARED_CONTEXT,
+				...(output > 0 ? { output } : {}),
+			},
 			modelID: family.key,
 			name: `Balancer · ${family.name}`,
 			package: family.package,

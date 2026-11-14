@@ -36,7 +36,7 @@ type Account = {
 type Status = { balancing: boolean };
 type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
-type ContextState = { reserve: string; target: number };
+type ContextState = { percent: number };
 
 type Target = {
 	modelID: string;
@@ -44,20 +44,15 @@ type Target = {
 	/** What is actually sent, once a free-only provider substitutes. */
 	resolved: string;
 	state: string;
-	/** The user's token ceiling for this target, 0 when none. */
-	limit: number;
+	/** This model's own share of its window, 0 when it follows the global. */
+	percent: number;
 };
 type Chain = {
-	context: number;
-	/** Where the host compacts: the chosen share of the model's own window. */
-	trip: number;
 	key: string;
 	label: string;
 	package: string;
 	stored: boolean;
 	targets: Target[];
-	/** The user's token ceiling for the whole row, 0 when none. */
-	limit: number;
 };
 type Chains = { rows: Chain[] };
 type Provider = {
@@ -90,21 +85,6 @@ function describe(error: unknown) {
 	}
 }
 
-/** Compact window size: 200000 becomes 200k, 1000000 becomes 1m. */
-function size(value: number) {
-	if (!value) return "?";
-	if (value >= 1_000_000) {
-		const millions = value / 1_000_000;
-		return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}m`;
-	}
-	return `${Math.round(value / 1000)}k`;
-}
-
-/** How a share is typed into a field: `0.49` reads as `49`, `0.485` as `48.5`. */
-function shareText(target: number) {
-	return String(Number((target * 100).toFixed(2)));
-}
-
 export default Plugin.define({
 	i18n: {
 		en: {
@@ -114,14 +94,14 @@ export default Plugin.define({
 			balancing: "balancing",
 			clear: "clear",
 			collapse: "collapse all",
-			contextLimit: "context limit",
+			contextLimit: "context share",
 			disabled: "disabled",
 			everyProviderUsed: "every provider is already in this chain",
 			expand: "expand all",
 			free: "free",
+			globalShare: "global",
 			inOpenCode: "in opencode",
 			inUse: "in use",
-			limit: "limit",
 			limited: "limited",
 			log: "log",
 			logEmpty: "nothing yet",
@@ -133,19 +113,18 @@ export default Plugin.define({
 			providers: "providers",
 			refresh: "refresh",
 			reset: "reset",
+			targetHint: "compacts at the global share, or this model's own",
 			title: "Balancer",
-			tripsAt: "trips at",
 			use: "use",
-			window: "window",
 		},
 	},
 	setup(ctx) {
 		const [accounts, setAccounts] = createSignal<Account[]>([]);
 		const [balancing, setBalancing] = createSignal(false);
-		// The share of a model's window the user wants filled before compaction.
-		const [target, setTarget] = createSignal(1);
-		const [targetDraft, setTargetDraft] = createSignal("");
-		const [reserve, setReserve] = createSignal("");
+		// The share of the declared 1M window the balancer compacts at, and the
+		// field being typed into. A model may override it with its own share.
+		const [globalPercent, setGlobalPercent] = createSignal(20);
+		const [globalDraft, setGlobalDraft] = createSignal("20");
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		const [providers, setProviders] = createSignal<Provider[]>([]);
@@ -175,7 +154,7 @@ export default Plugin.define({
 					rpc.list({}),
 					rpc.chains({}),
 					rpc.priority({}),
-					rpc.contextTarget({}),
+					rpc.contextPercent({}),
 					rpc.log({}),
 				]);
 				setBalancing((status as Status).balancing);
@@ -183,9 +162,8 @@ export default Plugin.define({
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
 				setChains([...(rows as Chains).rows]);
 				setProviders([...(order as Providers).entries]);
-				setTarget((settings as ContextState).target);
-				setReserve((settings as ContextState).reserve);
-				setTargetDraft(shareText((settings as ContextState).target));
+				setGlobalPercent((settings as ContextState).percent);
+				setGlobalDraft(String((settings as ContextState).percent));
 			} catch (error) {
 				setMessage(describe(error));
 			}
@@ -218,27 +196,9 @@ export default Plugin.define({
 
 		const rpc = () => ctx.client.rpc(Balancer);
 
-		// The plugin's reload rebuilds the model registry. The project keeps its
-		// own catalog cached per directory, so it needs the same nudge before the
-		// numbers reach a running chat.
-		const reloadProject = async () => {
-			try {
-				await ctx.client.location.reload();
-			} catch {
-				// A project that cannot reload still gets the new declaration next
-				// time it builds its catalog.
-			}
-		};
-
-		const commitTarget = () => {
-			if (targetDraft() === shareText(target())) return;
-			void run(async () => {
-				const reply = (await rpc().setContextTarget({
-					value: targetDraft(),
-				})) as Reply;
-				if (reply.ok) await reloadProject();
-				return reply;
-			});
+		const commitPercent = () => {
+			if (globalDraft() === String(globalPercent())) return;
+			void run(() => rpc().setContextPercent({ value: globalDraft() }));
 		};
 
 		const startAdd = async (key: string) => {
@@ -398,21 +358,21 @@ export default Plugin.define({
 					<div style={row}>
 						<span
 							style={{ opacity: 0.7 }}
-							title="How full a model's window may get before the host compacts. This writes the config's compaction buffer, so the number here is what actually trips."
+							title="The share of the declared 1M window the balancer compacts a conversation at. It compacts itself, so this is what actually trips; a model can override it with its own share of its real window."
 						>
 							{ctx.t("contextLimit")}
 						</span>
 						<span style={{ "align-items": "center", display: "flex" }}>
 							<input
-								onBlur={commitTarget}
-								onInput={(event) => setTargetDraft(event.currentTarget.value)}
+								onBlur={commitPercent}
+								onInput={(event) => setGlobalDraft(event.currentTarget.value)}
 								onKeyDown={(event) => {
 									if (event.key === "Enter") event.currentTarget.blur();
 								}}
-								placeholder="100"
+								placeholder="20"
 								style={{ width: "9em" }}
-								title={`writes the compaction buffer in your config; it currently keeps ${reserve()} free`}
-								value={targetDraft()}
+								title="a share from 1% to 100% of the declared 1M window; empty restores the default"
+								value={globalDraft()}
 							/>
 							<span style={{ opacity: 0.7 }}>%</span>
 						</span>
@@ -744,27 +704,25 @@ export default Plugin.define({
 																		inputMode="numeric"
 																		onBlur={(event) => {
 																			const value = event.currentTarget.value;
-																			void run(async () => {
-																				const reply =
-																					await rpc().setTargetLimit({
-																						key: chain.key,
-																						providerID: target.providerID,
-																						value,
-																					});
-																				if ((reply as Reply).ok)
-																					await reloadProject();
-																				return reply;
-																			});
+																			void run(() =>
+																				rpc().setTargetPercent({
+																					key: chain.key,
+																					providerID: target.providerID,
+																					value,
+																				}),
+																			);
 																		}}
 																		onKeyDown={(event) => {
 																			if (event.key === "Enter")
 																				event.currentTarget.blur();
 																		}}
-																		placeholder="e.g. 200000"
-																		style={{ width: "8em" }}
-																		title="a token count, not a percentage; empty means the provider's own window"
+																		placeholder={ctx.t("globalShare")}
+																		style={{ width: "6em" }}
+																		title="this model's own share of its real window, 1% to 100%; empty follows the global share"
 																		value={
-																			target.limit ? String(target.limit) : ""
+																			target.percent
+																				? String(target.percent)
+																				: ""
 																		}
 																	/>
 																	<button
@@ -817,37 +775,7 @@ export default Plugin.define({
 														</For>
 
 														<div style={{ opacity: 0.6 }}>
-															{ctx.t("window")} {size(chain.context)} ·{" "}
-															{ctx.t("tripsAt")} {size(chain.trip)}
-														</div>
-
-														<div style={row}>
-															<span style={{ opacity: 0.6 }}>
-																{ctx.t("limit")}
-															</span>
-															<input
-																inputMode="numeric"
-																onBlur={(event) => {
-																	const value = event.currentTarget.value;
-																	void run(async () => {
-																		const reply = await rpc().setRowLimit({
-																			key: chain.key,
-																			value,
-																		});
-																		if ((reply as Reply).ok)
-																			await reloadProject();
-																		return reply;
-																	});
-																}}
-																onKeyDown={(event) => {
-																	if (event.key === "Enter")
-																		event.currentTarget.blur();
-																}}
-																placeholder="e.g. 200000"
-																style={{ width: "8em" }}
-																title="a token count, not a percentage; empty means the smaller of the targets' own windows"
-																value={chain.limit ? String(chain.limit) : ""}
-															/>
+															{ctx.t("targetHint")}
 														</div>
 
 														<Show

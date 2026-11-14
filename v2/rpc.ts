@@ -20,35 +20,30 @@ const pair = object({ alias: str, providerID: str }, ["providerID", "alias"]);
 const result = object({ message: str, ok: bool }, ["ok", "message"]);
 const chainTarget = object(
 	{
-		/** The user's token ceiling for this target, 0 when none. */
-		limit: num,
 		modelID: str,
+		/** The user's share of this model's own window, 0 when it follows the global. */
+		percent: num,
 		providerID: str,
 		/** The model actually sent, once a free-only provider substitutes. */
 		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "resolved", "state", "limit"],
+	["providerID", "modelID", "resolved", "state", "percent"],
 );
 const chainRow = object(
 	{
-		context: num,
 		key: str,
 		label: str,
-		/** The user's token ceiling for the whole row, 0 when none. */
-		limit: num,
 		package: str,
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
-		/** Where the host will compact: the chosen share of the window. */
-		trip: num,
 	},
-	["key", "label", "package", "stored", "context", "trip", "targets", "limit"],
+	["key", "label", "package", "stored", "targets"],
 );
 const logEntry = object(
 	{
 		at: num,
-		/** route, failover, config or error. */
+		/** route, failover, config, compact or error. */
 		kind: str,
 		text: str,
 	},
@@ -140,11 +135,11 @@ export const balancerDefinition = {
 			output: object({ rows: { items: chainRow, type: "array" } }, ["rows"]),
 		},
 		clearLog: { input: empty, output: result },
-		contextTarget: {
+		contextPercent: {
 			input: empty,
-			// The user's share of the model's window, and the config reserve it
-			// is compensated against.
-			output: object({ reserve: str, target: num }, ["target", "reserve"]),
+			// The share of the declared window the balancer compacts at, unless a
+			// model overrides it with its own.
+			output: object({ percent: num }, ["percent"]),
 		},
 		list: {
 			input: object({ providerID: str }),
@@ -194,7 +189,7 @@ export const balancerDefinition = {
 			input: object({ enabled: bool }, ["enabled"]),
 			output: result,
 		},
-		setContextTarget: {
+		setContextPercent: {
 			input: object({ value: str }, ["value"]),
 			output: result,
 		},
@@ -212,11 +207,7 @@ export const balancerDefinition = {
 			]),
 			output: result,
 		},
-		setRowLimit: {
-			input: object({ key: str, value: str }, ["key", "value"]),
-			output: result,
-		},
-		setTargetLimit: {
+		setTargetPercent: {
 			input: object({ key: str, providerID: str, value: str }, [
 				"key",
 				"providerID",

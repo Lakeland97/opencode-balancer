@@ -34,32 +34,22 @@ export function isProviderEnabled(db: Database, providerID: string): boolean {
 	return entry ? entry.enabled : true;
 }
 
-/** Rough prompt size, used only when the host will not compact for us. */
-export function estimateTokens(body: string): number {
-	return Math.ceil(body.length / 4);
-}
-
 /**
  * The next target able to answer for this row, in chain order. Limited,
  * disabled, withdrawn, and excluded targets are skipped, which is what makes a
  * retry hop connectors instead of repeating the same one.
  *
- * `body` is only consulted when `guardOverflow` is set: without automatic
- * compaction nothing else stops a conversation outgrowing a small target.
+ * Nothing here looks at the conversation's size. The balancer reports one large
+ * window and compacts the conversation itself, so a request is never held back
+ * for being too big for one of the row's targets.
  */
 export function chooseRouteForRequest(
 	db: Database,
 	family: ModelFamily,
-	body: string | undefined,
-	options: {
-		guardOverflow: boolean;
-		exclude?: ReadonlySet<string>;
-	},
+	exclude: ReadonlySet<string> = new Set(),
 ): ChosenRoute | undefined {
-	const tokens = options.guardOverflow && body ? estimateTokens(body) : 0;
-
 	for (const route of resolveChain(db, family)) {
-		if (options.exclude?.has(route.providerID)) continue;
+		if (exclude.has(route.providerID)) continue;
 		if (route.available === false) continue;
 		if (!isProviderEnabled(db, route.providerID)) continue;
 		// A provider whose credits the user does not top up must not be handed a
@@ -71,7 +61,6 @@ export function chooseRouteForRequest(
 				: route;
 		if (!target) continue;
 
-		if (target.context && tokens > 0 && tokens > target.context) continue;
 		const account = selectHealthyAccount(db, route.providerID);
 		if (!account) continue;
 		return { ...target, account };
@@ -79,16 +68,13 @@ export function chooseRouteForRequest(
 	return undefined;
 }
 
-/** The route the next request would take, without a prompt-size guard. */
+/** The route the next request would take for this row. */
 export function chooseRoute(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
 ): ChosenRoute | undefined {
-	return chooseRouteForRequest(db, family, undefined, {
-		exclude,
-		guardOverflow: false,
-	});
+	return chooseRouteForRequest(db, family, exclude);
 }
 
 export function hasAlternativeRoute(

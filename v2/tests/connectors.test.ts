@@ -3,7 +3,6 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { saveAccount } from "../core/accounts";
 import { saveChain } from "../core/chains";
-import { setRowLimit, setTargetLimit } from "../core/limits";
 import { setFreeOnly } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
@@ -129,38 +128,7 @@ describe("catalog rows", () => {
 		);
 	});
 
-	test("the row window is the smallest target context", async () => {
-		const db = freshDb();
-		saveChain(db, {
-			familyKey: "deepseek-v4.1-flash",
-			label: "DeepSeek V4.1 Flash",
-			package: PACKAGE,
-			targets: [
-				{
-					baseURL: "https://p1.invalid/v1",
-					modelID: "deepseek-v4.1-flash",
-					providerID: "p1",
-				},
-				{
-					baseURL: "https://p2.invalid/v1",
-					modelID: "deepseek-v4.1-flash",
-					providerID: "p2",
-				},
-			],
-		});
-
-		const catalog = await loadCatalog(ctxWith(twoConnectors), db);
-		const family = catalog.families.find(
-			(entry) => entry.key === "deepseek-v4.1-flash",
-		);
-		expect(family?.window).toEqual({
-			ceiling: 1_000_000,
-			context: 200_000,
-			output: 32_000,
-		});
-	});
-
-	test("a free-only provider sizes the row by the model it will use", async () => {
+	test("a free-only provider's route carries the window it will really use", async () => {
 		const db = freshDb();
 		setFreeOnly(db, "p1", true);
 		const catalog = await loadCatalog(
@@ -183,10 +151,12 @@ describe("catalog rows", () => {
 		const family = catalog.families.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
+		const p1 = family?.targets.find((route) => route.providerID === "p1");
 
-		expect(family?.window?.context).toBe(200_000);
-		expect(family?.window?.output).toBe(32_000);
-		expect(family?.window?.ceiling).toBe(1_000_000);
+		// This provider is handed the free spelling, so that is the window the
+		// compaction share is clamped by — not the paid id it is configured with.
+		expect(p1?.context).toBe(200_000);
+		expect(p1?.output).toBe(32_000);
 	});
 
 	test("a stored chain is also sized by the free model it will use", async () => {
@@ -221,8 +191,8 @@ describe("catalog rows", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 
-		expect(family?.window?.context).toBe(200_000);
-		expect(family?.window?.ceiling).toBe(200_000);
+		expect(family?.targets[0]?.context).toBe(200_000);
+		expect(family?.targets[0]?.output).toBe(32_000);
 	});
 
 	test("a stored target keeps its own baseURL", async () => {
@@ -247,60 +217,6 @@ describe("catalog rows", () => {
 		expect(resolveChain(db, family!)[0]?.baseURL).toBe(
 			"https://mirror.invalid/v1",
 		);
-	});
-});
-
-describe("context limits", () => {
-	test("a per-target limit lowers that target and the row", async () => {
-		const db = freshDb();
-		setTargetLimit(db, "deepseek-v4.1-flash", "p1", 100_000);
-
-		const catalog = await loadCatalog(ctxWith(twoConnectors), db);
-		const family = catalog.families.find(
-			(entry) => entry.key === "deepseek-v4.1-flash",
-		);
-		const p1 = family?.targets.find((route) => route.providerID === "p1");
-
-		expect(p1?.context).toBe(100_000);
-		expect(family?.window?.context).toBe(100_000);
-		expect(family?.window?.ceiling).toBe(200_000);
-	});
-
-	test("a row limit raises the row and is clamped to the largest target", async () => {
-		const db = freshDb();
-		setRowLimit(db, "deepseek-v4.1-flash", 500_000);
-
-		const catalog = await loadCatalog(ctxWith(twoConnectors), db);
-		const family = catalog.families.find(
-			(entry) => entry.key === "deepseek-v4.1-flash",
-		);
-		expect(family?.window?.context).toBe(500_000);
-		expect(family?.guardOverflow).toBe(true);
-
-		setRowLimit(db, "deepseek-v4.1-flash", 5_000_000);
-		invalidateCatalog();
-		const again = await loadCatalog(ctxWith(twoConnectors), db);
-		const clamped = again.families.find(
-			(entry) => entry.key === "deepseek-v4.1-flash",
-		);
-		expect(clamped?.window?.context).toBe(1_000_000);
-	});
-
-	test("guardOverflow is true only when a target is below the row", async () => {
-		const db = freshDb();
-		const plain = await loadCatalog(ctxWith(twoConnectors), db);
-		expect(
-			plain.families.find((entry) => entry.key === "deepseek-v4.1-flash")
-				?.guardOverflow,
-		).toBe(false);
-
-		setRowLimit(db, "deepseek-v4.1-flash", 500_000);
-		invalidateCatalog();
-		const limited = await loadCatalog(ctxWith(twoConnectors), db);
-		expect(
-			limited.families.find((entry) => entry.key === "deepseek-v4.1-flash")
-				?.guardOverflow,
-		).toBe(true);
 	});
 });
 
@@ -347,7 +263,7 @@ describe("provider registration", () => {
 		expect(Array.isArray(row?.cost)).toBe(true);
 	});
 
-	test("the declared window is the row's own, not an inflated one", async () => {
+	test("every declared model claims the same 1M window", async () => {
 		const db = freshDb();
 		saveChain(db, {
 			familyKey: "deepseek-v4.1-flash",
@@ -367,35 +283,23 @@ describe("provider registration", () => {
 			],
 		});
 
-		let added: { limit?: { context: number; output: number } }[] = [];
-		const ctx = {
-			model: { list: async () => ({ data: twoConnectors }) },
-			provider: {
-				transform: async (
-					fn: (editor: { add: (value: { models: unknown[] }) => void }) => void,
-				) => {
-					fn({
-						add: (value) => {
-							added = value.models as typeof added;
-						},
-					});
-				},
-			},
-		} as never;
+		const host = hostingCtx(twoConnectors);
+		await registerBalancerProvider({ ctx: host.ctx, db });
 
-		await registerBalancerProvider({
-			ctx,
-			db,
+		// The window is not the row's own: the host must be unable to decide
+		// when the conversation is trimmed. The output is the smallest any hop
+		// can answer, so every target can serve it.
+		expect(host.declaredOf("deepseek-v4.1-flash")).toEqual({
+			context: 1_000_000,
+			output: 32_000,
 		});
-
-		const row = added.find(
-			(entry) => (entry as { id?: string }).id === "deepseek-v4.1-flash",
-		);
-		expect(row?.limit).toEqual({ context: 200_000, output: 32_000 });
 	});
 });
 
-type DeclaredModel = { id: string; limit?: { context: number } };
+type DeclaredModel = {
+	id: string;
+	limit?: { context: number; output?: number };
+};
 
 /** A host that keeps the provider transform and replays it on reload. */
 function hostingCtx(data: unknown[]) {
@@ -422,15 +326,14 @@ function hostingCtx(data: unknown[]) {
 	} as never;
 	return {
 		ctx,
-		limitOf: (id: string) =>
-			models.find((entry) => entry.id === id)?.limit?.context,
+		declaredOf: (id: string) => models.find((entry) => entry.id === id)?.limit,
 	};
 }
 
 type Editor = { add: (input: { models: DeclaredModel[] }) => void };
 
 describe("provider re-declaration", () => {
-	test("a refreshed provider sizes the row by the chain it now has", async () => {
+	test("a refreshed provider follows the chain it now has", async () => {
 		const db = freshDb();
 		const host = hostingCtx(twoConnectors);
 		await registerBalancerProvider({
@@ -438,10 +341,12 @@ describe("provider re-declaration", () => {
 			db,
 		});
 
-		// The declaration is the smallest target's own window. The 75% reserve
-		// lives in the config and pulls the trip to 50k; it does not inflate
-		// the number the host is told the model holds.
-		expect(host.limitOf("deepseek-v4.1-flash")).toBe(200_000);
+		// Two targets, so the row can only promise the smaller output; the
+		// window is the declared 1M either way.
+		expect(host.declaredOf("deepseek-v4.1-flash")).toEqual({
+			context: 1_000_000,
+			output: 32_000,
+		});
 
 		// Narrow the row to the 1M connector alone.
 		saveChain(db, {
@@ -461,7 +366,10 @@ describe("provider re-declaration", () => {
 			db,
 		});
 
-		// The declaration follows the row: one 1M target declares 1M.
-		expect(host.limitOf("deepseek-v4.1-flash")).toBe(1_000_000);
+		// One target left, so the row can promise its larger output.
+		expect(host.declaredOf("deepseek-v4.1-flash")).toEqual({
+			context: 1_000_000,
+			output: 384_000,
+		});
 	});
 });
