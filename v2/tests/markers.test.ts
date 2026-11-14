@@ -457,4 +457,20 @@ describe("the provider's place in the order", () => {
 			orderedAccounts(db).map((a) => `${a.providerID}/${a.alias}`),
 		).toEqual(before);
 	});
+
+	test("the marker lands on whatever the seeding makes lead", () => {
+		const db = freshDb();
+		// The state an upgrade arrives in: every credential at zero, so the
+		// seeding decides the order — and p1/b is left over as the stored pick
+		// from before, which the seeded order no longer agrees with.
+		db.query("UPDATE accounts SET position = 0").run();
+		setActiveAccount(db, "p1", "b");
+
+		migrateProviderSettings(db);
+
+		// p1's leader is p1/a, so that is the one the panel must call active.
+		expect(orderedAccounts(db, "p1").map((a) => a.alias)).toEqual(["a", "b"]);
+		expect(getActiveAccount(db, "p1")?.alias).toBe("a");
+		expect(getActiveAccount(db, "p2")?.alias).toBe("a");
+	});
 });

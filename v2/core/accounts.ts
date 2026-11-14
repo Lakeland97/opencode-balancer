@@ -466,9 +466,10 @@ export function firstCredential(
  * That alias is what the panel calls `active` and what decides whether OpenCode's
  * own credential is kept, so it must agree with the order. It used to be the
  * order's rival, set by `use` and consulted first; now the order is the answer
- * and this follows it.
+ * and this follows it. Exported because the migration that re-seeds the order
+ * has to put the two back in step rather than leave the marker behind.
  */
-function syncActiveAlias(db: Database, providerIDs: Iterable<string>) {
+export function syncActiveAlias(db: Database, providerIDs: Iterable<string>) {
 	for (const providerID of new Set(providerIDs)) {
 		const first = firstCredential(db, providerID);
 		if (first) setActiveAlias(db, providerID, first.alias);

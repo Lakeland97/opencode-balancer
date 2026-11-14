@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { listAccounts, orderedAccounts } from "./accounts";
+import { listAccounts, orderedAccounts, syncActiveAlias } from "./accounts";
 
 /**
  * Which provider comes first, derived from the credentials the router walks.
@@ -49,6 +49,11 @@ const freeOnlyPrefix = "free_only:";
  *
  * Only an order-less table is seeded. Positions that are already real are the
  * user's, written by `↑ ↓`, and must never be resorted on a later boot.
+ *
+ * Writing the order is only half of it: `active_alias` is what the panel calls
+ * `active`, so leaving it where it was would put the marker on a credential the
+ * provider would no longer serve with — the exact "why is that row marked and
+ * the other one not" the order is meant to answer.
  */
 function seedCredentialOrder(db: Database) {
 	const accounts = listAccounts(db);
@@ -87,6 +92,8 @@ function seedCredentialOrder(db: Database) {
 				position += 1;
 			}
 		}
+		// The marker follows the order, so the two never disagree on screen.
+		syncActiveAlias(db, providers);
 	});
 	write();
 }
