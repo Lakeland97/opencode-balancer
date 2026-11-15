@@ -7,7 +7,12 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
-import { healthyAccounts, healthyAccountsInOrder } from "./selection";
+import {
+	enabledAccounts,
+	enabledAccountsInOrder,
+	healthyAccounts,
+	healthyAccountsInOrder,
+} from "./selection";
 
 export type ChosenRoute = FamilyRoute & { account: Account };
 
@@ -74,10 +79,14 @@ function walkStoredChain(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string>,
+	includeParked = false,
 ): ChosenRoute | undefined {
 	for (const route of resolveChain(db, family)) {
 		if (route.available === false) continue;
-		for (const account of healthyAccounts(db, route.providerID)) {
+		const accounts = includeParked
+			? enabledAccounts(db, route.providerID)
+			: healthyAccounts(db, route.providerID);
+		for (const account of accounts) {
 			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
 			const chosen = targetFor(route, account);
 			if (chosen) return chosen;
@@ -90,11 +99,15 @@ function walkCredentialOrder(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string>,
+	includeParked = false,
 ): ChosenRoute | undefined {
 	const byProvider = new Map(
 		family.targets.map((route) => [route.providerID, route]),
 	);
-	for (const account of healthyAccountsInOrder(db)) {
+	const accounts = includeParked
+		? enabledAccountsInOrder(db)
+		: healthyAccountsInOrder(db);
+	for (const account of accounts) {
 		if (exclude.has(accountKey(account.providerID, account.alias))) continue;
 		const route = byProvider.get(account.providerID);
 		if (!route || route.available === false) continue;
@@ -102,6 +115,26 @@ function walkCredentialOrder(
 		if (chosen) return chosen;
 	}
 	return undefined;
+}
+
+/**
+ * The next target for this row, parks included: the last chance when nothing
+ * healthy can answer it.
+ *
+ * A row only ever holds providers that actually offer the model, so a row whose
+ * only target is parked has no alternative to protect — the park is the
+ * balancer's own guess about the world, and with nothing behind it an attempt
+ * beats leaving the call pointed at the stub, which reaches the session as a
+ * transport failure it cannot explain.
+ */
+export function chooseRouteIgnoringParks(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+): ChosenRoute | undefined {
+	return family.stored
+		? walkStoredChain(db, family, exclude, true)
+		: walkCredentialOrder(db, family, exclude, true);
 }
 
 /** The route the next request would take for this row. */

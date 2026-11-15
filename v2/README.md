@@ -125,11 +125,27 @@ is cut at the same place. Nested rows are indented one step per level — sectio
 — so a category reads as under the section, a row as under its category, and an expanded row's targets
 as inside it rather than beside it.
 
-Routing is **sticky** per session: once a target answers, later requests stay on it while it is
-healthy. A failure moves forward to a credential this session has not tried since its last answer,
-rather than restarting at the top of the order and parking everything on the way down. When everything
-has been tried, the order wraps back to the head. A provider's second credential is a second chance:
-parking one is what sends the next request to the other, not an error the session has to see.
+Routing is **sticky** per model row, within a session: once a target answers for a row, later requests
+for that row stay on it while it is healthy. A failure moves forward to a credential that row has not
+tried since its last answer, rather than restarting at the top of the order and parking everything on
+the way down. When everything has been tried, the order wraps back to the head. A provider's second
+credential is a second chance: parking one is what sends the next request to the other, not an error
+the session has to see.
+
+Both halves of that are per **row**, because a session may run more than one model: the user switches
+models mid-conversation, and the host's own auxiliary calls (a title, a summary, a one-off generation)
+may use another row again. A row is a model — it only ever holds the providers that actually offer it —
+so "per model" and "per row" are the same statement, and the trickle of state that a conversation
+accumulates (the pinned target, the credentials already tried, the count that decides when to give up)
+belongs to the row rather than to the session. Keyed by session alone, one model's pin was handed to the
+next and silently dropped, since the other row's provider is not in this row's targets, so stickiness
+was lost on every switch, and one model's failures spent another model's room to fail over.
+
+When nothing healthy can answer a row at all — every credential in it parked or switched off — the
+balancer tries the row's head anyway and says so in the log. Since a row holds only the providers that
+offer its model, there is no alternative the park is protecting; leaving the call unrouted would send
+it to the stub, and the session would see a transport failure that explains nothing. A park is still
+honoured everywhere it can be: this is the last resort, not the first choice.
 
 That trail is not honoured forever. It is dropped once the session has sat **idle** for the window,
 and the order starts again from the head — measured from the last routed request, not from a clock, so
@@ -141,7 +157,8 @@ trail at all, and the field beside it says after how long. The field takes a num
 is the switch being turned off, and typing any length again turns it back on, so the two controls
 never disagree about the same row. With it off, nothing ages a trail out by itself and only a change
 to the order starts a session over. What is *not* dropped is a park — that is the provider's own
-clock and expires on its own schedule, so a call is never sent back to something still limited.
+clock and expires on its own schedule, so a call is never sent back to something still limited except
+by the last-resort rule above.
 
 Changing the order — picking a credential, reordering one, switching one on or off, editing a chain,
 turning balancing back on — starts every session over at once, not after the current trail expires.
@@ -233,6 +250,12 @@ The **enforce** choice beside it says when that reserve is taken. `always` takes
 longer room to give — so a limit that already leaves plenty stands alone. At or past the model's own
 window the reserve is kept whatever the setting, because that is the one place a cut with nothing left
 behind it trips the overflow it prevents.
+
+A session that runs more than one model is measured against **all** of them: every row it has had a
+conversation on is weighed, and the tightest cut of them is the one that fires, because the
+conversation has to fit whichever model comes next. Auxiliary calls are not part of that — a title, a
+summary or a one-off generation runs in the session but is not the conversation, so its model never
+becomes the one the conversation is cut for.
 
 The balancer watches `session.step.ended`, whose token counts are the same per-request figure the host
 shows against the model's limit, and sums input, output, reasoning, and both cache fields. A session

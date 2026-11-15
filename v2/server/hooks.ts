@@ -25,12 +25,24 @@ import {
 	retryAfterMs,
 } from "./request-state";
 import {
+	type ChosenRoute,
 	chooseRouteForRequest,
+	chooseRouteIgnoringParks,
 	hasAlternativeRoute,
 	rewriteModel,
 	routedURL,
 } from "./routing";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
+
+/**
+ * The model row a session is running on, as the compaction watcher needs it:
+ * which row, which connector answered, and the real window that connector holds.
+ */
+export type SessionTarget = {
+	familyKey: string;
+	providerID: string;
+	context?: number;
+};
 
 type Tracked = {
 	providerID: string;
@@ -56,13 +68,42 @@ const ATTEMPT_CAP = 12;
 // A provider that names its own window is believed, but only so far: a park is
 // cleared by `use`, and a mis-parsed value must not sit on an account for days.
 const MAX_PARK_MS = 60 * 60_000;
+// The host's own housekeeping in a session: a title, a summary, a one-off
+// generation. These run in the session but they are not the conversation, so
+// their model must not become the one the conversation is measured against.
+const AUXILIARY_KINDS = new Set(["title", "generate", "compaction"]);
 
 function sessionKey(sessionID: string, providerID: string) {
 	return `${sessionID}:${providerID}`;
 }
 
-function track(sessionID: string, tracked: Tracked) {
+/**
+ * One model row's routing memory, in one session.
+ *
+ * The model — not the session — is what the memory is about, because a session
+ * may run more than one: the user switches models mid-conversation, and the
+ * host's own auxiliary calls (a title, a summary, a one-off generation) may use
+ * another row again. Keyed by session alone, a pin or a trail from one model was
+ * handed to the next: the other row's provider was filtered out of this row's
+ * targets, so stickiness was lost on every switch, and failures from one model
+ * counted against another's room to fail over. A row only ever holds the
+ * providers that offer its model, so this is the whole of the per-model
+ * allocation: the row is the model, and this is the row's memory.
+ */
+function modelKey(sessionID: string, familyKey: string) {
+	return `${sessionID}:${ROUTED}:${familyKey}`;
+}
+
+/** Whether a routing slot belongs to the balancer rather than a real provider. */
+function isRoutedSlot(key: string) {
+	return key.split(":")[1] === ROUTED;
+}
+
+function track(sessionID: string, tracked: Tracked, familyKey?: string) {
 	bySession.set(sessionKey(sessionID, tracked.providerID), tracked);
+	if (familyKey) bySession.set(modelKey(sessionID, familyKey), tracked);
+	// Kept for any lookup that cannot name the row: a failure reported without a
+	// model id still has to be charged to the credential that was in use.
 	bySession.set(sessionKey(sessionID, ROUTED), tracked);
 }
 
@@ -76,7 +117,7 @@ function isParked(db: Database, providerID: string, alias: string) {
 	return Boolean(account?.rateLimitedUntil && account.rateLimitedUntil > now());
 }
 
-// Credentials this session has already tried since its last answer, named
+// Credentials this row has already tried since its last answer, named
 // `provider/alias`. A retry reads this so it moves forward through the chain
 // instead of starting again at the first target and parking everything on the
 // way down; naming the credential rather than the provider is what lets the
@@ -85,27 +126,45 @@ function isParked(db: Database, providerID: string, alias: string) {
 // The trail carries its own clock because the routing slots cannot: the failover
 // path clears those before a retry on purpose, so by the time the question is
 // asked there is nothing there to date. `at` is refreshed by every routing
-// decision, which makes it the last time this session was balanced.
+// decision, which makes it the last time this row was balanced.
 type Trail = { at: number; tried: Set<string> };
-const trailsBySession = new Map<string, Trail>();
+const trailsByModel = new Map<string, Trail>();
 
-function trailFor(sessionID: string) {
-	let trail = trailsBySession.get(sessionID);
+function trailFor(sessionID: string, familyKey: string) {
+	const key = modelKey(sessionID, familyKey);
+	let trail = trailsByModel.get(key);
 	if (!trail) {
 		trail = { at: now(), tried: new Set() };
-		trailsBySession.set(sessionID, trail);
+		trailsByModel.set(key, trail);
 	}
 	return trail;
 }
 
-function triedFor(sessionID: string) {
-	const trail = trailFor(sessionID);
+function triedFor(sessionID: string, familyKey: string) {
+	const trail = trailFor(sessionID, familyKey);
 	trail.at = now();
 	return trail.tried;
 }
 
-// The target each session was last announced on, so a switch can name where it
-// came from. Kept apart from the routing slots above, which the failover path
+// The model rows a session has had a conversation on, so the compaction watcher
+// measures the conversation against the window it will actually be sent to. Only
+// primary calls are recorded: a title or a summary is the host doing housekeeping
+// in the same session, and its model must not decide where the conversation is
+// cut.
+type RecordedTarget = { at: number; target: SessionTarget };
+const targetsBySession = new Map<string, Map<string, RecordedTarget>>();
+
+function recordTarget(sessionID: string, target: SessionTarget) {
+	let rows = targetsBySession.get(sessionID);
+	if (!rows) {
+		rows = new Map();
+		targetsBySession.set(sessionID, rows);
+	}
+	rows.set(target.familyKey, { at: now(), target });
+}
+
+// The target each row was last announced on, so a switch can name where it came
+// from. Kept apart from the routing slots above, which the failover path
 // deliberately clears before a retry: erasing that history would make every
 // failover read as a fresh first choice.
 const announced = new Map<string, { alias: string; providerID: string }>();
@@ -117,16 +176,17 @@ const announced = new Map<string, { alias: string; providerID: string }>();
  * own schedule, and throwing that away would send a call straight back to
  * something still limited.
  */
-function forgetStaleTrail(db: Database, sessionID: string) {
-	const trail = trailsBySession.get(sessionID);
+function forgetStaleTrail(db: Database, sessionID: string, familyKey: string) {
+	const key = modelKey(sessionID, familyKey);
+	const trail = trailsByModel.get(key);
 	if (!trail) return;
 	const window = rebalanceAfterMs(db);
 	// Zero is the window switched off, so nothing ages a trail out but a change to
 	// the order itself.
 	if (window <= 0) return;
 	if (now() - trail.at <= window) return;
-	trailsBySession.delete(sessionID);
-	announced.delete(sessionKey(sessionID, ROUTED));
+	trailsByModel.delete(key);
+	announced.delete(key);
 }
 
 /**
@@ -140,14 +200,15 @@ function forgetStaleTrail(db: Database, sessionID: string) {
  * session last answered on. The idle window restarts by construction: the next
  * trail is created with the current time.
  *
- * The per-provider slots stay. They are what the compaction watcher reads to know
- * which model a conversation is on, and the order it names is still the right one.
+ * The per-provider slots stay. They are what a failure is charged to, and the
+ * order they name is still the right one. The recorded targets stay too: they
+ * describe which model a conversation is on, which no reorder changes.
  */
 export function forgetRoutingMemory() {
-	trailsBySession.clear();
+	trailsByModel.clear();
 	announced.clear();
 	for (const key of [...bySession.keys()]) {
-		if (key.endsWith(`:${ROUTED}`)) bySession.delete(key);
+		if (isRoutedSlot(key)) bySession.delete(key);
 	}
 }
 
@@ -163,8 +224,9 @@ function announceRoute(input: {
 	key: string;
 	modelID?: string;
 	next: { alias: string; providerID: string };
+	reason?: string;
 }) {
-	const { db, key, modelID, next } = input;
+	const { db, key, modelID, next, reason } = input;
 	const before = announced.get(key);
 	if (
 		before &&
@@ -177,13 +239,15 @@ function announceRoute(input: {
 	const prefix = modelID ? `${modelID}: ` : "";
 	const to = `${next.providerID}/${next.alias}`;
 	if (!before) {
-		recordLog("route", `${prefix}${to} (first choice)`);
+		recordLog("route", `${prefix}${to} (${reason ?? "first choice"})`);
 		return;
 	}
 	const from = `${before.providerID}/${before.alias}`;
-	const because = isParked(db, before.providerID, before.alias)
-		? "the previous target is parked"
-		: "moved on";
+	const because =
+		reason ??
+		(isParked(db, before.providerID, before.alias)
+			? "the previous target is parked"
+			: "moved on");
 	recordLog("route", `${prefix}${from} → ${to} (${because})`);
 }
 
@@ -240,22 +304,23 @@ function recordHandedOver(input: {
 }
 
 /**
- * One route choice for both request hooks. The session keeps the provider
- * that last answered while it is healthy, so a conversation stays on the model
- * it shifted to instead of snapping back to the top of the chain. Providers
- * already tried since the last answer are skipped; if that leaves nothing, the
- * chain wraps around to the head.
+ * One route choice for both request hooks. The row keeps the target that last
+ * answered while it is healthy, so a conversation stays on the model it shifted
+ * to instead of snapping back to the top of the chain. Targets already tried
+ * since the last answer are skipped; if that leaves nothing, the chain wraps
+ * around to the head; if even that leaves nothing, the row's head is tried
+ * anyway rather than the call being left unrouted.
  */
 function chooseStickyRoute(input: {
 	db: Database;
 	family: ModelFamily;
 	sessionID: string;
-}) {
+}): { parkedFallback: boolean; route: ChosenRoute } | undefined {
 	const { db, family, sessionID } = input;
 	// A trail older than the idle window is void, so the balance starts again.
-	forgetStaleTrail(db, sessionID);
-	const tried = triedFor(sessionID);
-	const remembered = bySession.get(sessionKey(sessionID, ROUTED));
+	forgetStaleTrail(db, sessionID, family.key);
+	const tried = triedFor(sessionID, family.key);
+	const remembered = bySession.get(modelKey(sessionID, family.key));
 	const pinned =
 		remembered && fresh(remembered)
 			? {
@@ -267,42 +332,60 @@ function chooseStickyRoute(input: {
 				}
 			: undefined;
 
-	return (
+	const route =
 		(pinned ? chooseRouteForRequest(db, pinned, tried) : undefined) ??
 		chooseRouteForRequest(db, family, tried) ??
 		// Everything has been tried since the last answer: wrap around.
-		chooseRouteForRequest(db, family)
-	);
+		chooseRouteForRequest(db, family);
+	if (route) return { parkedFallback: false, route };
+
+	// Nothing healthy can answer this row at all. The row holds only providers
+	// that offer the model, so there is no alternative the park is protecting:
+	// trying the head again is better than leaving the call pointed at the stub.
+	const lastChance =
+		chooseRouteIgnoringParks(db, family, tried) ??
+		chooseRouteIgnoringParks(db, family);
+	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 
 /**
- * The row and connector a session's latest routed call went through, which is
- * what the compaction watcher measures the conversation against.
+ * The model rows a session has had a conversation on, which is what the
+ * compaction watcher measures against.
  *
- * Undefined when the session's calls never went through the balancer, or when
- * it has not made one recently enough to still be on it: a session that has
- * moved to a provider the balancer does not route must not be compacted here.
+ * Every row the session has run is returned, not just the last: a conversation
+ * that moves between models has to fit all of them, and the watcher takes the
+ * smallest threshold rather than the newest one. Rows that have gone stale are
+ * dropped — a session the balancer has not routed recently may have moved to a
+ * provider this plugin does not hold, and its conversation is then not ours to
+ * compact.
  */
-export function balancerTargetFor(
-	sessionID: string,
-): { familyKey: string; providerID: string; context?: number } | undefined {
-	const tracked = bySession.get(sessionKey(sessionID, ROUTED));
-	if (!tracked || !fresh(tracked) || !tracked.familyKey) return undefined;
-	return {
-		context: tracked.context,
-		familyKey: tracked.familyKey,
-		providerID: tracked.providerID,
-	};
+export function balancerTargetsFor(sessionID: string): SessionTarget[] {
+	const rows = targetsBySession.get(sessionID);
+	if (!rows) return [];
+	const live = [...rows.values()].filter(
+		(recorded) => now() - recorded.at <= STALE_AFTER_MS,
+	);
+	return live.map((recorded) => recorded.target);
 }
 
 function lookupTracked(input: {
 	sessionID: string;
 	providerID: string;
 	request?: Request;
+	familyKey?: string;
 }): Tracked | undefined {
 	if (input.request) {
 		const direct = byRequest.get(input.request);
 		if (direct) return direct;
+	}
+	if (input.familyKey && input.providerID === ROUTED) {
+		// The row the call was for, when the caller could name it: with two models
+		// in one session, the last routed call may belong to the other one. Only a
+		// routed call can have a row, which is why the provider is checked first —
+		// a direct call to a provider that happens to offer the same model would
+		// otherwise find the balancer's slot for it and charge its failure there.
+		const row = bySession.get(modelKey(input.sessionID, input.familyKey));
+		if (row && fresh(row)) return row;
 	}
 	const tracked = bySession.get(sessionKey(input.sessionID, input.providerID));
 	// A stale slot must not charge a failure to an account that is no longer
@@ -334,12 +417,13 @@ export async function registerHooks({
 		if (!family) return;
 		// The same route the request hook will pick, so the URL and credential
 		// set here cannot point at a different provider than the one it uses.
-		const route = chooseStickyRoute({
+		const chosen = chooseStickyRoute({
 			db,
 			family,
 			sessionID: event.sessionID,
 		});
-		if (!route) return;
+		if (!chosen) return;
+		const route = chosen.route;
 
 		event.baseURL = route.baseURL;
 		const headers = new Headers(event.headers);
@@ -347,13 +431,27 @@ export async function registerHooks({
 		event.headers = Object.fromEntries(headers);
 
 		markAccountUsed(db, route.providerID, route.account.alias);
-		track(event.sessionID, {
-			alias: route.account.alias,
-			at: now(),
-			context: route.context,
-			familyKey: family.key,
-			providerID: route.providerID,
-		});
+		track(
+			event.sessionID,
+			{
+				alias: route.account.alias,
+				at: now(),
+				context: route.context,
+				familyKey: family.key,
+				providerID: route.providerID,
+			},
+			family.key,
+		);
+		// Recorded here as well as in the request hook, which covers the same
+		// call: either hook alone has to leave the watcher with the right row,
+		// and writing the same target twice is not a change.
+		if (!AUXILIARY_KINDS.has(String(event.kind))) {
+			recordTarget(event.sessionID, {
+				context: route.context,
+				familyKey: family.key,
+				providerID: route.providerID,
+			});
+		}
 	});
 
 	await ctx.session.hook("http.request", async (event) => {
@@ -366,12 +464,13 @@ export async function registerHooks({
 			const family = await familyFor(ctx, db, event.model.id);
 			if (!family) return;
 
-			const route = chooseStickyRoute({
+			const chosen = chooseStickyRoute({
 				db,
 				family,
 				sessionID: event.sessionID,
 			});
-			if (!route) return;
+			if (!chosen) return;
+			const route = chosen.route;
 
 			let request = event.request;
 			const url = routedURL(request.url, route.baseURL);
@@ -385,9 +484,15 @@ export async function registerHooks({
 			event.request = request;
 			announceRoute({
 				db,
-				key: sessionKey(event.sessionID, ROUTED),
+				// Per row, so one model's switch is not announced as another's:
+				// with two models in a session these lines would otherwise
+				// alternate for no reason at all.
+				key: modelKey(event.sessionID, family.key),
 				modelID: family.key,
 				next: { alias: route.account.alias, providerID: route.providerID },
+				reason: chosen.parkedFallback
+					? "nothing healthy could answer; trying it anyway"
+					: undefined,
 			});
 			markAccountUsed(db, route.providerID, route.account.alias);
 			byRequest.set(request, {
@@ -397,13 +502,31 @@ export async function registerHooks({
 				familyKey: family.key,
 				providerID: route.providerID,
 			});
-			track(event.sessionID, {
-				alias: route.account.alias,
-				at: now(),
-				context: route.context,
-				familyKey: family.key,
-				providerID: route.providerID,
-			});
+			track(
+				event.sessionID,
+				{
+					alias: route.account.alias,
+					at: now(),
+					context: route.context,
+					familyKey: family.key,
+					providerID: route.providerID,
+				},
+				family.key,
+			);
+			// Where the conversation is running, for the compaction watcher. An
+			// auxiliary call — a title, a summary, a one-off generation — is the
+			// host doing housekeeping in the same session, and its model must not
+			// decide where that conversation is cut. Anything else counts as the
+			// conversation, including a kind this host has not told us about:
+			// refusing to record would mean refusing to compact, and a session
+			// that quietly stops being compacted overflows instead.
+			if (!AUXILIARY_KINDS.has(String(event.kind))) {
+				recordTarget(event.sessionID, {
+					context: route.context,
+					familyKey: family.key,
+					providerID: route.providerID,
+				});
+			}
 			return;
 		}
 
@@ -432,6 +555,7 @@ export async function registerHooks({
 
 	await ctx.session.hook("http.response", (event) => {
 		const tracked = lookupTracked({
+			familyKey: event.model.id,
 			providerID: event.model.providerID,
 			request: event.request,
 			sessionID: event.sessionID,
@@ -442,9 +566,11 @@ export async function registerHooks({
 		// excluded before it is asked about.
 		const failed = event.response.status >= 400;
 		if (!failed || !isRetryableFailure({ status: event.response.status })) {
-			// An answer ends the failover trail: the session stays on this
-			// target and a later failure may try the others again.
-			trailsBySession.delete(event.sessionID);
+			// An answer ends the failover trail for this row: the session stays
+			// on this target and a later failure may try the others again.
+			if (tracked.familyKey) {
+				trailsByModel.delete(modelKey(event.sessionID, tracked.familyKey));
+			}
 			return;
 		}
 		const reported = `HTTP ${event.response.status}${
@@ -472,6 +598,7 @@ export async function registerHooks({
 		const status = (event.error as { status?: number } | undefined)?.status;
 		const reported = describeFailure(event.error, status);
 		const tracked = lookupTracked({
+			familyKey: event.model.id,
 			providerID: event.model.providerID,
 			sessionID: event.sessionID,
 		});
@@ -495,6 +622,7 @@ export async function registerHooks({
 			return;
 		}
 
+		const rowKey = event.model.id;
 		const from = `${tracked.providerID}/${tracked.alias}`;
 		if (!isRetryableFailure({ error: event.error, status })) {
 			recordLog(
@@ -519,7 +647,7 @@ export async function registerHooks({
 			MAX_PARK_MS,
 		);
 		markRateLimited(db, tracked.providerID, tracked.alias, park, reported);
-		triedFor(event.sessionID).add(
+		triedFor(event.sessionID, rowKey).add(
 			accountKey(tracked.providerID, tracked.alias),
 		);
 
@@ -571,11 +699,13 @@ export async function registerHooks({
 
 		// Past a few rounds the chain has wrapped and re-walking it would only
 		// hide the reason, so the real failure is handed over instead. The count
-		// is the session's own list of credentials it has tried since its last
-		// answer, not the host's `event.attempt`: the host never resets that one,
-		// so a long-lived session — every failure it ever had, added up — would
-		// eventually cross the cap and be cut off from failover for good.
-		const triedNow = triedFor(event.sessionID).size;
+		// is this row's own list of credentials tried since its last answer, not
+		// the host's `event.attempt`: the host never resets that one, so a
+		// long-lived session — every failure it ever had, added up — would
+		// eventually cross the cap and be cut off from failover for good. Counting
+		// per row is what keeps one model's failures from spending another's room,
+		// and the row is the model, so it is also the list the user can see.
+		const triedNow = triedFor(event.sessionID, rowKey).size;
 		if (triedNow > ATTEMPT_CAP) {
 			recordLog(
 				"error",
@@ -592,8 +722,9 @@ export async function registerHooks({
 			return;
 		}
 
-		// Forget the call's target so the retry routes from scratch; the account
-		// just marked limited is skipped by the health check.
+		// Forget this row's target so the retry routes from scratch; the account
+		// just marked limited is skipped by the health check either way.
+		bySession.delete(modelKey(event.sessionID, rowKey));
 		bySession.delete(sessionKey(event.sessionID, ROUTED));
 		bySession.delete(sessionKey(event.sessionID, tracked.providerID));
 

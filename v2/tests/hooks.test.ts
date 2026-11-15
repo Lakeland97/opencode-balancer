@@ -16,7 +16,7 @@ import { migrate } from "../core/schema";
 import { now } from "../core/time";
 import { invalidateCatalog } from "../server/connectors";
 import {
-	balancerTargetFor,
+	balancerTargetsFor,
 	forgetRoutingMemory,
 	registerHooks,
 } from "../server/hooks";
@@ -329,16 +329,175 @@ describe("the session's target", () => {
 		// This is what the compaction watcher measures against: the row decides
 		// which per-model share applies, and the window is the ceiling the share
 		// is clamped by.
-		expect(balancerTargetFor("routed-1")).toEqual({
-			context: 200_000,
-			familyKey: "deepseek-v4.1-flash",
-			providerID: "p1",
-		});
+		expect(balancerTargetsFor("routed-1")).toEqual([
+			{
+				context: 200_000,
+				familyKey: "deepseek-v4.1-flash",
+				providerID: "p1",
+			},
+		]);
 	});
 
 	test("a session that never routed here has nothing to compact", async () => {
 		await routedSetup();
-		expect(balancerTargetFor("never-routed")).toBeUndefined();
+		expect(balancerTargetsFor("never-routed")).toEqual([]);
+	});
+});
+
+describe("two models in one session", () => {
+	/** Two models, each offered by providers of its own. */
+	async function twoModels() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const offered = (providerID: string, modelID: string, context: number) => ({
+			enabled: true,
+			limit: { context, output: 4096 },
+			modelID,
+			name: modelID,
+			package: PACKAGE,
+			providerID,
+			settings: { baseURL: `https://${providerID}.invalid/v1` },
+			type: "chat",
+		});
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						// `alpha` is offered by two providers, so its row has a real
+						// choice in it. `beta` is offered by one, which is the case
+						// that has no alternative to fall back to.
+						offered("p1", "alpha-1", 200_000),
+						offered("p2", "alpha-1", 200_000),
+						offered("q", "beta-1", 100_000),
+					],
+				}),
+			},
+			rpc: {
+				register: async (
+					_definition: unknown,
+					registered: Record<string, unknown>,
+				) => ({
+					...registered,
+					events: { emit: async () => {} },
+				}),
+			},
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		saveAccount(db, "p2", "a", apiAuth("sk-2"));
+		saveAccount(db, "q", "a", apiAuth("sk-3"));
+		setBalancingEnabled(db, true);
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
+	const row = (sessionID: string, modelID: string) => ({
+		agent: "build",
+		headers: {} as Record<string, string>,
+		kind: "primary",
+		model: { id: modelID, providerID: "balancer" },
+		sessionID,
+	});
+
+	/** Serve from the head of `alpha`, then fail it: `p1` is parked. */
+	async function failOverAlpha(
+		registry: Record<string, HookCallback>,
+		sessionID: string,
+	) {
+		const event = row(sessionID, "alpha-1");
+		await registry["model.request"](event);
+		expect(event.headers.authorization).toBe("Bearer sk-1");
+		await registry.retry({
+			...retryEvent(sessionID, { delay: 1_000, retry: false }),
+			model: { id: "alpha-1", providerID: "balancer" },
+		});
+	}
+
+	test("each model keeps its own balance, so a switch does not reset one", async () => {
+		const start = Date.now();
+		const { registry } = await twoModels();
+		await failOverAlpha(registry, "two-models");
+
+		// Settled on `p2` while its own trail remembers `p1`.
+		const second = row("two-models", "alpha-1");
+		await registry["model.request"](second);
+		expect(second.headers.authorization).toBe("Bearer sk-2");
+
+		// The other model answers from its own provider. With one slot per
+		// session this is what used to overwrite `alpha`'s pin, so the line after
+		// it went back to `alpha`'s head for no reason.
+		const other = row("two-models", "beta-1");
+		await registry["model.request"](other);
+		expect(other.headers.authorization).toBe("Bearer sk-3");
+
+		// `p1`'s park has expired, so only the pin can explain staying on `p2`.
+		// The pin is still inside its own freshness window.
+		setSystemTime(start + 90_000);
+		try {
+			const back = row("two-models", "alpha-1");
+			await registry["model.request"](back);
+			expect(back.headers.authorization).toBe("Bearer sk-2");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a model whose only provider is parked is still tried", async () => {
+		const { registry } = await twoModels();
+
+		// `beta` is offered by `q` alone, and `q` fails: there is no alternative
+		// in the row, so the session is told — that is the documented behaviour.
+		const first = row("only-provider", "beta-1");
+		await registry["model.request"](first);
+		expect(first.headers.authorization).toBe("Bearer sk-3");
+		await registry.retry({
+			...retryEvent("only-provider", { delay: 1_000, retry: false }),
+			model: { id: "beta-1", providerID: "balancer" },
+		});
+
+		// The next request must still reach `q`. The row holds only providers that
+		// offer the model, so the park is protecting nothing here, and leaving the
+		// call unrouted sends the session to the stub instead: a transport error
+		// that says nothing about what happened.
+		const again = row("only-provider", "beta-1");
+		await registry["model.request"](again);
+		expect(again.headers.authorization).toBe("Bearer sk-3");
+	});
+
+	test("an auxiliary call does not decide where the conversation is cut", async () => {
+		const { registry } = await twoModels();
+
+		// The conversation is on `alpha`, whose connector holds 200k.
+		await registry["model.request"](row("mixed-kinds", "alpha-1"));
+
+		// The host titles the session with another model — a 100k one. Measuring
+		// the conversation against that window would cut it four times too early.
+		await registry["model.request"]({
+			...row("mixed-kinds", "beta-1"),
+			kind: "title",
+		});
+
+		expect(balancerTargetsFor("mixed-kinds")).toEqual([
+			{ context: 200_000, familyKey: "alpha-1", providerID: "p1" },
+		]);
+	});
+
+	test("both models the conversation ran are on record, not just the last", async () => {
+		const { registry } = await twoModels();
+		await registry["model.request"](row("two-rows", "alpha-1"));
+		await registry["model.request"](row("two-rows", "beta-1"));
+
+		const rows = balancerTargetsFor("two-rows");
+		expect(rows.map((entry) => entry.familyKey).sort()).toEqual([
+			"alpha-1",
+			"beta-1",
+		]);
 	});
 });
 

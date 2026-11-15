@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Eight changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Ten changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -124,6 +124,26 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   (`MAX_PARK_MS`) and the marker still clears on the next attempt, so the subline is worded from the
   provider's side, a refill already in the past or a year out is refused, and a plain 429 whose only
   window was a `Retry-After` header gets no subline rather than inheriting an older failure's date.
+- **Routing memory is per model row, not per session.** A session may run more than one model — the user
+  switches mid-conversation, and the host's auxiliary calls (title, summary, one-off generation) may use
+  another row — but the pinned target, the trail of credentials already tried, the give-up count and the
+  "where from" announcement were all keyed by session. A row holds only the providers that offer its
+  model, so "per model" and "per row" are the same statement, and the state now says so: `modelKey(session,
+  row)` in `server/hooks.ts`. Keyed by session, one model's pin was handed to the next and filtered away
+  silently (the other row's provider is not in this row's targets), so stickiness was lost on every
+  switch, and one model's failures spent another model's room to fail over. Two consequences beyond the
+  pin: a failure is looked up in its own row's slot (`lookupTracked` takes the model id, and only for
+  routed calls, so a direct call to a provider offering the same model cannot be charged to the balancer's
+  slot for it), and the row's head is tried anyway when nothing healthy in it can answer
+  (`chooseRouteIgnoringParks`) — with the row's own targets as the only alternative, a park protects
+  nothing there, and staying unrouted sends the session to the stub as an unexplainable transport error.
+  The parked path is logged as such ("nothing healthy could answer; trying it anyway") and stays a last
+  resort rather than a first choice.
+- **Compaction follows the models a session actually ran.** `balancerTargetFor` returned whichever routed
+  call happened last, so a title or a summary on a 100k model could govern a conversation running on a
+  200k one. The watcher now takes every primary row the session has been routed on (`balancerTargetsFor`,
+  auxiliaries excluded, stale rows dropped) and compacts at the **tightest** of their thresholds, because
+  the conversation has to fit whichever model comes next.
 
 **Outstanding**
 

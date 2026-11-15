@@ -7,8 +7,11 @@ import {
 	readLimitSpec,
 	readModelLimitSpec,
 } from "../core/context";
-import { balancerTargetFor } from "./hooks";
+import { balancerTargetsFor, type SessionTarget } from "./hooks";
 import { recordLog } from "./log";
+
+/** The row and connector a session is running on, as the watcher needs it. */
+export type { SessionTarget };
 
 type TokenInfo = {
 	input?: number;
@@ -36,18 +39,14 @@ export function contextTokens(tokens: TokenInfo | undefined): number {
 	);
 }
 
-/** The row and connector a session is running on, as the watcher needs it. */
-export type SessionTarget = {
-	familyKey: string;
-	providerID: string;
-	context?: number;
-};
-
 /** One host event, as much of it as the decision needs. */
 export type CompactionEvent = {
 	type: string;
 	data?: { sessionID?: unknown; tokens?: unknown };
 };
+
+/** A row the session has run, and the threshold its shares put it at. */
+type Weighed = { target: SessionTarget; threshold: number };
 
 /**
  * Decides when a conversation has filled its window and asks the host to
@@ -58,7 +57,7 @@ export type CompactionEvent = {
  */
 export function createCompactionController(input: {
 	db: Database;
-	resolve: (sessionID: string) => SessionTarget | undefined;
+	resolve: (sessionID: string) => SessionTarget[];
 	compact: (sessionID: string) => Promise<unknown>;
 	recordLog: (kind: "compact" | "error", text: string) => void;
 }) {
@@ -99,12 +98,23 @@ export function createCompactionController(input: {
 
 			// A session the balancer has never routed is somebody else's
 			// conversation, and its window is not the one we declared.
-			const target = input.resolve(sessionID);
-			if (!target) return false;
+			const targets = input.resolve(sessionID);
+			if (targets.length === 0) return false;
 
-			const threshold = thresholdFor(target);
+			// Every model the session has run, weighed, smallest first: a
+			// conversation that moves between models has to fit all of them, so
+			// the tightest window is the one that decides. Taking the newest
+			// instead let a wide model's window govern a narrow model's request.
+			const weighed: Weighed[] = targets
+				.map((target) => ({ target, threshold: thresholdFor(target) }))
+				.filter((entry) => entry.threshold > 0)
+				.sort((left, right) => left.threshold - right.threshold);
+			const tightest = weighed[0];
+			if (!tightest) return false;
+
+			const threshold = tightest.threshold;
 			const tokens = contextTokens(event.data?.tokens as TokenInfo | undefined);
-			if (threshold <= 0 || tokens < threshold) {
+			if (tokens < threshold) {
 				// Comfortably inside the window, which also means a compaction
 				// that was in flight has served its purpose as a guard.
 				inFlight.delete(sessionID);
@@ -115,7 +125,7 @@ export function createCompactionController(input: {
 			inFlight.add(sessionID);
 			input.recordLog(
 				"compact",
-				`${target.familyKey} reached ${tokens} of ${threshold} tokens; compacting`,
+				`${tightest.target.familyKey} reached ${tokens} of ${threshold} tokens; compacting`,
 			);
 			try {
 				await input.compact(sessionID);
@@ -151,7 +161,7 @@ export async function registerCompaction({
 		compact: (sessionID) => ctx.session.compact({ sessionID }),
 		db,
 		recordLog,
-		resolve: balancerTargetFor,
+		resolve: balancerTargetsFor,
 	});
 
 	void (async () => {

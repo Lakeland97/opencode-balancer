@@ -54,6 +54,19 @@ export function healthyAccountsInOrder(db: Database): Account[] {
 	return orderedAccounts(db).filter((account) => isHealthy(account));
 }
 
+/**
+ * Every switched-on credential, in the balancer's order, ignoring parks.
+ *
+ * This is the order a row falls back to when nothing healthy can answer it at
+ * all. A park is the balancer's own guess about the world, and with no other
+ * target in the row there is nothing the guess protects: an attempt is better
+ * than leaving the call pointed at the stub, which is only a transport failure
+ * the session cannot explain.
+ */
+export function enabledAccountsInOrder(db: Database): Account[] {
+	return orderedAccounts(db).filter((account) => !account.disabled);
+}
+
 export function hasAlternativeAccount(
 	db: Database,
 	providerID: string,

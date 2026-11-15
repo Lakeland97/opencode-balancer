@@ -43,7 +43,7 @@ function harness(db: Database, target: SessionTarget | undefined) {
 		},
 		db,
 		recordLog: (kind, text) => logs.push(`${kind}: ${text}`),
-		resolve: () => target,
+		resolve: () => (target ? [target] : []),
 	});
 	return {
 		compacted,
@@ -86,6 +86,38 @@ describe("when a conversation is compacted", () => {
 
 		expect(await handle(step("plain", { input: 5_000_000 }))).toBe(false);
 		expect(compacted).toEqual([]);
+	});
+
+	test("the tightest window of the models a session ran decides the cut", async () => {
+		const db = freshDb();
+		const compacted: string[] = [];
+		const logs: string[] = [];
+		const wide: SessionTarget = {
+			context: 1_000_000,
+			familyKey: "wide-1",
+			providerID: "p1",
+		};
+		const narrow: SessionTarget = {
+			context: 100_000,
+			familyKey: "narrow-1",
+			providerID: "q",
+		};
+		const controller = createCompactionController({
+			compact: async (sessionID) => {
+				compacted.push(sessionID);
+			},
+			db,
+			recordLog: (kind, text) => logs.push(`${kind}: ${text}`),
+			// Wide first, so this cannot pass by taking the newest or the first:
+			// the narrow window is what the conversation has to fit.
+			resolve: () => [wide, narrow],
+		});
+
+		// 100k is inside the wide row's 180k cut and past the narrow row's 80k,
+		// so nothing but the narrow window can explain compacting here.
+		expect(await controller.handle(step("s1", { input: 100_000 }))).toBe(true);
+		expect(compacted).toEqual(["s1"]);
+		expect(logs.some((line) => line.includes("narrow-1"))).toBe(true);
 	});
 
 	test("a step that reports no usage does not compact at nothing", async () => {
@@ -218,7 +250,7 @@ describe("one compaction per breach", () => {
 			},
 			db,
 			recordLog: (kind, text) => logs.push(`${kind}: ${text}`),
-			resolve: () => TARGET,
+			resolve: () => [TARGET],
 		});
 		const handle = (event: CompactionEvent) => controller.handle(event);
 
