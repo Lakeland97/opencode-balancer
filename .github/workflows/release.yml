@@ -4,6 +4,10 @@ on:
   push:
     branches:
       - main
+  # A release is worth asking for directly. Every push already runs this, but
+  # pushing a commit to get a release is a strange way to ask, and an empty
+  # commit to re-cut one leaves a line in the history that says nothing.
+  workflow_dispatch:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
