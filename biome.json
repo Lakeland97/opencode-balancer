@@ -14,7 +14,7 @@
 	},
 	"files": {
 		"ignoreUnknown": true,
-		"includes": ["**", "!bun.lock"]
+		"includes": ["**", "!bun.lock", "!.refact"]
 	},
 	"formatter": {
 		"enabled": true,
