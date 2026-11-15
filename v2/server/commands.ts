@@ -280,7 +280,7 @@ export async function runCommand({
 					live?.providerID === target.providerID &&
 					live.modelID === target.modelID
 				) {
-					marks.push("next");
+					marks.push("in use");
 				}
 				const account = selectHealthyAccount(db, target.providerID);
 				if (!account) marks.push("no healthy account");

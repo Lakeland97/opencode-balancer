@@ -120,6 +120,7 @@ export default Plugin.define({
 			free: "free",
 			globalShare: "global",
 			inUse: "in use",
+			limit: "limit",
 			limited: "limited",
 			logEmpty: "nothing yet",
 			models: "models",
@@ -131,7 +132,6 @@ export default Plugin.define({
 			providers: "providers",
 			refresh: "refresh",
 			reset: "reset",
-			targetHint: "compacts at the global share, or this model's own",
 			title: "Balancer",
 			use: "use",
 		},
@@ -805,6 +805,9 @@ export default Plugin.define({
 															    row: it applies wherever the request is
 															    served from, so it does not belong on a
 															    provider line or to any one of them. */}
+															<span style={{ opacity: 0.7 }}>
+																{ctx.t("limit")}
+															</span>
 															<input
 																onBlur={(event) => {
 																	const value = event.currentTarget.value;
@@ -862,17 +865,13 @@ export default Plugin.define({
 																						→ {target.resolved}
 																					</span>
 																				</Show>
-																				<Show when={target.state === "next"}>
-																					<span style={{ opacity: 0.6 }}>
-																						{" "}
-																						· next
-																					</span>
-																				</Show>
+																				{/* The target the balancer would send the
+																				    next request to — the model currently
+																				    selected for this row. Only one target
+																				    carries the mark; a healthy one that is
+																				    not it says nothing. */}
 																				<Show
-																					when={
-																						target.state !== "next" &&
-																						target.state !== "available"
-																					}
+																					when={target.state !== "available"}
 																				>
 																					<span style={{ opacity: 0.6 }}>
 																						{" "}
@@ -928,10 +927,6 @@ export default Plugin.define({
 																		</div>
 																	)}
 																</For>
-
-																<div style={{ opacity: 0.6 }}>
-																	{ctx.t("targetHint")}
-																</div>
 
 																<Show
 																	fallback={

@@ -116,13 +116,14 @@ as free when it is priced at zero or its id carries a `free` marker; unknown pri
 ```
 
 The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
-pickers, and a `reset` on any customised row. Each target carries a `%` field for the share of that
-model's own window at which it should be compacted, and names the model it will actually be sent to —
-the `-free` spelling where the credential that would serve is set to spend nothing. That stays on
+pickers, and a `reset` on any customised row. A target names the model it will actually be sent to —
+the `-free` spelling where the credential that would serve is set to spend nothing — and that stays on
 screen while the credential sits out a park, because what a row is set up to send does not change just
-because its key is briefly out of service; the row's own marker reports the park. Nested rows are
-indented one step per level — section, category, row, target — so a category reads as under the
-section, a row as under its category, and an expanded row's targets as inside it rather than beside it.
+because its key is briefly out of service. The **model's own** `limit` field sits on the row rather
+than on a target, because the limit follows the model: whichever credential answers, the conversation
+is cut at the same place. Nested rows are indented one step per level — section, category, row, target
+— so a category reads as under the section, a row as under its category, and an expanded row's targets
+as inside it rather than beside it.
 
 Routing is **sticky** per session: once a target answers, later requests stay on it while it is
 healthy. A failure moves forward to a credential this session has not tried since its last answer,
@@ -144,6 +145,11 @@ A credential row carries one of three markers. `active` means **the balancer can
 switched on and not sitting out a park. `in use` means it served the most recent request. `limited`
 means it failed and has not been tried since. Two keys on one provider are two rows, so both can read
 `active` — the marker is about whether that credential can serve, not about which one is next.
+
+Inside an expanded row the same words mark the **target** the balancer would send the next request to:
+the model currently selected for that row. That mark looks forward where the credential's looks back,
+and only one target ever carries it — the rest say nothing while healthy, and `limited` or
+`unavailable` when they are not.
 
 The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
 `models`, `diagnostics`, `log`. `diagnostics` carries the build stamp, when the values on screen were

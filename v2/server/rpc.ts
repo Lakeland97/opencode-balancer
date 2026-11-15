@@ -90,9 +90,10 @@ function targetState(
 	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
 		return "limited";
 	}
-	// A row's targets are labelled by what would serve next, not by what is
-	// serving: only one account is genuinely in use at a time.
-	return serving ? "next" : "available";
+	// A row's targets are labelled by what would serve the next request — the
+	// model currently selected for the row. Only one target carries it, and only
+	// one credential is genuinely in use at a time.
+	return serving ? "in use" : "available";
 }
 
 /**

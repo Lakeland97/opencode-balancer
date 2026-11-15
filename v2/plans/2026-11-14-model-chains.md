@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Five changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Six changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -95,6 +95,10 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   rule was before the choice existed, and a reserve is kept regardless at or past the model's window.
   The panel's limit field now shows the **cut** it works out to rather than the raw limit, which is the
   number that prompted all of this.
+- The panel says **`in use`** where it said `next`: the target that would serve the next request is the
+  model currently selected for the row, so one word does where two did. The per-model limit field gained
+  the label `limit`, which is what lets the bare `global` placeholder stand and the
+  `compacts at the global share, or this model's own` legend under every row's targets go.
 
 **Outstanding**
 
