@@ -136,6 +136,19 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   credential has not failed since it was last tried" says the marker. Worth settling
   before the marker is trusted for anything else.
 
+- **`compaction.keep.tokens` is a host knob the plugin cannot reach.** The value decides how much
+  recent history survives a compaction verbatim rather than folded into the summary; the host's
+  `SessionCompaction` service defaults it to 15000 tokens, reads it from config documents
+  (`compaction.keep.tokens`, aliased by `compaction.preserve_recent_tokens`) and re-applies it with
+  `configure({keep})` whenever config changes (`opencode.config.compaction`). Nothing in the plugin API
+  can set it: `experimental.config.update` accepts only `shell`, there is no config-contribution or
+  `configure` surface, and compaction is not an RPC. So an adjustable keep is only reachable two ways —
+  writing the key into the user's own config file (the file this plugin deliberately does not touch), or
+  taking the compaction over entirely through the `session.compaction` hook, where `result` may carry a
+  `summary` and `metadata.keepID` marks the boundary the host replays after (the same field the host
+  computes from `keep`). The second needs its own summarisation prompt and model call, so it is a
+  feature, not a field.
+
 **Tech Stack:** TypeScript, Bun (`bun:sqlite`, `bun:test`), SolidJS GUI bundle via Vite, OpenCode 2 plugin API (`@opencode/plugin`).
 
 **Spec:** `v2/design/model-chains.md`
