@@ -161,16 +161,20 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   detail that moves the trigger, not a control.
 - **Reordering is a drag, not a pair of arrows.** The credential rows and a row's targets carried `↑`/`↓`
   buttons — one step per press, two controls per row, for lists a person would rather drag. Each row now
-  has one grip: drag it onto the row whose place it should take, or focus it and press the arrow keys, so
-  nothing a keyboard could do is lost. The drop is unambiguous by construction rather than by luck —
-  credentials are one flat list in `accounts.position` order (the **models** list is the only grouped
-  one, and it is not reordered), and targets are a per-row ordered list — so a drop names a slot, not a
-  direction. `move` and `chainMove` now accept `to` as well as `direction`; `moveAccount` already took a
-  delta, and `moveTargetTo` (`core/chains.ts`) was split out of `moveTarget` so a target can leap several
-  places, with `shiftTargetTo` (`server/chain-actions.ts`) snapshotting an automatic row first exactly as
-  a step does. The pointer finds the row under it with `elementsFromPoint` and a `data-reorder` slot, so
-  the hit area follows the rows themselves rather than any DOM nesting. The grip is a `role="button"`
-  with `tabindex`, so focus and keyboard reordering survive the buttons going away.
+  has one grip, placed in a right-hand gutter rather than in the flow: absolutely positioned inside a
+  reserved `padding-right`, so a wrapping label cannot push it around and it sits in the same spot on every
+  row, after the row's own controls instead of between them. Drag it onto the row whose place it should
+  take, or focus it and press the arrow keys, so nothing a keyboard could do is lost.
+
+  The drop is unambiguous by construction rather than by luck — credentials are one flat list in
+  `accounts.position` order (the **models** list is the only grouped one, and it is not reordered), and
+  targets are a per-row ordered list — so a drop names a slot, not a direction. `move` and `chainMove` now
+  accept `to` as well as `direction`; `moveAccount` already took a delta, and `moveTargetTo`
+  (`core/chains.ts`) was split out of `moveTarget` so a target can leap several places, with
+  `shiftTargetTo` (`server/chain-actions.ts`) snapshotting an automatic row first exactly as a step does.
+  The pointer finds the row under it with `elementsFromPoint` and a `data-reorder` slot, so the hit area
+  follows the rows themselves rather than any DOM nesting. The grip is a `role="button"` with `tabindex`,
+  so focus and keyboard reordering survive the buttons going away.
 
 **Outstanding**
 

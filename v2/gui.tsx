@@ -439,6 +439,16 @@ export default Plugin.define({
 			}
 			return undefined;
 		};
+		// A reorderable row keeps a gutter at its right edge, so the grip is in the
+		// same place on every row instead of wherever a wrapping label leaves it.
+		const grabbableRow = {
+			...row,
+			"padding-right": "1.4em",
+			position: "relative",
+		} as const;
+		// The grip lives in that gutter rather than in the flow: it cannot be
+		// pushed around by the label beside it, and it always reads as the row's
+		// own handle rather than as a control between two others.
 		const gripStyle = {
 			background: "none",
 			border: 0,
@@ -448,17 +458,24 @@ export default Plugin.define({
 			"line-height": 1,
 			opacity: 0.45,
 			padding: "0 2px",
+			position: "absolute",
+			right: 0,
+			top: "50%",
+			transform: "translateY(-50%)",
 			"user-select": "none",
 		} as const;
 		/** The row a drag would land on, and the row being dragged. */
 		const rowWhileDragging = (list: string, index: number) => {
 			const current = dragging();
-			if (!current || current.list !== list) return row;
-			if (current.from === index) return { ...row, opacity: 0.55 };
+			if (!current || current.list !== list) return grabbableRow;
+			if (current.from === index) return { ...grabbableRow, opacity: 0.55 };
 			if (current.to === index) {
-				return { ...row, "box-shadow": "inset 0 2px 0 currentColor" };
+				return {
+					...grabbableRow,
+					"box-shadow": "inset 0 2px 0 currentColor",
+				};
 			}
-			return row;
+			return grabbableRow;
 		};
 		const grip = (input: {
 			list: string;
