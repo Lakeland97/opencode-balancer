@@ -30,10 +30,12 @@ import {
 import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
 import {
 	formatDuration,
+	getRebalanceAuto,
 	parseDuration,
 	readRebalance,
 	rebalanceAfterMs,
 	setRebalance,
+	setRebalanceAuto,
 } from "../core/rebalance";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
@@ -329,6 +331,10 @@ export async function registerBalancerRpc({
 		},
 
 		rebalance: async () => ({
+			// Whether idleness drops a trail at all, and the length it would drop
+			// it after. The length is reported even when the switch is off, so the
+			// field keeps showing what turning the switch back on would restore.
+			auto: getRebalanceAuto(db),
 			// As typed, empty when it has never been set: the field's placeholder
 			// then shows the built-in default rather than pretending it was typed.
 			value: readRebalance(db) ?? "",
@@ -472,6 +478,13 @@ export async function registerBalancerRpc({
 			const parsed = parseDuration(value);
 			if (!parsed.ok) return { message: parsed.error, ok: false };
 			setRebalance(db, value);
+			// The field is authoritative over the switch in both directions: a
+			// length of zero is the window being turned off, and any positive
+			// length is it being turned back on. Otherwise the same field would
+			// mean two things depending on which way it was last typed, and a
+			// length typed while the switch read "off" would do nothing visible.
+			const shut = parsed.ms !== undefined && parsed.ms <= 0;
+			setRebalanceAuto(db, !shut);
 			const ms = rebalanceAfterMs(db);
 			recordLog(
 				"config",
@@ -484,6 +497,42 @@ export async function registerBalancerRpc({
 					ms > 0
 						? `A session starts over from the head after ${formatDuration(ms)} idle.`
 						: "A trail no longer goes stale on its own; only a change to the order starts it over.",
+				ok: true,
+			};
+		},
+
+		setRebalanceAuto: async (input) => {
+			const { enabled } = input as { enabled: boolean };
+			if (!enabled) {
+				setRebalanceAuto(db, false);
+				recordLog(
+					"config",
+					"rebalance window off; a trail never goes stale on its own",
+				);
+				return {
+					message:
+						"A trail no longer goes stale on its own; only a change to the order starts it over.",
+					ok: true,
+				};
+			}
+			// Switching it on has to mean something: a stored zero would leave the
+			// toggle on and the window still shut, so that length is cleared and
+			// the built-in one comes back. Any other length is the user's and stays.
+			const stored = readRebalance(db);
+			const storedWindow =
+				stored === undefined ? undefined : parseDuration(stored);
+			if (
+				storedWindow?.ok &&
+				storedWindow.ms !== undefined &&
+				storedWindow.ms <= 0
+			) {
+				setRebalance(db, "");
+			}
+			setRebalanceAuto(db, true);
+			const ms = rebalanceAfterMs(db);
+			recordLog("config", `rebalance after ${formatDuration(ms)} idle`);
+			return {
+				message: `A session starts over from the head after ${formatDuration(ms)} idle.`,
 				ok: true,
 			};
 		},

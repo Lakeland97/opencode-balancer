@@ -135,11 +135,13 @@ That trail is not honoured forever. It is dropped once the session has sat **idl
 and the order starts again from the head — measured from the last routed request, not from a clock, so
 a session that keeps talking never reaches it however long it runs. Provider quotas refill on a
 five-hour window, so by then the credentials this session had already tried are worth trying first
-again. The window is set on the panel line under the title: `rebalance after idle`. It takes a number
-and a unit — `90m`, `5h`, `1d 2h` — while `0`, `never` or `off` switches it off, so only a change to
-the order starts a session over, and an empty field keeps the built-in five hours. What is *not*
-dropped is a park — that is the provider's own clock and expires on its own schedule, so a call is
-never sent back to something still limited.
+again. The panel line under the title is `rebalance after`: the toggle says whether idleness drops a
+trail at all, and the field beside it says after how long. The field takes a number and a unit —
+`90m`, `5h`, `1d 2h` — and an empty field keeps the built-in five hours; typing `0`, `never` or `off`
+is the switch being turned off, and typing any length again turns it back on, so the two controls
+never disagree about the same row. With it off, nothing ages a trail out by itself and only a change
+to the order starts a session over. What is *not* dropped is a park — that is the provider's own
+clock and expires on its own schedule, so a call is never sent back to something still limited.
 
 Changing the order — picking a credential, reordering one, switching one on or off, editing a chain,
 turning balancing back on — starts every session over at once, not after the current trail expires.
@@ -163,9 +165,10 @@ and only one target ever carries it — the rest say nothing while healthy, and 
 `unavailable` when they are not.
 
 The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
-`models`, `diagnostics`, `log`. Under the title row sits the idle window, `rebalance after idle`, then
-the `context limit` field. `diagnostics` carries the build stamp, when the values on screen were
-last read in full, what is loaded, and the `refresh` button — the plumbing, kept off the name line.
+`models`, `diagnostics`, `log`. Under the title row sits `rebalance after` — the switch for the idle
+window and the field for its length — then the `context limit` field. `diagnostics` carries the build
+stamp, when the values on screen were last read in full, what is loaded, and the `refresh` button —
+the plumbing, kept off the name line.
 
 A `log` at the bottom records what the balancer actually did during this run: which model went to
 which provider and account, every parking with its reason, and each config change. It is folded away

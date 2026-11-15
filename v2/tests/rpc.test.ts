@@ -604,18 +604,75 @@ describe("context limit rpc", () => {
 });
 
 describe("rebalance rpc", () => {
-	test("the window reads as unset until it is typed, and empty restores it", async () => {
+	test("the window reads as unset and switched on until it is typed", async () => {
 		const rpc = await handlers(freshDb());
-		expect(await rpc.rebalance({})).toEqual({ value: "" });
+		// On until it is turned off, so an install that never touched the field
+		// keeps the behaviour it had before the switch existed.
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
 
 		const set = (await rpc.setRebalance({ value: "2h" })) as { ok: boolean };
 		expect(set.ok).toBe(true);
-		expect(await rpc.rebalance({})).toEqual({ value: "2h" });
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "2h" });
 
 		// Clearing the field puts the built-in window back, so the panel's
 		// placeholder is what describes the behaviour again.
 		await rpc.setRebalance({ value: "" });
-		expect(await rpc.rebalance({})).toEqual({ value: "" });
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
+	});
+
+	test("the switch keeps the length, so turning it back on restores it", async () => {
+		const rpc = await handlers(freshDb());
+		await rpc.setRebalance({ value: "90m" });
+
+		const off = (await rpc.setRebalanceAuto({ enabled: false })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(off.ok).toBe(true);
+		expect(off.message).toContain("change to the order");
+		// The length is still reported with the switch off: that is what the
+		// field shows and what turning the switch back on would restore.
+		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "90m" });
+
+		const on = (await rpc.setRebalanceAuto({ enabled: true })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(on.ok).toBe(true);
+		expect(on.message).toContain("90m");
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "90m" });
+	});
+
+	test("typing a length and the switch always agree, both ways", async () => {
+		const rpc = await handlers(freshDb());
+		await rpc.setRebalance({ value: "0" });
+		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "0" });
+
+		// A positive length is the window being switched back on: the field and
+		// the switch must not be able to say different things about the same row.
+		for (const value of ["2h", "never", "off", "90m"]) {
+			await rpc.setRebalance({ value });
+			const shut = value === "never" || value === "off";
+			expect(await rpc.rebalance({})).toEqual({
+				auto: !shut,
+				value,
+			});
+		}
+	});
+
+	test("switching on over a stored zero brings the built-in window back", async () => {
+		const rpc = await handlers(freshDb());
+		await rpc.setRebalance({ value: "0" });
+
+		// On with the window still shut would be a switch that does nothing, so
+		// the zero is cleared and the default comes back.
+		const on = (await rpc.setRebalanceAuto({ enabled: true })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(on.ok).toBe(true);
+		expect(on.message).toContain("5h");
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
 	});
 
 	test("what is not a duration is refused and changes nothing", async () => {
@@ -630,7 +687,7 @@ describe("rebalance rpc", () => {
 			expect(refused.ok).toBe(false);
 			expect(refused.message.length).toBeGreaterThan(0);
 		}
-		expect(await rpc.rebalance({})).toEqual({ value: "90m" });
+		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "90m" });
 	});
 
 	test("switching the window off says so, in words that match", async () => {
@@ -641,6 +698,6 @@ describe("rebalance rpc", () => {
 		};
 		expect(off.ok).toBe(true);
 		expect(off.message).toContain("change to the order");
-		expect(await rpc.rebalance({})).toEqual({ value: "0" });
+		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "0" });
 	});
 });

@@ -101,15 +101,19 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   `compacts at the global share, or this model's own` legend under every row's targets go.
 - **The idle window is adjustable, and a change to the order starts every session over.** The five-hour
   trail window is now `rebalance_after` (`core/rebalance.ts`), set from the panel line under the title:
-  a number and a unit (`90m`, `5h`, `1d 2h`), with `0`/`never`/`off` switching it off and an empty field
-  keeping the built-in five hours. A bare number is refused because the neighbouring fields read one as
-  thousands of tokens. Every routing change — `use`, `move`, `setEnabled`, `setFreeOnly`, all four chain
-  edits, and turning balancing back on — now calls `forgetRoutingMemory()`: it drops each session's trail
-  and pin (and the balancer slot, not the per-provider ones the compaction watcher reads) so the next
-  request re-derives its route from the order as it now stands, and the window restarts from that
-  request. A pick also clears that credential's park, so it serves on the very next request; a reorder
-  does not, because the park is the provider's own clock. This is what makes "if the user selects 3 it
-  should try 4 in the next round" true rather than waiting for the old trail to expire.
+  `rebalance after` is a toggle for whether idleness drops a trail at all (`rebalance_auto`), and the
+  field beside it is the length — a number and a unit (`90m`, `5h`, `1d 2h`), with an empty field
+  keeping the built-in five hours. The two controls are kept in agreement: typing `0`/`never`/`off` is
+  the switch going off (and the length is kept, so switching back on restores it), any length typed
+  turns it back on, and switching on over a stored zero clears it so the switch cannot sit on with the
+  window still shut. A bare number is refused because the neighbouring fields read one as thousands of
+  tokens. Every routing change — `use`, `move`, `setEnabled`, `setFreeOnly`, all four chain edits, and
+  turning balancing back on — now calls `forgetRoutingMemory()`: it drops each session's trail and pin
+  (and the balancer slot, not the per-provider ones the compaction watcher reads) so the next request
+  re-derives its route from the order as it now stands, and the window restarts from that request. A
+  pick also clears that credential's park, so it serves on the very next request; a reorder does not,
+  because the park is the provider's own clock. This is what makes "if the user selects 3 it should try
+  4 in the next round" true rather than waiting for the old trail to expire.
 
 **Outstanding**
 

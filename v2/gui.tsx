@@ -43,7 +43,7 @@ type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
 type ContextState = { value: string };
 type BufferState = { enforce: string; value: string };
-type RebalanceState = { value: string };
+type RebalanceState = { auto: boolean; value: string };
 
 type Target = {
 	modelID: string;
@@ -132,7 +132,7 @@ export default Plugin.define({
 			pickProvider: "pick a provider first",
 			provider: "provider",
 			providers: "providers",
-			rebalance: "rebalance after idle",
+			rebalance: "rebalance after",
 			refresh: "refresh",
 			reset: "reset",
 			title: "Balancer",
@@ -154,9 +154,11 @@ export default Plugin.define({
 		const [bufferDraft, setBufferDraft] = createSignal("");
 		const [bufferEnforce, setBufferEnforce] = createSignal("always");
 		// How long a session may sit idle before its failover trail is dropped
-		// and the order starts again from the head, as typed: `90m`, `5h`,
-		// `0` for never. Empty means the built-in window.
+		// and the order starts again from the head, as typed: `90m`, `5h`.
+		// Empty means the built-in window. The toggle above the field says
+		// whether the clock runs at all; the field says how long.
 		const [rebalance, setRebalance] = createSignal("");
+		const [rebalanceAuto, setRebalanceAuto] = createSignal(true);
 		const [rebalanceDraft, setRebalanceDraft] = createSignal("");
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
@@ -213,6 +215,7 @@ export default Plugin.define({
 						: "always",
 				);
 				setRebalance((idle as RebalanceState).value);
+				setRebalanceAuto((idle as RebalanceState).auto);
 				setRebalanceDraft((idle as RebalanceState).value);
 				setLastRefreshed(Date.now());
 			} catch (error) {
@@ -460,18 +463,29 @@ export default Plugin.define({
 						</label>
 					</div>
 
-					{/* The window is measured from the last routed request, so it is
-					    idleness that ages a trail out, not elapsed time: a session
-					    that keeps talking never reaches it. Labelled for what it
-					    measures, because a field holding only a time would promise a
-					    rolling clock the balancer does not run. */}
+					{/* The switch and the length are separate controls on purpose: the
+					    toggle says whether idleness drops a trail at all, the field
+					    says after how long. The clock is measured from the last
+					    routed request, so it is idleness that ages a trail out, not
+					    elapsed time — a session that keeps talking never reaches it. */}
 					<div style={row}>
-						<span
-							style={{ opacity: 0.7 }}
-							title="how long a session may sit idle before its failover trail is dropped and the order starts again from the head. The clock restarts on every routed request, so a session that keeps talking never reaches it; a change to the order — a pick, a reorder, a switch, a chain edit — starts it over at once. A number and a unit: 90m, 5h, 1d 2h. 0 switches the window off, so only a change to the order starts a session over. Empty keeps the built-in 5h."
+						<label
+							style={{ display: "flex", gap: "4px" }}
+							title="drop a session's failover trail once it has sat idle for the time beside this, so the order starts again from the head. Off means nothing ages a trail out by itself; only a change to the order — a pick, a reorder, a switch, a chain edit — starts a session over."
 						>
+							<input
+								checked={rebalanceAuto()}
+								onChange={(event) =>
+									void run(() =>
+										rpc().setRebalanceAuto({
+											enabled: event.currentTarget.checked,
+										}),
+									)
+								}
+								type="checkbox"
+							/>
 							{ctx.t("rebalance")}
-						</span>
+						</label>
 						<input
 							onBlur={commitRebalance}
 							onInput={(event) => setRebalanceDraft(event.currentTarget.value)}
@@ -480,7 +494,7 @@ export default Plugin.define({
 							}}
 							placeholder={formatDuration(DEFAULT_REBALANCE_MS)}
 							style={{ width: "4.5em" }}
-							title="how long a session may sit idle before its failover trail is dropped: 90m, 5h, 1d 2h; 0 switches the window off; empty keeps the built-in 5h"
+							title="how long a session may sit idle before its failover trail is dropped: 90m, 5h, 1d 2h; empty keeps the built-in 5h. 0 turns the switch off, and any length typed here turns it back on."
 							value={rebalanceDraft()}
 						/>
 					</div>

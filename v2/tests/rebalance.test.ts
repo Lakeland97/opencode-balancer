@@ -4,10 +4,12 @@ import { describe, expect, test } from "bun:test";
 import {
 	DEFAULT_REBALANCE_MS,
 	formatDuration,
+	getRebalanceAuto,
 	parseDuration,
 	readRebalance,
 	rebalanceAfterMs,
 	setRebalance,
+	setRebalanceAuto,
 } from "../core/rebalance";
 import { migrate } from "../core/schema";
 
@@ -106,5 +108,37 @@ describe("the stored window", () => {
 		const db = freshDb();
 		setRebalance(db, "2 hors");
 		expect(rebalanceAfterMs(db)).toBe(DEFAULT_REBALANCE_MS);
+	});
+});
+
+describe("the switch that turns the window off", () => {
+	test("it reads as on until it is turned off", () => {
+		const db = freshDb();
+		expect(getRebalanceAuto(db)).toBe(true);
+		setRebalanceAuto(db, false);
+		expect(getRebalanceAuto(db)).toBe(false);
+		setRebalanceAuto(db, true);
+		expect(getRebalanceAuto(db)).toBe(true);
+	});
+
+	test("off is zero however long the field says", () => {
+		const db = freshDb();
+		setRebalance(db, "2h");
+		expect(rebalanceAfterMs(db)).toBe(2 * 3_600_000);
+		setRebalanceAuto(db, false);
+		expect(rebalanceAfterMs(db)).toBe(0);
+		// The length is kept, so turning the switch back on restores the window
+		// the user set rather than a default nobody chose.
+		setRebalanceAuto(db, true);
+		expect(rebalanceAfterMs(db)).toBe(2 * 3_600_000);
+	});
+
+	test("a stored zero is off once the switch is on again", () => {
+		// The RPC clears a zero before enabling, but a settings table edited by
+		// hand must not be able to read as on and behave as off.
+		const db = freshDb();
+		setRebalance(db, "0");
+		setRebalanceAuto(db, true);
+		expect(rebalanceAfterMs(db)).toBe(0);
 	});
 });

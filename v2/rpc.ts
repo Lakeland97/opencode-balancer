@@ -208,9 +208,9 @@ export const balancerDefinition = {
 		},
 		rebalance: {
 			input: empty,
-			// How long a session's balance may sit idle before it starts over, as
-			// the user typed it; empty means the built-in window.
-			output: object({ value: str }, ["value"]),
+			// Whether idleness drops a session's trail at all, and the length it
+			// would drop it after, as the user typed it; empty means the built-in.
+			output: object({ auto: bool, value: str }, ["auto", "value"]),
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),
@@ -250,6 +250,10 @@ export const balancerDefinition = {
 		},
 		setRebalance: {
 			input: object({ value: str }, ["value"]),
+			output: result,
+		},
+		setRebalanceAuto: {
+			input: object({ enabled: bool }, ["enabled"]),
 			output: result,
 		},
 		status: {

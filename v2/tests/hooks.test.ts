@@ -10,7 +10,7 @@ import {
 } from "../core/accounts";
 import { listEvents } from "../core/events";
 import { setBalancingEnabled } from "../core/priority";
-import { setRebalance } from "../core/rebalance";
+import { setRebalance, setRebalanceAuto } from "../core/rebalance";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
 import { invalidateCatalog } from "../server/connectors";
@@ -447,7 +447,11 @@ describe("a balance that has gone stale", () => {
 	test("a window switched off keeps the trail however long the session waits", async () => {
 		const start = Date.now();
 		const { db, registry } = await twoProviders();
-		setRebalance(db, "0");
+		// A length is set as well as the switch turned off, so this can only pass
+		// if the switch is what gates the clock: the length alone would age the
+		// trail out long before ten hours are up.
+		setRebalance(db, "2h");
+		setRebalanceAuto(db, false);
 		await failOverFromTheHead(registry, "window-off");
 
 		// Ten hours idle: past any quota window, and past the built-in default

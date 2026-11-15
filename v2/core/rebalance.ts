@@ -13,6 +13,7 @@ import type { Database } from "bun:sqlite";
 export const DEFAULT_REBALANCE_MS = 5 * 60 * 60_000;
 
 const rebalanceKey = "rebalance_after";
+const autoKey = "rebalance_auto";
 
 const UNITS: Record<string, number> = {
 	d: 24 * 60 * 60_000,
@@ -80,11 +81,34 @@ export function setRebalance(db: Database, value: string): void {
 }
 
 /**
- * The idle window in milliseconds. `0` means a trail never goes stale on its own.
- * Anything unreadable falls back to the default rather than to an accidental
- * "never": a typo must not pin a session to one trail for good.
+ * Whether idleness drops a trail at all. Unset reads as on, which is what every
+ * version before the switch did.
+ */
+export function getRebalanceAuto(db: Database): boolean {
+	const row = db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(autoKey);
+	return row?.value !== "0";
+}
+
+export function setRebalanceAuto(db: Database, enabled: boolean): void {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(autoKey, enabled ? "1" : "0");
+}
+
+/**
+ * The idle window in milliseconds. `0` means a trail never goes stale on its own,
+ * which is also what the switch being off says: the length is kept beside it, so
+ * turning the switch back on restores the window that was set rather than a
+ * default nobody chose. Anything unreadable falls back to the default rather than
+ * to an accidental "never": a typo must not pin a session to one trail for good.
  */
 export function rebalanceAfterMs(db: Database): number {
+	if (!getRebalanceAuto(db)) return 0;
 	const text = readRebalance(db);
 	if (text === undefined) return DEFAULT_REBALANCE_MS;
 	const parsed = parseDuration(text);
