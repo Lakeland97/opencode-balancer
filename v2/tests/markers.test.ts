@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 
 import {
+	clearAccountPark,
 	ensureActiveAlias,
 	getAccount,
 	getActiveAccount,
@@ -11,6 +12,7 @@ import {
 	moveAccount,
 	orderedAccounts,
 	readLimitedReason,
+	readLimitedUntil,
 	removeAccount,
 	saveAccount,
 	setAccountEnabled,
@@ -19,6 +21,7 @@ import {
 } from "../core/accounts";
 import { migrateProviderSettings, providerOrder } from "../core/priority";
 import { migrate } from "../core/schema";
+import { now } from "../core/time";
 import { invalidateCatalog } from "../server/connectors";
 import {
 	errorRetryAfterMs,
@@ -197,6 +200,69 @@ describe("account markers", () => {
 		);
 		expect(cleared?.limited).toBe(false);
 		expect(cleared?.limitedReason).toBe("");
+	});
+
+	test("a refill the endpoint named is reported with the park", async () => {
+		const db = freshDb();
+		const at = now();
+		// The words go through the same path the retry hook uses, so this is the
+		// whole journey: prose in, an instant out, and the raw words beside it.
+		markRateLimited(
+			db,
+			"p1",
+			"a",
+			60_000,
+			"You've used today's free messages. They reset at 11:27 AM.",
+		);
+
+		const rpc = await handlers(db);
+		const listed = (await rpc.list({})) as {
+			accounts: {
+				alias: string;
+				limited: boolean;
+				limitedReason: string;
+				limitedUntil: number;
+				providerID: string;
+			}[];
+		};
+		const account = listed.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "a",
+		);
+		expect(account?.limited).toBe(true);
+		expect(account?.limitedUntil).toBeGreaterThan(at);
+
+		// A credential that is not parked has no refill to show, whatever was
+		// recorded for it last time.
+		const other = listed.accounts.find(
+			(entry) => entry.providerID === "p1" && entry.alias === "b",
+		);
+		expect(other?.limited).toBe(false);
+		expect(other?.limitedUntil).toBe(0);
+	});
+
+	test("a refill time never outlives the words it was read from", () => {
+		const db = freshDb();
+		markRateLimited(db, "p1", "a", 60_000, "resets in 12d 23h");
+		expect(readLimitedUntil(db, "p1", "a")).toBeGreaterThan(now());
+
+		// Whatever clears the park clears the time with it, on both paths.
+		markAccountUsed(db, "p1", "a");
+		expect(readLimitedUntil(db, "p1", "a")).toBeUndefined();
+
+		markRateLimited(db, "p1", "a", 60_000, "resets in 12d 23h");
+		clearAccountPark(db, "p1", "a");
+		expect(readLimitedUntil(db, "p1", "a")).toBeUndefined();
+	});
+
+	test("a park that names no time does not inherit the last one's", () => {
+		const db = freshDb();
+		markRateLimited(db, "p1", "a", 60_000, "resets in 12d 23h");
+		expect(readLimitedUntil(db, "p1", "a")).toBeGreaterThan(now());
+
+		// A later 429 with only a Retry-After in it: the endpoint said nothing
+		// about its quota, so a date carried over would be a claim it never made.
+		markRateLimited(db, "p1", "a", 60_000, "HTTP 429 Too Many Requests");
+		expect(readLimitedUntil(db, "p1", "a")).toBeUndefined();
 	});
 
 	test("a park with no recorded reason says so rather than showing nothing", async () => {

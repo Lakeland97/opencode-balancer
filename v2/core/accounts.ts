@@ -38,6 +38,7 @@ export function markAccountUsed(
 		"UPDATE accounts SET last_used_at = ?, rate_limited_until = NULL WHERE provider_id = ? AND alias = ?",
 	).run(at, providerID, alias);
 	clearLimitedReason(db, providerID, alias);
+	clearLimitedUntil(db, providerID, alias);
 }
 
 /**
@@ -55,6 +56,7 @@ export function clearAccountPark(
 		"UPDATE accounts SET rate_limited_until = NULL WHERE provider_id = ? AND alias = ?",
 	).run(providerID, alias);
 	clearLimitedReason(db, providerID, alias);
+	clearLimitedUntil(db, providerID, alias);
 }
 
 /** Where the reason an account was parked is kept, next to the other settings. */
@@ -99,6 +101,51 @@ export function clearLimitedReason(
 ) {
 	db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(
 		limitedReasonKey(providerID, alias),
+	);
+}
+
+/**
+ * Where the instant a provider named for its refill is kept, beside the reason
+ * it was read out of. The two are written and cleared together, so a time can
+ * never outlive the words that justified it.
+ */
+function limitedUntilKey(providerID: string, alias: string) {
+	return `limited_until:${providerID}:${alias}`;
+}
+
+export function setLimitedUntil(
+	db: Database,
+	providerID: string,
+	alias: string,
+	at: number,
+) {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(limitedUntilKey(providerID, alias), String(Math.round(at)));
+}
+
+export function readLimitedUntil(
+	db: Database,
+	providerID: string,
+	alias: string,
+): number | undefined {
+	const row = db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(limitedUntilKey(providerID, alias));
+	const at = Number(row?.value);
+	return row === null || !Number.isFinite(at) ? undefined : at;
+}
+
+export function clearLimitedUntil(
+	db: Database,
+	providerID: string,
+	alias: string,
+) {
+	db.query<unknown, [string]>("DELETE FROM settings WHERE key = ?").run(
+		limitedUntilKey(providerID, alias),
 	);
 }
 

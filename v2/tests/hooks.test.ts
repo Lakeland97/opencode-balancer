@@ -5,6 +5,7 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	getAccount,
 	readLimitedReason,
+	readLimitedUntil,
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
@@ -126,6 +127,30 @@ describe("http.response hook", () => {
 		const account = getAccount(db, PROVIDER, "primary");
 		expect(account?.rateLimitedUntil).toBeGreaterThan(before);
 		expect(account?.failures).toBe(1);
+	});
+
+	test("a refusal that names its reset leaves the instant for the panel", async () => {
+		const { db, registry } = await setup();
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		setBalancingEnabled(db, true);
+
+		const event = requestEvent("response-quota", newRequest());
+		await registry["http.request"](event);
+		const at = now();
+		// The host's typed quota error carries the words; they are what the panel
+		// turns into a time, and this is the hook where they first arrive.
+		await registry.retry({
+			...retryEvent("response-quota", { delay: 1_000, retry: false }),
+			error: {
+				message: "usage limit reached; resets in 12d 23h",
+				retryAfterMs: 60_000,
+			},
+		});
+
+		expect(readLimitedUntil(db, PROVIDER, "primary")).toBeGreaterThan(
+			at + 12 * 24 * 60 * 60_000,
+		);
+		expect(readLimitedReason(db, PROVIDER, "primary")).toContain("12d");
 	});
 
 	test("leaves accounts untouched on 200", async () => {

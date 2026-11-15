@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Seven changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Eight changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -114,6 +114,16 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   pick also clears that credential's park, so it serves on the very next request; a reorder does not,
   because the park is the provider's own clock. This is what makes "if the user selects 3 it should try
   4 in the next round" true rather than waiting for the old trail to expire.
+- **A park can say when the provider said its quota returns.** `core/rollover.ts` reads the instant out
+  of the refusal in the shapes the log has carried — `resets in 12d 23h`, `resets at
+  2026-11-14T14:21:16.768Z`, and a bare clock time such as `They reset at 11:27 AM.` — and the credential
+  row shows it on a subline under the marker (`resets 14:21`, `resets Nov 26 14:21`). It is read in
+  `markRateLimited`, from the whole message before the reason is cut to 300 characters, and stored beside
+  the reason as `limited_until:<provider>:<alias>`, so the two are cleared together by `markAccountUsed`
+  or `clearAccountPark`. Deliberately **evidence, not policy**: the park is still capped at an hour
+  (`MAX_PARK_MS`) and the marker still clears on the next attempt, so the subline is worded from the
+  provider's side, a refill already in the past or a year out is refused, and a plain 429 whose only
+  window was a `Retry-After` header gets no subline rather than inheriting an older failure's date.
 
 **Outstanding**
 
@@ -123,11 +133,13 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   have no handler. A credential is therefore only discovered to be exhausted when it
   fails: reactive, never predictive.
 - **A long limit is parked for an hour at most.** `MAX_PARK_MS` in `server/hooks.ts` caps
-  every park at 1 h, and nothing parses the window a provider states in prose
-  (`resets at 11:27 AM` is only a keyword in `RETRYABLE_TEXT`). A monthly-exhausted
-  credential is retried hourly for the rest of the month, and each attempt is what clears
-  its own `limited` marker. Honouring a stated reset, or scaling the cap, is an open
-  design decision — how long to trust a park — not a bug to fix silently.
+  every park at 1 h. A monthly-exhausted credential is retried hourly for the rest of the month,
+  and each attempt is what clears its own `limited` marker. The window a provider states in prose
+  *is* read now — `core/rollover.ts` turns it into an instant the panel shows as a subline beside
+  `limited` — but that reading is evidence on screen only: it does not lengthen the park.
+  Honouring a stated reset, or scaling the cap, remains an open design decision — how long to
+  trust a park — not a bug to fix silently. If it is ever honoured, the subline already provides
+  the number it would need.
 - **The two RPC sections disagree about an expired park.** `list` calls a credential
   `limited`, and so not `active`, whenever `rate_limited_until` is set, on the reasoning
   that a park is cleared by the next attempt rather than the clock (`server/rpc.ts:244`);

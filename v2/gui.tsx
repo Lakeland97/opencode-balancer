@@ -21,6 +21,7 @@ import {
 } from "./core/context";
 import { groupByBrand } from "./core/models";
 import { DEFAULT_REBALANCE_MS, formatDuration } from "./core/rebalance";
+import { formatRollover } from "./core/rollover";
 import { Balancer } from "./rpc";
 
 type LogEntry = { at: number; kind: string; text: string };
@@ -35,6 +36,8 @@ type Account = {
 	limited: boolean;
 	/** What the endpoint reported when it parked this account. */
 	limitedReason?: string;
+	/** When the endpoint said its own quota returns, in ms; 0 when it did not say. */
+	limitedUntil: number;
 	failures: number;
 };
 
@@ -135,6 +138,7 @@ export default Plugin.define({
 			rebalance: "rebalance after",
 			refresh: "refresh",
 			reset: "reset",
+			resets: "resets",
 			title: "Balancer",
 			use: "use",
 		},
@@ -401,6 +405,15 @@ export default Plugin.define({
 			}) as const;
 		// Narrow panels must wrap instead of pushing controls off the edge.
 		const field = { flex: "1 1 120px", "min-width": 0 } as const;
+		// A subline that belongs to the row above it without being part of it: a
+		// full-width basis forces the new line, and the step matches the fold
+		// button so it reads as inside the credential's own block.
+		const subline = {
+			"flex-basis": "100%",
+			"font-size": "12px",
+			opacity: 0.7,
+			"padding-left": "1.4em",
+		} as const;
 		// A hairline between segments, drawn in the text colour so it follows
 		// the theme rather than assuming a light or dark background.
 		const divider = {
@@ -421,6 +434,14 @@ export default Plugin.define({
 				),
 				entry,
 			}));
+
+		// The refill the endpoint named, when it named one. A park with no words,
+		// or words with no time in them, has nothing to put on the subline, so
+		// this stays undefined rather than inventing a moment.
+		const rollover = (account?: Account) =>
+			account?.limited && account.limitedUntil > 0
+				? account.limitedUntil
+				: undefined;
 
 		const View = () => {
 			onMount(() => {
@@ -725,6 +746,22 @@ export default Plugin.define({
 								>
 									{ctx.t("use")}
 								</button>
+								{/* The instant the endpoint named for its own refill, which
+								    is not when this marker clears: the marker is cleared by
+								    the next attempt, so the two say different things and the
+								    line is worded from the provider's side to keep that
+								    clear. A park we decided on (a retry-after) has no refill
+								    time to show and gets no subline. */}
+								<Show when={rollover(item.account)}>
+									{(until) => (
+										<div
+											style={subline}
+											title={`the endpoint said its quota returns at this time; the marker above still clears as soon as this credential is tried again${item.account?.limitedReason ? ` — it said: ${item.account.limitedReason}` : ""}`}
+										>
+											{`${ctx.t("resets")} ${formatRollover(until(), Date.now())}`}
+										</div>
+									)}
+								</Show>
 							</div>
 						)}
 					</For>

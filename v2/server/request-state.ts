@@ -1,5 +1,11 @@
 import type { Database } from "bun:sqlite";
-import { getAccount, setLimitedReason } from "../core/accounts";
+import {
+	clearLimitedUntil,
+	getAccount,
+	setLimitedReason,
+	setLimitedUntil,
+} from "../core/accounts";
+import { parseRollover } from "../core/rollover";
 import { now } from "../core/time";
 
 /**
@@ -159,8 +165,19 @@ export function markRateLimited(
 	const account = getAccount(db, providerID, alias);
 	if (!account) return;
 
-	if (reason) setLimitedReason(db, providerID, alias, reason);
 	const timestamp = now();
+	if (reason) {
+		setLimitedReason(db, providerID, alias, reason);
+		// The instant is read from the whole message, before the reason is cut
+		// down to what a tooltip can hold, and replaced with whatever this
+		// failure said: a later park that names nothing must not inherit the
+		// previous one's time.
+		clearLimitedUntil(db, providerID, alias);
+		const until = parseRollover(reason, timestamp);
+		if (until !== undefined) {
+			setLimitedUntil(db, providerID, alias, until);
+		}
+	}
 	if (account.rateLimitedUntil && account.rateLimitedUntil > timestamp) return;
 
 	db.query<unknown, [number, number, string, string]>(

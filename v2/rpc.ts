@@ -65,6 +65,8 @@ const account = object(
 		limited: bool,
 		/** What the endpoint said when it parked the account, empty when fine. */
 		limitedReason: str,
+		/** When the endpoint said its quota returns, in ms; 0 when it did not say. */
+		limitedUntil: num,
 		providerID: str,
 	},
 	["providerID", "alias", "active", "disabled", "limited", "failures"],

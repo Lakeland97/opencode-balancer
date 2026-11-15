@@ -8,6 +8,7 @@ import {
 	moveAccount,
 	orderedAccounts,
 	readLimitedReason,
+	readLimitedUntil,
 	setAccountEnabled,
 	setAccountFreeOnly,
 	useAccount,
@@ -281,6 +282,13 @@ export async function registerBalancerRpc({
 								// better than a marker that explains nothing.
 								"no reason was recorded for this park"
 							: "",
+						// When the provider said its own quota comes back, in
+						// milliseconds, or 0 when it did not say. Evidence from the
+						// endpoint, not this park's expiry: the marker is still
+						// cleared by the next attempt rather than by this clock.
+						limitedUntil: limited
+							? (readLimitedUntil(db, account.providerID, account.alias) ?? 0)
+							: 0,
 						providerID: account.providerID,
 					};
 				}),

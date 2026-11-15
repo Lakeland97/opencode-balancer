@@ -154,6 +154,17 @@ applies now, and the session then walks forward from it as it would have on its 
 attempt, or by picking the credential again, not by a clock. Hovering the marker shows what the
 endpoint actually reported: the HTTP status, or the host's typed error when it raised one.
 
+When the endpoint names a time for its own refill, that goes on a subline under the row — `resets
+14:21`, or `resets Nov 26 14:21` when it is not today. It is read out of the provider's words, which
+arrive in the shapes the log has actually carried: `resets in 12d 23h`, `resets at
+2026-11-14T14:21:16.768Z`, and a plain clock time such as `They reset at 11:27 AM.` A time with no date
+is the next time that clock comes round; a time already past, or a year out, is refused rather than
+shown. This is evidence, not a promise: the marker still clears the moment the credential is tried
+again, so the two lines say different things and the subline is worded from the provider's side. A
+park with no words in it — a plain `429` with only a `Retry-After` header — gets no subline, because
+the endpoint said nothing about its quota and a date carried over from an older failure would be a
+claim it never made.
+
 A credential row carries one of three markers. `active` means **the balancer can send here**: it is
 switched on and not sitting out a park. `in use` means it served the most recent request. `limited`
 means it failed and has not been tried since. Two keys on one provider are two rows, so both can read
