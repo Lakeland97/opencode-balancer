@@ -166,9 +166,11 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   row, after the row's own controls instead of between them. Drag it onto the row whose place it should
   take, or focus it and press the arrow keys, so nothing a keyboard could do is lost.
 
-  A credential row's own switches — `free` and `use` — are pulled into that same right-hand cluster and
-  divided from the label by a hairline, so the row reads as the credential on the left and what you can do
-  to it on the right; the cluster ends at the padding edge, which leaves the grip immediately beside it.
+  A credential row is two lines. The first is who it is — the checkbox, the name, and its markers. The
+  second is what you can do to it: the provider's own words on the left (the refill it named, then the
+  error it threw), a hairline, `free` and `use`, and the grip at the far right in its own gutter. Narrow
+  windows used to produce that shape only by wrapping; it is now the row itself, so a long provider error
+  has somewhere to sit instead of being reachable only by hovering `limited`.
 
   The drop is unambiguous by construction rather than by luck — credentials are one flat list in
   `accounts.position` order (the **models** list is the only grouped one, and it is not reordered), and
@@ -180,6 +182,14 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   follows the rows themselves rather than any DOM nesting. The grip is a `role="button"` with `tabindex`,
   so focus and keyboard reordering survive the buttons going away.
 
+  The panel's controls got the same treatment in the same pass. Every button is enclosed — a
+  `currentColor` border, a radius and padding — so it reads as something to press rather than as a word
+  that happens to react to a click; the two dropdowns that carry their own width keep it through a
+  spread. Each `select` sits in a small wrapper with a `▾` of its own, because the host's native arrow is
+  faint here and the arrow is what says a list opens. Section titles are fold controls too: `models`, a
+  brand header and a model's label open or close their section when clicked, while the chevron buttons
+  stay for the keyboard.
+
 **Outstanding**
 
 - **No proactive awareness of a spent credential.** `usage_snapshots` exists in the schema
@@ -190,8 +200,9 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
 - **A long limit is parked for an hour at most.** `MAX_PARK_MS` in `server/hooks.ts` caps
   every park at 1 h. A monthly-exhausted credential is retried hourly for the rest of the month,
   and each attempt is what clears its own `limited` marker. The window a provider states in prose
-  *is* read now — `core/rollover.ts` turns it into an instant the panel shows as a subline beside
-  `limited` — but that reading is evidence on screen only: it does not lengthen the park.
+  *is* read now — `core/rollover.ts` turns it into an instant the panel shows on the credential's
+  control line, beside the switches — but that reading is evidence on screen only: it does not lengthen
+  the park.
   Honouring a stated reset, or scaling the cap, remains an open design decision — how long to
   trust a park — not a bug to fix silently. If it is ever honoured, the subline already provides
   the number it would need.

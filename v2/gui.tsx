@@ -405,14 +405,55 @@ export default Plugin.define({
 			}) as const;
 		// Narrow panels must wrap instead of pushing controls off the edge.
 		const field = { flex: "1 1 120px", "min-width": 0 } as const;
-		// A subline that belongs to the row above it without being part of it: a
-		// full-width basis forces the new line, and the step matches the fold
-		// button so it reads as inside the credential's own block.
-		const subline = {
-			"flex-basis": "100%",
-			"font-size": "12px",
-			opacity: 0.7,
-			"padding-left": "1.4em",
+		// Every button is enclosed, so it reads as something to press rather than as
+		// a word that happens to react to a click. The frame is `currentColor`, so it
+		// follows the host's theme instead of assuming light or dark.
+		const button = {
+			background: "none",
+			border: "1px solid currentColor",
+			"border-radius": "4px",
+			color: "inherit",
+			cursor: "pointer",
+			"font-family": "inherit",
+			"font-size": "inherit",
+			"line-height": "1.3",
+			padding: "0 6px",
+		} as const;
+		// A select gets the same frame, with its own chevron: the host's native arrow
+		// is faint in this panel, and the arrow is the thing that says "a list opens".
+		const selectWrap = {
+			display: "inline-flex",
+			position: "relative",
+		} as const;
+		const select = {
+			appearance: "none",
+			background: "none",
+			border: "1px solid currentColor",
+			"border-radius": "4px",
+			color: "inherit",
+			cursor: "pointer",
+			flex: "1 1 auto",
+			"font-family": "inherit",
+			"font-size": "inherit",
+			"line-height": "1.3",
+			"min-width": 0,
+			padding: "0 1.5em 0 6px",
+		} as const;
+		const selectArrow = {
+			"font-size": "1.1em",
+			"line-height": 1,
+			"pointer-events": "none",
+			position: "absolute",
+			right: "5px",
+			top: "50%",
+			transform: "translateY(-50%)",
+		} as const;
+		// A section title is itself a fold control: the little chevron stays for
+		// the keyboard, but the word beside it is what a pointer aims at, so the
+		// whole header opens the section instead of only the arrow.
+		const titleToggle = {
+			cursor: "pointer",
+			"user-select": "none",
 		} as const;
 		// A hairline between segments, drawn in the text colour so it follows
 		// the theme rather than assuming a light or dark background.
@@ -464,6 +505,33 @@ export default Plugin.define({
 			transform: "translateY(-50%)",
 			"user-select": "none",
 		} as const;
+		// A credential row is two lines: who it is, then what you can do to it.
+		// The second line carries the provider's own words on the left, so a
+		// failure is readable without hovering the marker.
+		const stackRow = {
+			"align-items": "stretch",
+			display: "flex",
+			"flex-direction": "column",
+			gap: "2px",
+		} as const;
+		// That second line reserves the grip's gutter itself, so the handle sits
+		// level with the switches rather than between the two lines.
+		const controlLine = {
+			"align-items": "center",
+			display: "flex",
+			gap: "6px",
+			"padding-right": "1.4em",
+			position: "relative",
+		} as const;
+		const detail = {
+			flex: "1 1 auto",
+			"font-size": "12px",
+			"min-width": 0,
+			opacity: 0.7,
+			overflow: "hidden",
+			"text-overflow": "ellipsis",
+			"white-space": "nowrap",
+		} as const;
 		// The row's own switches, pulled together at its right edge beside the grip
 		// and divided from the label by a hairline: a row reads as "this credential"
 		// on the left and "what you can do to it" on the right.
@@ -481,17 +549,21 @@ export default Plugin.define({
 			width: 0,
 		} as const;
 		/** The row a drag would land on, and the row being dragged. */
-		const rowWhileDragging = (list: string, index: number) => {
+		const rowWhileDragging = (
+			list: string,
+			index: number,
+			base: typeof grabbableRow | typeof stackRow = grabbableRow,
+		) => {
 			const current = dragging();
-			if (!current || current.list !== list) return grabbableRow;
-			if (current.from === index) return { ...grabbableRow, opacity: 0.55 };
+			if (!current || current.list !== list) return base;
+			if (current.from === index) return { ...base, opacity: 0.55 };
 			if (current.to === index) {
 				return {
-					...grabbableRow,
+					...base,
 					"box-shadow": "inset 0 2px 0 currentColor",
 				};
 			}
-			return grabbableRow;
+			return base;
 		};
 		const grip = (input: {
 			list: string;
@@ -553,12 +625,26 @@ export default Plugin.define({
 			}));
 
 		// The refill the endpoint named, when it named one. A park with no words,
-		// or words with no time in them, has nothing to put on the subline, so
-		// this stays undefined rather than inventing a moment.
+		// or words with no time in them, has nothing to say, so this stays
+		// undefined rather than inventing a moment.
 		const rollover = (account?: Account) =>
 			account?.limited && account.limitedUntil > 0
 				? account.limitedUntil
 				: undefined;
+
+		// What the control line says, left of the switches: the refill the
+		// endpoint named and the provider's own words when it refused. The marker
+		// above clears on the next attempt, so this reports the last attempt
+		// rather than predicting the next one.
+		const rowNote = (account?: Account) => {
+			if (!account?.limited) return undefined;
+			const until = rollover(account);
+			const parts = [
+				until ? `${ctx.t("resets")} ${formatRollover(until, Date.now())}` : "",
+				account.limitedReason ?? "",
+			].filter((part) => part.length > 0);
+			return parts.length > 0 ? parts.join(" · ") : undefined;
+		};
 
 		const View = () => {
 			onMount(() => {
@@ -583,7 +669,12 @@ export default Plugin.define({
 					<div style={row}>
 						<strong>{ctx.t("title")}</strong>
 						<label
-							style={{ display: "flex", gap: "4px", "margin-left": "auto" }}
+							style={{
+								"align-items": "center",
+								display: "flex",
+								gap: "4px",
+								"margin-left": "auto",
+							}}
 							title="route each request across the providers automatically. Off leaves every request on the credential OpenCode itself picked, so the balancer only reports."
 						>
 							<input
@@ -608,7 +699,7 @@ export default Plugin.define({
 					    elapsed time — a session that keeps talking never reaches it. */}
 					<div style={row}>
 						<label
-							style={{ display: "flex", gap: "4px" }}
+							style={{ "align-items": "center", display: "flex", gap: "4px" }}
 							title="drop a session's failover trail once it has sat idle for the time beside this, so the order starts again from the head. Off means nothing ages a trail out by itself; only a change to the order — a pick, a reorder, a switch, a chain edit — starts a session over."
 						>
 							<input
@@ -731,21 +822,24 @@ export default Plugin.define({
 							>
 								{ctx.t("enforce")}
 							</span>
-							<select
-								onChange={(event) =>
-									void run(() =>
-										rpc().setBufferEnforce({
-											value: event.currentTarget.value,
-										}),
-									)
-								}
-								style={{ "font-size": "inherit", width: "10.5em" }}
-								title="when the buffer is enforced: always takes it off every cut, when necessary only where the limit has reached what the model can hold"
-								value={bufferEnforce()}
-							>
-								<option value="always">{ctx.t("always")}</option>
-								<option value="necessary">{ctx.t("necessary")}</option>
-							</select>
+							<span style={selectWrap}>
+								<select
+									onChange={(event) =>
+										void run(() =>
+											rpc().setBufferEnforce({
+												value: event.currentTarget.value,
+											}),
+										)
+									}
+									style={{ ...select, width: "10.5em" }}
+									title="when the buffer is enforced: always takes it off every cut, when necessary only where the limit has reached what the model can hold"
+									value={bufferEnforce()}
+								>
+									<option value="always">{ctx.t("always")}</option>
+									<option value="necessary">{ctx.t("necessary")}</option>
+								</select>
+								<span style={selectArrow}>▾</span>
+							</span>
 						</span>
 					</div>
 
@@ -766,10 +860,14 @@ export default Plugin.define({
 							<div
 								data-reorder="providers"
 								data-reorder-index={index()}
-								style={rowWhileDragging("providers", index())}
+								style={rowWhileDragging("providers", index(), stackRow)}
 							>
 								<label
-									style={{ display: "flex", gap: "4px" }}
+									style={{
+										"align-items": "center",
+										display: "flex",
+										gap: "4px",
+									}}
 									title="route to this credential; a disabled one is never chosen"
 								>
 									<input
@@ -805,77 +903,76 @@ export default Plugin.define({
 										</Show>
 									</span>
 								</label>
-								<span style={controls}>
-									<span style={rule} />
-									<label
-										style={{ display: "flex", gap: "4px" }}
-										title="use only this credential's free models"
-									>
-										<input
-											checked={item.entry.freeOnly}
-											onChange={(event) =>
+								<div style={controlLine}>
+									<Show when={rowNote(item.account)}>
+										{(note) => (
+											<span style={detail} title={note()}>
+												{note()}
+											</span>
+										)}
+									</Show>
+									<span style={controls}>
+										<span style={rule} />
+										<label
+											style={{
+												"align-items": "center",
+												display: "flex",
+												gap: "4px",
+											}}
+											title="use only this credential's free models"
+										>
+											<input
+												checked={item.entry.freeOnly}
+												onChange={(event) =>
+													void run(() =>
+														rpc().setFreeOnly({
+															alias: item.entry.alias,
+															enabled: event.currentTarget.checked,
+															providerID: item.entry.providerID,
+														}),
+													)
+												}
+												type="checkbox"
+											/>
+											{ctx.t("free")}
+										</label>
+										<button
+											onClick={() =>
 												void run(() =>
-													rpc().setFreeOnly({
+													rpc().use({
 														alias: item.entry.alias,
-														enabled: event.currentTarget.checked,
 														providerID: item.entry.providerID,
 													}),
 												)
 											}
-											type="checkbox"
-										/>
-										{ctx.t("free")}
-									</label>
-									<button
-										onClick={() =>
-											void run(() =>
-												rpc().use({
-													alias: item.entry.alias,
-													providerID: item.entry.providerID,
-												}),
-											)
-										}
-										title="serve this provider with this credential; picking a parked one clears its cooldown"
-									>
-										{ctx.t("use")}
-									</button>
-								</span>
-								{/* The instant the endpoint named for its own refill, which
-								    is not when this marker clears: the marker is cleared by
-								    the next attempt, so the two say different things and the
-								    line is worded from the provider's side to keep that
-								    clear. A park we decided on (a retry-after) has no refill
-								    time to show and gets no subline. */}
-								<Show when={rollover(item.account)}>
-									{(until) => (
-										<div
-											style={subline}
-											title={`the endpoint said its quota returns at this time; the marker above still clears as soon as this credential is tried again${item.account?.limitedReason ? ` — it said: ${item.account.limitedReason}` : ""}`}
+											style={button}
+											title="serve this provider with this credential; picking a parked one clears its cooldown"
 										>
-											{`${ctx.t("resets")} ${formatRollover(until(), Date.now())}`}
-										</div>
-									)}
-								</Show>
-								{/* Last in the row and out of its flow: the grip sits in the
+											{ctx.t("use")}
+										</button>
+									</span>
+
+									{/* Last in the row and out of its flow: the grip sits in the
 								    reserved right-hand gutter, and the final tab stop is the
 								    handle rather than a control that acts on the credential. */}
-								<span
-									{...grip({
-										count: providerEntries().length,
-										index: index(),
-										list: "providers",
-										move: (to) =>
-											void run(() =>
-												rpc().move({
-													alias: item.entry.alias,
-													providerID: item.entry.providerID,
-													to,
-												}),
-											),
-									})}
-								>
-									⠿
-								</span>
+									<span
+										{...grip({
+											count: providerEntries().length,
+											index: index(),
+											list: "providers",
+											move: (to) =>
+												void run(() =>
+													rpc().move({
+														alias: item.entry.alias,
+														providerID: item.entry.providerID,
+														to,
+													}),
+												),
+										})}
+									>
+										⠿
+									</span>
+								</div>
 							</div>
 						)}
 					</For>
@@ -885,24 +982,31 @@ export default Plugin.define({
 					<div style={{ ...row, "margin-top": "4px" }}>
 						<button
 							onClick={() => setModelsOpen(!modelsOpen())}
-							style={{ "min-width": "1.4em" }}
+							style={{ ...button, "min-width": "1.4em" }}
 							title={modelsOpen() ? ctx.t("collapse") : ctx.t("expand")}
 						>
 							{modelsOpen() ? "▾" : "▸"}
 						</button>
-						<strong>{ctx.t("models")}</strong>
+						<strong
+							onClick={() => setModelsOpen(!modelsOpen())}
+							style={titleToggle}
+							title={modelsOpen() ? ctx.t("collapse") : ctx.t("expand")}
+						>
+							{ctx.t("models")}
+						</strong>
 						<button
 							onClick={() => {
 								setCreating(!creating());
 								setCreateProvider("");
 								setCreateModels([]);
 							}}
-							style={{ "margin-left": "auto" }}
+							style={{ ...button, "margin-left": "auto" }}
 						>
 							+ {ctx.t("newChain")}
 						</button>
 						<button
 							onClick={toggleAll}
+							style={button}
 							title={allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
 						>
 							{allCollapsed() ? ctx.t("expand") : ctx.t("collapse")}
@@ -912,39 +1016,45 @@ export default Plugin.define({
 					<Show when={modelsOpen()}>
 						<Show when={creating()}>
 							<div style={row}>
-								<select
-									onChange={(event) =>
-										void chooseCreateProvider(event.currentTarget.value)
-									}
-									style={field}
-									value={createProvider()}
-								>
-									<option value="">provider</option>
-									<For each={providers()}>
-										{(entry) => (
-											<option value={entry.providerID}>{entry.name}</option>
-										)}
-									</For>
-								</select>
-								<select
-									onChange={(event) =>
-										void run(() =>
-											rpc().chainCreate({
-												modelID: event.currentTarget.value,
-												providerID: createProvider(),
-											}),
-										).then(() => setCreating(false))
-									}
-									style={field}
-									value=""
-								>
-									<option value="">model</option>
-									<For each={createModels()}>
-										{(model) => (
-											<option value={model.modelID}>{model.name}</option>
-										)}
-									</For>
-								</select>
+								<span style={{ ...field, ...selectWrap }}>
+									<select
+										onChange={(event) =>
+											void chooseCreateProvider(event.currentTarget.value)
+										}
+										style={select}
+										value={createProvider()}
+									>
+										<option value="">provider</option>
+										<For each={providers()}>
+											{(entry) => (
+												<option value={entry.providerID}>{entry.name}</option>
+											)}
+										</For>
+									</select>
+									<span style={selectArrow}>▾</span>
+								</span>
+								<span style={{ ...field, ...selectWrap }}>
+									<select
+										onChange={(event) =>
+											void run(() =>
+												rpc().chainCreate({
+													modelID: event.currentTarget.value,
+													providerID: createProvider(),
+												}),
+											).then(() => setCreating(false))
+										}
+										style={select}
+										value=""
+									>
+										<option value="">model</option>
+										<For each={createModels()}>
+											{(model) => (
+												<option value={model.modelID}>{model.name}</option>
+											)}
+										</For>
+									</select>
+									<span style={selectArrow}>▾</span>
+								</span>
 							</div>
 						</Show>
 
@@ -958,7 +1068,7 @@ export default Plugin.define({
 										<div style={{ ...row, "margin-top": "4px" }}>
 											<button
 												onClick={() => toggleGroup(group.brand ?? "")}
-												style={{ "min-width": "1.4em" }}
+												style={{ ...button, "min-width": "1.4em" }}
 												title={
 													isGroupCollapsed(group.brand ?? "")
 														? ctx.t("expand")
@@ -967,7 +1077,17 @@ export default Plugin.define({
 											>
 												{isGroupCollapsed(group.brand ?? "") ? "▸" : "▾"}
 											</button>
-											<strong>{group.brand}</strong>
+											<strong
+												onClick={() => toggleGroup(group.brand ?? "")}
+												style={titleToggle}
+												title={
+													isGroupCollapsed(group.brand ?? "")
+														? ctx.t("expand")
+														: ctx.t("collapse")
+												}
+											>
+												{group.brand}
+											</strong>
 											<span style={{ opacity: 0.6 }}>{group.rows.length}</span>
 										</div>
 									</Show>
@@ -987,7 +1107,7 @@ export default Plugin.define({
 														<div style={row}>
 															<button
 																onClick={() => toggleCollapsed(chain.key)}
-																style={{ "min-width": "1.4em" }}
+																style={{ ...button, "min-width": "1.4em" }}
 																title={
 																	isCollapsed(chain.key) ? "expand" : "collapse"
 																}
@@ -995,11 +1115,18 @@ export default Plugin.define({
 																{isCollapsed(chain.key) ? "▸" : "▾"}
 															</button>
 															<span
+																onClick={() => toggleCollapsed(chain.key)}
 																style={{
+																	...titleToggle,
 																	flex: "1 1 140px",
 																	"min-width": 0,
 																	"overflow-wrap": "anywhere",
 																}}
+																title={
+																	isCollapsed(chain.key)
+																		? ctx.t("expand")
+																		: ctx.t("collapse")
+																}
 															>
 																{chain.label}
 															</span>
@@ -1040,6 +1167,7 @@ export default Plugin.define({
 																			rpc().chainReset({ key: chain.key }),
 																		)
 																	}
+																	style={button}
 																>
 																	{ctx.t("reset")}
 																</button>
@@ -1118,6 +1246,7 @@ export default Plugin.define({
 																						}),
 																					)
 																				}
+																				style={button}
 																				title="remove target"
 																			>
 																				×
@@ -1133,6 +1262,7 @@ export default Plugin.define({
 																				addableProviders(chain).length === 0
 																			}
 																			onClick={() => void startAdd(chain.key)}
+																			style={button}
 																			title={
 																				addableProviders(chain).length === 0
 																					? ctx.t("everyProviderUsed")
@@ -1150,7 +1280,10 @@ export default Plugin.define({
 																				<span style={{ opacity: 0.6 }}>
 																					{ctx.t("everyProviderUsed")}
 																				</span>
-																				<button onClick={() => setAdding("")}>
+																				<button
+																					onClick={() => setAdding("")}
+																					style={button}
+																				>
 																					cancel
 																				</button>
 																			</div>
@@ -1158,58 +1291,67 @@ export default Plugin.define({
 																		when={addableProviders(chain).length > 0}
 																	>
 																		<div style={row}>
-																			<select
-																				onChange={(event) =>
-																					void chooseProvider(
-																						event.currentTarget.value,
-																					)
-																				}
-																				style={field}
-																				value={addProvider()}
+																			<span style={{ ...field, ...selectWrap }}>
+																				<select
+																					onChange={(event) =>
+																						void chooseProvider(
+																							event.currentTarget.value,
+																						)
+																					}
+																					style={select}
+																					value={addProvider()}
+																				>
+																					<option value="">provider</option>
+																					<For each={addableProviders(chain)}>
+																						{(entry) => (
+																							<option value={entry.providerID}>
+																								{entry.name}
+																							</option>
+																						)}
+																					</For>
+																				</select>
+																				<span style={selectArrow}>▾</span>
+																			</span>
+																			<span style={{ ...field, ...selectWrap }}>
+																				<select
+																					disabled={!addProvider()}
+																					onChange={(event) =>
+																						void (async () => {
+																							await run(() =>
+																								rpc().chainAdd({
+																									key: chain.key,
+																									modelID:
+																										event.currentTarget.value,
+																									providerID: addProvider(),
+																								}),
+																							);
+																							setAdding("");
+																						})()
+																					}
+																					style={select}
+																					value=""
+																				>
+																					<option value="">
+																						{addProvider()
+																							? addModels().length > 0
+																								? "model"
+																								: "no models to add"
+																							: ctx.t("pickProvider")}
+																					</option>
+																					<For each={addModels()}>
+																						{(model) => (
+																							<option value={model.modelID}>
+																								{model.name}
+																							</option>
+																						)}
+																					</For>
+																				</select>
+																				<span style={selectArrow}>▾</span>
+																			</span>
+																			<button
+																				onClick={() => setAdding("")}
+																				style={button}
 																			>
-																				<option value="">provider</option>
-																				<For each={addableProviders(chain)}>
-																					{(entry) => (
-																						<option value={entry.providerID}>
-																							{entry.name}
-																						</option>
-																					)}
-																				</For>
-																			</select>
-																			<select
-																				disabled={!addProvider()}
-																				onChange={(event) =>
-																					void (async () => {
-																						await run(() =>
-																							rpc().chainAdd({
-																								key: chain.key,
-																								modelID:
-																									event.currentTarget.value,
-																								providerID: addProvider(),
-																							}),
-																						);
-																						setAdding("");
-																					})()
-																				}
-																				style={field}
-																				value=""
-																			>
-																				<option value="">
-																					{addProvider()
-																						? addModels().length > 0
-																							? "model"
-																							: "no models to add"
-																						: ctx.t("pickProvider")}
-																				</option>
-																				<For each={addModels()}>
-																					{(model) => (
-																						<option value={model.modelID}>
-																							{model.name}
-																						</option>
-																					)}
-																				</For>
-																			</select>
-																			<button onClick={() => setAdding("")}>
 																				cancel
 																			</button>
 																		</div>
@@ -1233,13 +1375,13 @@ export default Plugin.define({
 					    was read, and what the balancer has done this run. Folded away
 					    so the top of the panel is the state, not the tools. */}
 					<div style={{ ...row, "align-items": "center" }}>
-						<button onClick={() => setDiagOpen(!diagOpen())}>
+						<button onClick={() => setDiagOpen(!diagOpen())} style={button}>
 							{diagOpen() ? "▾" : "▸"} {ctx.t("diagnostics")}
 						</button>
 						<span style={{ opacity: 0.5 }}>{logEntries().length}</span>
 						<button
 							onClick={() => void refresh()}
-							style={{ "margin-left": "auto" }}
+							style={{ ...button, "margin-left": "auto" }}
 							title="re-read every value on this panel from the balancer"
 						>
 							{ctx.t("refresh")}
@@ -1287,7 +1429,7 @@ export default Plugin.define({
 							<Show when={logEntries().length > 0}>
 								<button
 									onClick={() => void run(() => rpc().clearLog({}))}
-									style={{ "align-self": "flex-start" }}
+									style={{ ...button, "align-self": "flex-start" }}
 								>
 									{ctx.t("clear")}
 								</button>
