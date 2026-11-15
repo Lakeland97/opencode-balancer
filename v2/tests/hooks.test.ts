@@ -10,11 +10,17 @@ import {
 } from "../core/accounts";
 import { listEvents } from "../core/events";
 import { setBalancingEnabled } from "../core/priority";
+import { setRebalance } from "../core/rebalance";
 import { migrate } from "../core/schema";
 import { now } from "../core/time";
 import { invalidateCatalog } from "../server/connectors";
-import { balancerTargetFor, registerHooks } from "../server/hooks";
+import {
+	balancerTargetFor,
+	forgetRoutingMemory,
+	registerHooks,
+} from "../server/hooks";
 import { markRateLimited } from "../server/request-state";
+import { registerBalancerRpc } from "../server/rpc";
 
 const PROVIDER = "anthropic";
 const MODEL = { id: "claude-test", providerID: PROVIDER };
@@ -330,6 +336,15 @@ describe("a balance that has gone stale", () => {
 		});
 		const ctx = {
 			model: { list: async () => ({ data: [offered("p1"), offered("p2")] }) },
+			rpc: {
+				register: async (
+					_definition: unknown,
+					registered: Record<string, unknown>,
+				) => ({
+					...registered,
+					events: { emit: async () => {} },
+				}),
+			},
 			session: {
 				hook: async (name: string, callback: HookCallback) => {
 					registry[name] = callback;
@@ -342,7 +357,7 @@ describe("a balance that has gone stale", () => {
 		setBalancingEnabled(db, true);
 		invalidateCatalog();
 		await registerHooks({ ctx: ctx as unknown as Context, db });
-		return { db, registry };
+		return { ctx: ctx as unknown as Context, db, registry };
 	}
 
 	/** Serve from the head, then fail it: the trail now says "use p2". */
@@ -405,5 +420,102 @@ describe("a balance that has gone stale", () => {
 		} finally {
 			setSystemTime();
 		}
+	});
+
+	test("a change to the order starts every session over at once", async () => {
+		const start = Date.now();
+		const { registry } = await twoProviders();
+		await failOverFromTheHead(registry, "order-change");
+
+		// p1's park has expired here but the trail has not: without the reset this
+		// session would answer on p2 for another hour. Dropping the trail and the
+		// pin makes the next request derive its route from the order as it now
+		// stands. The park itself is left alone — it is the provider's clock, not
+		// our memory — which is why the head can serve again only once that
+		// expires.
+		setSystemTime(start + FIVE_HOURS - 60_000);
+		try {
+			forgetRoutingMemory();
+			const event = request("order-change");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-1");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a window switched off keeps the trail however long the session waits", async () => {
+		const start = Date.now();
+		const { db, registry } = await twoProviders();
+		setRebalance(db, "0");
+		await failOverFromTheHead(registry, "window-off");
+
+		// Ten hours idle: past any quota window, and past the built-in default
+		// twice over. Off means nothing but a change to the order clears a trail.
+		setSystemTime(start + 10 * 60 * 60_000);
+		try {
+			const event = request("window-off");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-2");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a wider window holds the trail past the built-in default", async () => {
+		const start = Date.now();
+		const { db, registry } = await twoProviders();
+		setRebalance(db, "10h");
+		await failOverFromTheHead(registry, "wide-window");
+
+		// Six hours: past the built-in five, inside the ten that were asked for.
+		setSystemTime(start + 6 * 60 * 60_000);
+		try {
+			const event = request("wide-window");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-2");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a narrower window goes stale sooner than the built-in default", async () => {
+		const start = Date.now();
+		const { db, registry } = await twoProviders();
+		setRebalance(db, "2h");
+		await failOverFromTheHead(registry, "narrow-window");
+
+		// Three hours: inside the built-in five, past the two that were asked for,
+		// and p1's park expired long ago, so only the trail could explain p2.
+		setSystemTime(start + 3 * 60 * 60_000);
+		try {
+			const event = request("narrow-window");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-1");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a pick serves on the very next request", async () => {
+		const { ctx, db, registry } = await twoProviders();
+		await failOverFromTheHead(registry, "picked");
+
+		// The pick is the retry a park waits for: it clears p1's park, drops the
+		// trail that named p2, and restarts the window from now. So the next
+		// request goes to p1 with no clock movement at all — which is what makes
+		// selecting a credential feel like it did something.
+		const rpc = (await registerBalancerRpc({ ctx, db })) as unknown as Record<
+			string,
+			(input: unknown) => Promise<unknown>
+		>;
+		const picked = (await rpc.use({ alias: "a", providerID: "p1" })) as {
+			ok: boolean;
+		};
+		expect(picked.ok).toBe(true);
+
+		const event = request("picked");
+		await registry["model.request"](event);
+		expect(event.headers.authorization).toBe("Bearer sk-1");
 	});
 });

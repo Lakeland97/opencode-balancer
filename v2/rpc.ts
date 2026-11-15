@@ -206,6 +206,12 @@ export const balancerDefinition = {
 				["entries"],
 			),
 		},
+		rebalance: {
+			input: empty,
+			// How long a session's balance may sit idle before it starts over, as
+			// the user typed it; empty means the built-in window.
+			output: object({ value: str }, ["value"]),
+		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),
 			output: result,
@@ -240,6 +246,10 @@ export const balancerDefinition = {
 		},
 		setModelLimit: {
 			input: object({ key: str, value: str }, ["key", "value"]),
+			output: result,
+		},
+		setRebalance: {
+			input: object({ value: str }, ["value"]),
 			output: result,
 		},
 		status: {

@@ -20,6 +20,7 @@ import {
 	parseLimit,
 } from "./core/context";
 import { groupByBrand } from "./core/models";
+import { DEFAULT_REBALANCE_MS, formatDuration } from "./core/rebalance";
 import { Balancer } from "./rpc";
 
 type LogEntry = { at: number; kind: string; text: string };
@@ -42,6 +43,7 @@ type Listed = { accounts: Account[] };
 type Reply = { ok: boolean; message: string };
 type ContextState = { value: string };
 type BufferState = { enforce: string; value: string };
+type RebalanceState = { value: string };
 
 type Target = {
 	modelID: string;
@@ -130,6 +132,7 @@ export default Plugin.define({
 			pickProvider: "pick a provider first",
 			provider: "provider",
 			providers: "providers",
+			rebalance: "rebalance after idle",
 			refresh: "refresh",
 			reset: "reset",
 			title: "Balancer",
@@ -150,6 +153,11 @@ export default Plugin.define({
 		const [buffer, setBuffer] = createSignal("");
 		const [bufferDraft, setBufferDraft] = createSignal("");
 		const [bufferEnforce, setBufferEnforce] = createSignal("always");
+		// How long a session may sit idle before its failover trail is dropped
+		// and the order starts again from the head, as typed: `90m`, `5h`,
+		// `0` for never. Empty means the built-in window.
+		const [rebalance, setRebalance] = createSignal("");
+		const [rebalanceDraft, setRebalanceDraft] = createSignal("");
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		const [providers, setProviders] = createSignal<Provider[]>([]);
@@ -179,7 +187,7 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order, settings, room, log] =
+				const [status, list, rows, order, settings, room, idle, log] =
 					await Promise.all([
 						rpc.status({}),
 						rpc.list({}),
@@ -187,6 +195,7 @@ export default Plugin.define({
 						rpc.priority({}),
 						rpc.contextLimit({}),
 						rpc.contextBuffer({}),
+						rpc.rebalance({}),
 						rpc.log({}),
 					]);
 				setBalancing((status as Status).balancing);
@@ -203,6 +212,8 @@ export default Plugin.define({
 						? "necessary"
 						: "always",
 				);
+				setRebalance((idle as RebalanceState).value);
+				setRebalanceDraft((idle as RebalanceState).value);
 				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
@@ -274,6 +285,11 @@ export default Plugin.define({
 		const commitBuffer = () => {
 			if (bufferDraft() === buffer()) return;
 			void run(() => rpc().setContextBuffer({ value: bufferDraft() }));
+		};
+
+		const commitRebalance = () => {
+			if (rebalanceDraft() === rebalance()) return;
+			void run(() => rpc().setRebalance({ value: rebalanceDraft() }));
 		};
 
 		const startAdd = async (key: string) => {
@@ -442,6 +458,31 @@ export default Plugin.define({
 							/>
 							{ctx.t("balancing")}
 						</label>
+					</div>
+
+					{/* The window is measured from the last routed request, so it is
+					    idleness that ages a trail out, not elapsed time: a session
+					    that keeps talking never reaches it. Labelled for what it
+					    measures, because a field holding only a time would promise a
+					    rolling clock the balancer does not run. */}
+					<div style={row}>
+						<span
+							style={{ opacity: 0.7 }}
+							title="how long a session may sit idle before its failover trail is dropped and the order starts again from the head. The clock restarts on every routed request, so a session that keeps talking never reaches it; a change to the order — a pick, a reorder, a switch, a chain edit — starts it over at once. A number and a unit: 90m, 5h, 1d 2h. 0 switches the window off, so only a change to the order starts a session over. Empty keeps the built-in 5h."
+						>
+							{ctx.t("rebalance")}
+						</span>
+						<input
+							onBlur={commitRebalance}
+							onInput={(event) => setRebalanceDraft(event.currentTarget.value)}
+							onKeyDown={(event) => {
+								if (event.key === "Enter") event.currentTarget.blur();
+							}}
+							placeholder={formatDuration(DEFAULT_REBALANCE_MS)}
+							style={{ width: "4.5em" }}
+							title="how long a session may sit idle before its failover trail is dropped: 90m, 5h, 1d 2h; 0 switches the window off; empty keeps the built-in 5h"
+							value={rebalanceDraft()}
+						/>
 					</div>
 
 					<div style={divider} />

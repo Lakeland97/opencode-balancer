@@ -8,6 +8,7 @@ import {
 } from "../core/accounts";
 import { appendEvent } from "../core/events";
 import { getBalancingEnabled } from "../core/priority";
+import { rebalanceAfterMs } from "../core/rebalance";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
 import {
@@ -46,11 +47,6 @@ const byRequest = new WeakMap<Request, Tracked>();
 const bySession = new Map<string, Tracked>();
 
 const STALE_AFTER_MS = 5 * 60_000;
-// A provider's quota refills on a five-hour window, so a failover trail older
-// than one describes a world that no longer exists: the credentials this session
-// had already tried are worth trying first again, and the head of the order is
-// where a fresh balance starts.
-const REBALANCE_AFTER_MS = 5 * 60 * 60_000;
 // The virtual provider's slot is keyed by `balancer`, which is the provider id
 // `http.response` and `retry` report for a routed call.
 const ROUTED = BALANCER_PROVIDER_ID;
@@ -115,20 +111,44 @@ function triedFor(sessionID: string) {
 const announced = new Map<string, { alias: string; providerID: string }>();
 
 /**
- * Forget a trail that has outlived a quota window.
+ * Forget a trail that has outlived the idle window.
  *
- * A provider's quota refills on a five-hour window, so a trail older than one
- * describes a world that no longer exists: the credentials this session had
- * already tried are worth trying first again, and the head of the order is where
- * a fresh balance starts. Only the trail goes — a park is the provider's own
- * clock and expires on its own schedule, and throwing that away would send a call
- * straight back to something still limited.
+ * Only the trail goes — a park is the provider's own clock and expires on its
+ * own schedule, and throwing that away would send a call straight back to
+ * something still limited.
  */
-function forgetStaleTrail(sessionID: string) {
+function forgetStaleTrail(db: Database, sessionID: string) {
 	const trail = trailsBySession.get(sessionID);
-	if (!trail || now() - trail.at <= REBALANCE_AFTER_MS) return;
+	if (!trail) return;
+	const window = rebalanceAfterMs(db);
+	// Zero is the window switched off, so nothing ages a trail out but a change to
+	// the order itself.
+	if (window <= 0) return;
+	if (now() - trail.at <= window) return;
 	trailsBySession.delete(sessionID);
 	announced.delete(sessionKey(sessionID, ROUTED));
+}
+
+/**
+ * Start every session's balance over, because the order changed under it.
+ *
+ * Picking a credential, reordering one, or editing a chain changes what the order
+ * means, and a session still walking the old one holds a trail and a pin that
+ * describe a world that no longer exists. Dropping them makes the next request
+ * re-derive its route from the order as it now stands, which is what lets a
+ * picked credential actually serve instead of waiting behind the one this
+ * session last answered on. The idle window restarts by construction: the next
+ * trail is created with the current time.
+ *
+ * The per-provider slots stay. They are what the compaction watcher reads to know
+ * which model a conversation is on, and the order it names is still the right one.
+ */
+export function forgetRoutingMemory() {
+	trailsBySession.clear();
+	announced.clear();
+	for (const key of [...bySession.keys()]) {
+		if (key.endsWith(`:${ROUTED}`)) bySession.delete(key);
+	}
 }
 
 /**
@@ -232,8 +252,8 @@ function chooseStickyRoute(input: {
 	sessionID: string;
 }) {
 	const { db, family, sessionID } = input;
-	// A trail older than a quota window is void, so the balance starts again.
-	forgetStaleTrail(sessionID);
+	// A trail older than the idle window is void, so the balance starts again.
+	forgetStaleTrail(db, sessionID);
 	const tried = triedFor(sessionID);
 	const remembered = bySession.get(sessionKey(sessionID, ROUTED));
 	const pinned =

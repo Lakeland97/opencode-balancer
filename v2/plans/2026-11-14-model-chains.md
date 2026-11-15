@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Six changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Seven changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -99,6 +99,17 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model currently selected for the row, so one word does where two did. The per-model limit field gained
   the label `limit`, which is what lets the bare `global` placeholder stand and the
   `compacts at the global share, or this model's own` legend under every row's targets go.
+- **The idle window is adjustable, and a change to the order starts every session over.** The five-hour
+  trail window is now `rebalance_after` (`core/rebalance.ts`), set from the panel line under the title:
+  a number and a unit (`90m`, `5h`, `1d 2h`), with `0`/`never`/`off` switching it off and an empty field
+  keeping the built-in five hours. A bare number is refused because the neighbouring fields read one as
+  thousands of tokens. Every routing change — `use`, `move`, `setEnabled`, `setFreeOnly`, all four chain
+  edits, and turning balancing back on — now calls `forgetRoutingMemory()`: it drops each session's trail
+  and pin (and the balancer slot, not the per-provider ones the compaction watcher reads) so the next
+  request re-derives its route from the order as it now stands, and the window restarts from that
+  request. A pick also clears that credential's park, so it serves on the very next request; a reorder
+  does not, because the park is the provider's own clock. This is what makes "if the user selects 3 it
+  should try 4 in the next round" true rather than waiting for the old trail to expire.
 
 **Outstanding**
 

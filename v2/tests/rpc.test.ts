@@ -51,6 +51,7 @@ describe("contract", () => {
 		await rpc.list({});
 		await rpc.priority({});
 		await rpc.contextLimit({});
+		await rpc.rebalance({});
 	});
 });
 
@@ -599,5 +600,47 @@ describe("context limit rpc", () => {
 		expect(
 			listed.rows.find((entry) => entry.key === "deepseek-v4.1-flash")?.limit,
 		).toBe("");
+	});
+});
+
+describe("rebalance rpc", () => {
+	test("the window reads as unset until it is typed, and empty restores it", async () => {
+		const rpc = await handlers(freshDb());
+		expect(await rpc.rebalance({})).toEqual({ value: "" });
+
+		const set = (await rpc.setRebalance({ value: "2h" })) as { ok: boolean };
+		expect(set.ok).toBe(true);
+		expect(await rpc.rebalance({})).toEqual({ value: "2h" });
+
+		// Clearing the field puts the built-in window back, so the panel's
+		// placeholder is what describes the behaviour again.
+		await rpc.setRebalance({ value: "" });
+		expect(await rpc.rebalance({})).toEqual({ value: "" });
+	});
+
+	test("what is not a duration is refused and changes nothing", async () => {
+		const rpc = await handlers(freshDb());
+		await rpc.setRebalance({ value: "90m" });
+
+		for (const value of ["5", "5 hours", "five", "h5"]) {
+			const refused = (await rpc.setRebalance({ value })) as {
+				message: string;
+				ok: boolean;
+			};
+			expect(refused.ok).toBe(false);
+			expect(refused.message.length).toBeGreaterThan(0);
+		}
+		expect(await rpc.rebalance({})).toEqual({ value: "90m" });
+	});
+
+	test("switching the window off says so, in words that match", async () => {
+		const rpc = await handlers(freshDb());
+		const off = (await rpc.setRebalance({ value: "0" })) as {
+			message: string;
+			ok: boolean;
+		};
+		expect(off.ok).toBe(true);
+		expect(off.message).toContain("change to the order");
+		expect(await rpc.rebalance({})).toEqual({ value: "0" });
 	});
 });

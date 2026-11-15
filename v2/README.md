@@ -131,11 +131,22 @@ rather than restarting at the top of the order and parking everything on the way
 has been tried, the order wraps back to the head. A provider's second credential is a second chance:
 parking one is what sends the next request to the other, not an error the session has to see.
 
-That trail is not honoured forever: past five hours since the session was last balanced it is dropped
-and the order starts again from the head. Provider quotas refill on a five-hour window, so by then the
-credentials this session had already tried are worth trying first again. What is *not* dropped is a
-park — that is the provider's own clock and expires on its own schedule, so a call is never sent back
-to something still limited.
+That trail is not honoured forever. It is dropped once the session has sat **idle** for the window,
+and the order starts again from the head — measured from the last routed request, not from a clock, so
+a session that keeps talking never reaches it however long it runs. Provider quotas refill on a
+five-hour window, so by then the credentials this session had already tried are worth trying first
+again. The window is set on the panel line under the title: `rebalance after idle`. It takes a number
+and a unit — `90m`, `5h`, `1d 2h` — while `0`, `never` or `off` switches it off, so only a change to
+the order starts a session over, and an empty field keeps the built-in five hours. What is *not*
+dropped is a park — that is the provider's own clock and expires on its own schedule, so a call is
+never sent back to something still limited.
+
+Changing the order — picking a credential, reordering one, switching one on or off, editing a chain,
+turning balancing back on — starts every session over at once, not after the current trail expires.
+The trail and the pinned route are dropped, so the next request derives its route from the order as
+it now stands; the window restarts from that request. A pick also clears that credential's park, so it
+serves on the very next request. Picking a credential therefore does what the user asked: the choice
+applies now, and the session then walks forward from it as it would have on its own.
 
 `limited` therefore means **failed, and not yet tried again** — it is cleared by the next routing
 attempt, or by picking the credential again, not by a clock. Hovering the marker shows what the
@@ -152,7 +163,8 @@ and only one target ever carries it — the rest say nothing while healthy, and 
 `unavailable` when they are not.
 
 The panel's segments are separated by hairlines, in the order `Balancer`, `context limit`, `providers`,
-`models`, `diagnostics`, `log`. `diagnostics` carries the build stamp, when the values on screen were
+`models`, `diagnostics`, `log`. Under the title row sits the idle window, `rebalance after idle`, then
+the `context limit` field. `diagnostics` carries the build stamp, when the values on screen were
 last read in full, what is loaded, and the `refresh` button — the plumbing, kept off the name line.
 
 A `log` at the bottom records what the balancer actually did during this run: which model went to

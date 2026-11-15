@@ -28,6 +28,13 @@ import {
 	setModelLimit,
 } from "../core/context";
 import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
+import {
+	formatDuration,
+	parseDuration,
+	readRebalance,
+	rebalanceAfterMs,
+	setRebalance,
+} from "../core/rebalance";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
 import {
@@ -44,6 +51,7 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
+import { forgetRoutingMemory } from "./hooks";
 import { clearLog, readLog, recordLog } from "./log";
 import { chooseRoute } from "./routing";
 import { enabledAccounts, selectHealthyAccount } from "./selection";
@@ -127,6 +135,7 @@ export async function registerBalancerRpc({
 			const family = await rowByKey(ctx, db, key);
 			if (!family) return { message: `No row named ${key}.`, ok: false };
 			const result = await addTarget(ctx, db, family, providerID, modelID);
+			if (result.ok) forgetRoutingMemory();
 			return result;
 		},
 
@@ -135,7 +144,9 @@ export async function registerBalancerRpc({
 				providerID: string;
 				modelID: string;
 			};
-			return createChain(ctx, db, providerID, modelID);
+			const result = await createChain(ctx, db, providerID, modelID);
+			if (result.ok) forgetRoutingMemory();
+			return result;
 		},
 
 		chainModels: async (input) => {
@@ -165,7 +176,9 @@ export async function registerBalancerRpc({
 			};
 			const family = await rowByKey(ctx, db, key);
 			if (!family) return { message: `No row named ${key}.`, ok: false };
-			return shiftTarget(db, family, providerID, direction);
+			const result = shiftTarget(db, family, providerID, direction);
+			if (result.ok) forgetRoutingMemory();
+			return result;
 		},
 
 		chainRemove: async (input) => {
@@ -175,7 +188,9 @@ export async function registerBalancerRpc({
 			};
 			const family = await rowByKey(ctx, db, key);
 			if (!family) return { message: `No row named ${key}.`, ok: false };
-			return removeTarget(db, family, providerID);
+			const result = removeTarget(db, family, providerID);
+			if (result.ok) forgetRoutingMemory();
+			return result;
 		},
 
 		chainReset: async (input) => {
@@ -183,6 +198,7 @@ export async function registerBalancerRpc({
 			const family = await rowByKey(ctx, db, key);
 			if (!family) return { message: `No row named ${key}.`, ok: false };
 			const existed = resetRow(db, family);
+			if (existed) forgetRoutingMemory();
 			return {
 				message: existed
 					? `${key} is back to automatic order.`
@@ -278,6 +294,7 @@ export async function registerBalancerRpc({
 				direction: "up" | "down";
 			};
 			moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
+			forgetRoutingMemory();
 			return {
 				message: `Moved ${providerID}/${alias} ${direction}.`,
 				ok: true,
@@ -311,9 +328,18 @@ export async function registerBalancerRpc({
 			};
 		},
 
+		rebalance: async () => ({
+			// As typed, empty when it has never been set: the field's placeholder
+			// then shows the built-in default rather than pretending it was typed.
+			value: readRebalance(db) ?? "",
+		}),
+
 		setBalancing: async (input) => {
 			const { enabled } = input as { enabled: boolean };
 			setBalancingEnabled(db, enabled);
+			// Turning routing back on starts from the order as it now stands;
+			// a trail from before the switch describes another world.
+			if (enabled) forgetRoutingMemory();
 			recordLog("config", `automatic balancing ${enabled ? "on" : "off"}`);
 			return {
 				message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
@@ -392,6 +418,7 @@ export async function registerBalancerRpc({
 				enabled: boolean;
 			};
 			setAccountEnabled(db, providerID, alias, enabled);
+			forgetRoutingMemory();
 			recordLog(
 				"config",
 				`${providerID}/${alias} ${enabled ? "enabled" : "disabled"}`,
@@ -409,6 +436,7 @@ export async function registerBalancerRpc({
 				enabled: boolean;
 			};
 			setAccountFreeOnly(db, providerID, alias, enabled);
+			forgetRoutingMemory();
 			recordLog(
 				"config",
 				`${providerID}/${alias} ${enabled ? "free models only" : "paid models too"}`,
@@ -439,6 +467,27 @@ export async function registerBalancerRpc({
 			};
 		},
 
+		setRebalance: async (input) => {
+			const { value } = input as { value: string };
+			const parsed = parseDuration(value);
+			if (!parsed.ok) return { message: parsed.error, ok: false };
+			setRebalance(db, value);
+			const ms = rebalanceAfterMs(db);
+			recordLog(
+				"config",
+				ms > 0
+					? `rebalance after ${formatDuration(ms)} idle`
+					: "rebalance window off; a trail never goes stale on its own",
+			);
+			return {
+				message:
+					ms > 0
+						? `A session starts over from the head after ${formatDuration(ms)} idle.`
+						: "A trail no longer goes stale on its own; only a change to the order starts it over.",
+				ok: true,
+			};
+		},
+
 		status: async () => {
 			const accounts = listAccounts(db);
 			return {
@@ -463,6 +512,11 @@ export async function registerBalancerRpc({
 			// It is also the retry a park was waiting for, so a parked credential
 			// becomes eligible again and the next call actually goes there.
 			clearAccountPark(db, account.providerID, account.alias);
+			// The pick takes effect now, not after this session's next answer:
+			// the trail and the pin are dropped so the next request derives its
+			// route from the order the pick just changed. The window restarts by
+			// construction — the new trail begins at the current time.
+			forgetRoutingMemory();
 			recordLog("config", `serving with ${providerID}/${account.alias}`);
 			return {
 				message: `Serving with ${providerID}/${account.alias}.`,
