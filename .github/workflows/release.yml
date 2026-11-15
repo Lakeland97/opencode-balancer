@@ -7,7 +7,17 @@ on:
   # A release is worth asking for directly. Every push already runs this, but
   # pushing a commit to get a release is a strange way to ask, and an empty
   # commit to re-cut one leaves a line in the history that says nothing.
+  #
+  # `publish` is the one thing a dispatch can decide, and it is off unless asked
+  # for. This repo is a public fork and the package name is the upstream author's
+  # scope on npm, so a release here means a tag and a GitHub release; uploading
+  # to someone else's namespace is not something a push should ever decide.
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish this version to npm (leave off for a fork-only release)
+        type: boolean
+        default: false
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
@@ -83,7 +93,11 @@ jobs:
         run: bun scripts/release/check-npm-published.ts
 
       - name: Publish npm
-        if: steps.npm_package.outputs.is_published == 'false'
+        # Off on every push, and off on a dispatch that does not ask: this forks
+        # publishes under a name that is not ours yet, so an upload is a
+        # deliberate act, taken once the scope question is settled and the run is
+        # started with `publish` on.
+        if: steps.npm_package.outputs.is_published == 'false' && inputs.publish == true
         run: npm publish --access public
 
       - name: Ensure git tag
