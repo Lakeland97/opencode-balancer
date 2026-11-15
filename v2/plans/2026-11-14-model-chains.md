@@ -166,6 +166,10 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   row, after the row's own controls instead of between them. Drag it onto the row whose place it should
   take, or focus it and press the arrow keys, so nothing a keyboard could do is lost.
 
+  A credential row's own switches — `free` and `use` — are pulled into that same right-hand cluster and
+  divided from the label by a hairline, so the row reads as the credential on the left and what you can do
+  to it on the right; the cluster ends at the padding edge, which leaves the grip immediately beside it.
+
   The drop is unambiguous by construction rather than by luck — credentials are one flat list in
   `accounts.position` order (the **models** list is the only grouped one, and it is not reordered), and
   targets are a per-row ordered list — so a drop names a slot, not a direction. `move` and `chainMove` now

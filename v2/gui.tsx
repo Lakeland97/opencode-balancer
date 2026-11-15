@@ -464,6 +464,22 @@ export default Plugin.define({
 			transform: "translateY(-50%)",
 			"user-select": "none",
 		} as const;
+		// The row's own switches, pulled together at its right edge beside the grip
+		// and divided from the label by a hairline: a row reads as "this credential"
+		// on the left and "what you can do to it" on the right.
+		const controls = {
+			"align-items": "center",
+			display: "flex",
+			gap: "6px",
+			"margin-left": "auto",
+		} as const;
+		// The hairline itself, in the text colour so it follows the theme.
+		const rule = {
+			"align-self": "stretch",
+			"border-left": "1px solid currentColor",
+			opacity: 0.15,
+			width: 0,
+		} as const;
 		/** The row a drag would land on, and the row being dragged. */
 		const rowWhileDragging = (list: string, index: number) => {
 			const current = dragging();
@@ -789,25 +805,60 @@ export default Plugin.define({
 										</Show>
 									</span>
 								</label>
-								<label
-									style={{ display: "flex", gap: "4px" }}
-									title="use only this credential's free models"
-								>
-									<input
-										checked={item.entry.freeOnly}
-										onChange={(event) =>
+								<span style={controls}>
+									<span style={rule} />
+									<label
+										style={{ display: "flex", gap: "4px" }}
+										title="use only this credential's free models"
+									>
+										<input
+											checked={item.entry.freeOnly}
+											onChange={(event) =>
+												void run(() =>
+													rpc().setFreeOnly({
+														alias: item.entry.alias,
+														enabled: event.currentTarget.checked,
+														providerID: item.entry.providerID,
+													}),
+												)
+											}
+											type="checkbox"
+										/>
+										{ctx.t("free")}
+									</label>
+									<button
+										onClick={() =>
 											void run(() =>
-												rpc().setFreeOnly({
+												rpc().use({
 													alias: item.entry.alias,
-													enabled: event.currentTarget.checked,
 													providerID: item.entry.providerID,
 												}),
 											)
 										}
-										type="checkbox"
-									/>
-									{ctx.t("free")}
-								</label>
+										title="serve this provider with this credential; picking a parked one clears its cooldown"
+									>
+										{ctx.t("use")}
+									</button>
+								</span>
+								{/* The instant the endpoint named for its own refill, which
+								    is not when this marker clears: the marker is cleared by
+								    the next attempt, so the two say different things and the
+								    line is worded from the provider's side to keep that
+								    clear. A park we decided on (a retry-after) has no refill
+								    time to show and gets no subline. */}
+								<Show when={rollover(item.account)}>
+									{(until) => (
+										<div
+											style={subline}
+											title={`the endpoint said its quota returns at this time; the marker above still clears as soon as this credential is tried again${item.account?.limitedReason ? ` — it said: ${item.account.limitedReason}` : ""}`}
+										>
+											{`${ctx.t("resets")} ${formatRollover(until(), Date.now())}`}
+										</div>
+									)}
+								</Show>
+								{/* Last in the row and out of its flow: the grip sits in the
+								    reserved right-hand gutter, and the final tab stop is the
+								    handle rather than a control that acts on the credential. */}
 								<span
 									{...grip({
 										count: providerEntries().length,
@@ -825,35 +876,6 @@ export default Plugin.define({
 								>
 									⠿
 								</span>
-								<button
-									onClick={() =>
-										void run(() =>
-											rpc().use({
-												alias: item.entry.alias,
-												providerID: item.entry.providerID,
-											}),
-										)
-									}
-									title="serve this provider with this credential; picking a parked one clears its cooldown"
-								>
-									{ctx.t("use")}
-								</button>
-								{/* The instant the endpoint named for its own refill, which
-								    is not when this marker clears: the marker is cleared by
-								    the next attempt, so the two say different things and the
-								    line is worded from the provider's side to keep that
-								    clear. A park we decided on (a retry-after) has no refill
-								    time to show and gets no subline. */}
-								<Show when={rollover(item.account)}>
-									{(until) => (
-										<div
-											style={subline}
-											title={`the endpoint said its quota returns at this time; the marker above still clears as soon as this credential is tried again${item.account?.limitedReason ? ` — it said: ${item.account.limitedReason}` : ""}`}
-										>
-											{`${ctx.t("resets")} ${formatRollover(until(), Date.now())}`}
-										</div>
-									)}
-								</Show>
 							</div>
 						)}
 					</For>
