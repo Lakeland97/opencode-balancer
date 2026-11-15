@@ -9,9 +9,11 @@ function read(path: string): string {
 }
 
 describe("installation docs", () => {
-	test("recommend unversioned package entry instead of @latest", () => {
+	test("the V1 install guide recommends the unversioned package entry", () => {
 		const installGuide = read("INSTALL.txt");
-		const readme = read("README.md");
+		// The V1 documentation moved to README-v1.md when the V2 README became the
+		// repository's default, so the V1 wording is read from there.
+		const readme = read("README-v1.md");
 
 		expect(installGuide).toContain(
 			"@thelioo/opencode-balancer (without @latest)",
