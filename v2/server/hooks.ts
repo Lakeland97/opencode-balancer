@@ -6,6 +6,7 @@ import {
 	getActiveAccount,
 	markAccountUsed,
 } from "../core/accounts";
+import { writeCompactPromptTokens } from "../core/context";
 import { appendEvent } from "../core/events";
 import { getBalancingEnabled } from "../core/priority";
 import { rebalanceAfterMs } from "../core/rebalance";
@@ -18,6 +19,7 @@ import {
 	resolveChain,
 } from "./connectors";
 import { recordLog } from "./log";
+import { summaryPromptTokensFrom } from "./prompt-size";
 import {
 	errorRetryAfterMs,
 	isRetryableFailure,
@@ -456,6 +458,15 @@ export async function registerHooks({
 
 	await ctx.session.hook("http.request", async (event) => {
 		const providerID = event.model.providerID;
+
+		// The floor a reserve is held to is the size of the instruction the summary
+		// request carries, so it is measured from the request itself rather than
+		// assumed, and it follows the host if its prompt ever changes. A body that
+		// cannot be read leaves the last measurement standing.
+		if (event.kind === "compaction") {
+			const measured = await summaryPromptTokensFrom(event.request);
+			if (measured !== undefined) writeCompactPromptTokens(db, measured);
+		}
 
 		if (providerID === BALANCER_PROVIDER_ID) {
 			// The model-request hook already retargeted the URL and credential;

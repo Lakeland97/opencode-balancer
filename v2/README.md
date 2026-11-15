@@ -242,8 +242,18 @@ compaction trips the very overflow failure it exists to prevent. So a `250k` lim
 at `237.5k`, and the same limit on a 200k model cuts at `187.5k`: the buffer is a share of the *limit*,
 taken off whatever the model's window leaves. It takes the same grammar as the limit — a size in
 thousands (`20` is 20k, `0.5` is five hundred) or a share of the limit — and empty means the built-in
-rule: a tenth of the limit or 20k, whichever is larger. Either way it is capped at a quarter of what the
-model can take, so a small window still has room to hold a conversation.
+rule: a tenth of the limit or 20k, whichever is larger. It is capped at a quarter of what the model can
+take, so a small window still has room to hold a conversation, and it is held to a floor of the size of
+the summary request's own instruction. The summary sends the conversation *plus* that instruction, so a
+reserve below it would leave the summary request itself over the window — the same overflow by another
+road. That size is not guessed: the balancer sees the compaction request go past, measures the
+instruction the host appended, rounds it to the nearest thousand, and remembers it, so the floor follows
+the host if its prompt changes; until a compaction has been watched it stands at the figure measured from
+the host's prompt when this was written. `1%` of a small model's window therefore reserves the
+instruction's room rather than its own arithmetic. The floor only ever lifts a reserve the user made
+small — the built-in rule is already well above it — and the quarter-of-the-ceiling cap still wins on a
+window too small to keep anything free. The panel is unchanged: it shows the limit and the buffer you
+typed, and the floor only makes the compaction trigger land slightly earlier when it has to.
 
 The **enforce** choice beside it says when that reserve is taken. `always` takes it off every cut.
 `when necessary` takes it only where the limit has reached what the model can hold — where there is no

@@ -9,6 +9,7 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
+import { readCompactPromptTokens } from "../core/context";
 import { listEvents } from "../core/events";
 import { setBalancingEnabled } from "../core/priority";
 import { setRebalance, setRebalanceAuto } from "../core/rebalance";
@@ -106,6 +107,46 @@ describe("http.request hook", () => {
 		await registry["http.request"](event);
 
 		expect(event.request.headers.get("authorization")).toBe("Bearer sk-backup");
+	});
+
+	test("a compaction request's instruction sets the reserve's floor", async () => {
+		const { db, registry } = await setup();
+		// Before anything is watched, the floor is the figure measured from the
+		// host's own prompt.
+		expect(readCompactPromptTokens(db)).toBe(1_000);
+
+		const event = {
+			...requestEvent(
+				"compact-measure",
+				new Request("https://api.example.test/v1/messages", {
+					body: JSON.stringify({
+						messages: [{ content: "x".repeat(8_000), role: "user" }],
+					}),
+					headers: { "content-type": "application/json" },
+					method: "POST",
+				}),
+			),
+			kind: "compaction",
+		};
+		await registry["http.request"](event);
+
+		// This hook is the only place the figure is learned: the size of the
+		// instruction the summary request carries, rounded to a thousand.
+		expect(readCompactPromptTokens(db)).toBe(2_000);
+	});
+
+	test("an ordinary request is not measured", async () => {
+		const { db, registry } = await setup();
+		const request = new Request("https://api.example.test/v1/messages", {
+			body: JSON.stringify({
+				messages: [{ content: "x".repeat(8_000), role: "user" }],
+			}),
+			headers: { "content-type": "application/json" },
+			method: "POST",
+		});
+		await registry["http.request"](requestEvent("not-a-compaction", request));
+
+		expect(readCompactPromptTokens(db)).toBe(1_000);
 	});
 });
 

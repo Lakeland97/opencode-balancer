@@ -4,6 +4,7 @@ import {
 	effectiveThreshold,
 	readBufferEnforcement,
 	readBufferSpec,
+	readCompactPromptTokens,
 	readLimitSpec,
 	readModelLimitSpec,
 } from "../core/context";
@@ -70,6 +71,9 @@ export function createCompactionController(input: {
 			bufferEnforcement: readBufferEnforcement(input.db),
 			globalLimit: readLimitSpec(input.db),
 			modelLimit: readModelLimitSpec(input.db, target.familyKey),
+			// The measured summary-instruction size, so a reserve the user made tiny
+			// still leaves the request that compacts this conversation somewhere to go.
+			promptTokens: readCompactPromptTokens(input.db),
 			realContext: target.context,
 		});
 

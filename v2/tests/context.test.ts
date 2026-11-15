@@ -11,6 +11,7 @@ import {
 	readBuffer,
 	readBufferEnforcement,
 	readBufferSpec,
+	readCompactPromptTokens,
 	readLimit,
 	readLimitSpec,
 	readModelLimit,
@@ -19,6 +20,7 @@ import {
 	setBufferEnforcement,
 	setLimit,
 	setModelLimit,
+	writeCompactPromptTokens,
 } from "../core/context";
 import { migrate } from "../core/schema";
 
@@ -512,6 +514,71 @@ describe("the buffer", () => {
 		).toBe(25_000);
 	});
 
+	test("a reserve smaller than the summary prompt is raised to it", () => {
+		// 1% of a 250k limit is 2.5k, already above the prompt, so the share stands.
+		expect(
+			compactionReserve({
+				buffer: { percent: 1 },
+				ceiling: 250_000,
+				limit: 250_000,
+			}),
+		).toBe(2_500);
+		// 1% of 30k is 300 — less than the instructions the summary request adds
+		// on top of the conversation it carries, so it is raised to cover them.
+		expect(
+			compactionReserve({
+				buffer: { percent: 1 },
+				ceiling: 30_000,
+				limit: 30_000,
+			}),
+		).toBe(1_000);
+		// A size below the prompt is raised the same way.
+		expect(
+			compactionReserve({
+				buffer: { tokens: 200 },
+				ceiling: 200_000,
+				limit: 200_000,
+			}),
+		).toBe(1_000);
+		// A window too small to spare the prompt keeps its quarter: a cut with
+		// nothing left behind it is the other way to trip the same overflow.
+		expect(
+			compactionReserve({
+				buffer: { percent: 1 },
+				ceiling: 2_000,
+				limit: 2_000,
+			}),
+		).toBe(500);
+	});
+
+	test("the built-in rule is above the prompt, so the floor never touches it", () => {
+		expect(compactionReserve({ ceiling: 100_000, limit: 100_000 })).toBe(
+			20_000,
+		);
+	});
+
+	test("a measurement from a real compaction sets the floor", () => {
+		// The host's prompt grew, so the floor moves with it instead of staying at
+		// the figure measured from its source.
+		expect(
+			compactionReserve({
+				buffer: { tokens: 500 },
+				ceiling: 200_000,
+				limit: 200_000,
+				promptTokens: 3_000,
+			}),
+		).toBe(3_000);
+		// And the cut a session is compacted at moves with it.
+		expect(
+			effectiveThreshold({
+				buffer: { tokens: 500 },
+				globalLimit: { tokens: 200_000 },
+				promptTokens: 3_000,
+				realContext: 200_000,
+			}),
+		).toBe(197_000);
+	});
+
 	test("it moves the cut, which is the whole point", () => {
 		// A 90% limit asks for 900k of the declared 1M, but this model holds
 		// 200k, so the cut starts from 200k and a 40k buffer comes off it.
@@ -560,5 +627,36 @@ describe("the buffer", () => {
 		).run();
 		expect(readBuffer(db)).toBe("lots");
 		expect(readBufferSpec(db)).toBeUndefined();
+	});
+});
+
+describe("the measured summary prompt", () => {
+	test("it starts at the figure the host's own prompt measured", () => {
+		// Until a compaction has been watched, the size measured from the host's
+		// source is the best available floor.
+		expect(readCompactPromptTokens(freshDb())).toBe(1_000);
+	});
+
+	test("a measurement is stored as a round figure and reads back", () => {
+		const db = freshDb();
+		writeCompactPromptTokens(db, 1_999.6);
+		expect(readCompactPromptTokens(db)).toBe(2_000);
+	});
+
+	test("a value no setter would have written falls back", () => {
+		const db = freshDb();
+		for (const bad of ["soon", "0", "-4"]) {
+			db.query(
+				"INSERT OR REPLACE INTO settings (key, value) VALUES ('compact_prompt_tokens', ?)",
+			).run(bad);
+			expect(readCompactPromptTokens(db)).toBe(1_000);
+		}
+	});
+
+	test("a size that is not a positive number is not written", () => {
+		const db = freshDb();
+		writeCompactPromptTokens(db, Number.NaN);
+		writeCompactPromptTokens(db, 0);
+		expect(readCompactPromptTokens(db)).toBe(1_000);
 	});
 });

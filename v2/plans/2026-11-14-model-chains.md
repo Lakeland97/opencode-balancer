@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Ten changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Eleven changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -144,6 +144,21 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   200k one. The watcher now takes every primary row the session has been routed on (`balancerTargetsFor`,
   auxiliaries excluded, stale rows dropped) and compacts at the **tightest** of their thresholds, because
   the conversation has to fit whichever model comes next.
+- **The buffer has a floor at the summary prompt's size, measured rather than assumed.**
+  `compactionReserve` was `min(requested, ceiling/4)` — a cap with nothing under it, so a `1%` share could
+  reserve less than the instruction the summary request sends on top of the conversation, leaving the
+  summary itself over the window. It is now `min(max(requested, measured), ceiling/4)`, so the cut lands
+  slightly earlier exactly where it has to and nowhere else. The figure is learned: a session's compaction
+  runs on the row the session is routed through, so the `http.request` hook sees the request, and
+  `server/prompt-size.ts` measures the instruction the host appended as the last message, rounds it to the
+  nearest thousand, and refuses the host's short retry nudge (under `MIN_INSTRUCTION_TOKENS`), so a nudge
+  cannot overwrite a real measurement. It is stored in `settings` as `compact_prompt_tokens`
+  (`writeCompactPromptTokens`/`readCompactPromptTokens`) and read where the threshold is computed
+  (`thresholdFor` in `server/compaction.ts`). Before the first compaction is watched the floor is
+  `COMPACT_PROMPT_TOKENS` (1,000): the host's own prompt measured from
+  `packages/core/src/session/compaction.ts`, ~2.5k characters, ~640 tokens, ~680 with the nudge, rounded
+  up. **No UI change** — the panel shows the limit and the buffer as typed; the floor is a server-side
+  detail that moves the trigger, not a control.
 
 **Outstanding**
 

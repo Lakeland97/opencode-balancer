@@ -42,6 +42,12 @@ const bufferKey = "context_buffer";
  * installation that predates the switch keeps the reserve it had.
  */
 const bufferEnforceKey = "context_buffer_enforce";
+/**
+ * The last size measured for the summary instruction the compaction request
+ * carries, in tokens. Written by the request hook when a compaction goes past;
+ * absent until one has, when the figure measured from the host's source stands.
+ */
+const compactPromptKey = "compact_prompt_tokens";
 
 /** Whether a value is a share the balancer would accept from the user. */
 function isValidPercent(percent: number | undefined): percent is number {
@@ -225,6 +231,23 @@ export function setBufferEnforcement(
 }
 
 /**
+ * The floor a reserve is held to, in tokens: the last size measured for the
+ * summary instruction the compaction request carries, or the figure measured
+ * from the host's source when none has been seen yet. A stored value that is not
+ * a positive number is treated as absent rather than trusted.
+ */
+export function readCompactPromptTokens(db: Database): number {
+	const stored = Number(readText(db, compactPromptKey));
+	return Number.isFinite(stored) && stored > 0 ? stored : COMPACT_PROMPT_TOKENS;
+}
+
+/** Records one measured summary-instruction size. The request hook is the caller. */
+export function writeCompactPromptTokens(db: Database, tokens: number): void {
+	if (!Number.isFinite(tokens) || tokens <= 0) return;
+	writeText(db, compactPromptKey, String(Math.round(tokens)));
+}
+
+/**
  * An older value only ever meant a share, and was written as a bare number.
  *
  * A size has always carried a `%` or a unit, so a bare number on an old key is a
@@ -304,6 +327,27 @@ export function migrateLimits(db: Database) {
 }
 
 /**
+ * The floor under the reserve: the room the summary request's own prompt takes.
+ *
+ * Compacting sends the conversation **plus** a summarization instruction, and
+ * that instruction is the one part the model has not already been sent. So the
+ * request needs the cut and the prompt together, and a reserve smaller than the
+ * prompt leaves the summary request itself over the window — the same overflow
+ * the reserve exists to prevent, arrived at from the other side. It is a floor,
+ * not a ceiling: a larger buffer the user set still wins.
+ *
+ * The figure is learned rather than assumed. The balancer already sees the
+ * compaction request go past (`server/prompt-size.ts` measures the instruction
+ * the host appended, rounded to the nearest thousand, `server/hooks.ts` stores
+ * it), so this is only what is used until the first compaction has been watched.
+ * It is what the host's own prompt measured at the time it was written: about
+ * 2.5k characters, near 640 tokens, near 680 with the one retry the host sends
+ * when a reply skips its template — rounded up, so a real measurement landing
+ * near it changes nothing.
+ */
+const COMPACT_PROMPT_TOKENS = 1_000;
+
+/**
  * The room the compaction itself needs, taken off the cut.
  *
  * Compacting is another request against the same model, and it carries the
@@ -312,8 +356,17 @@ export function migrateLimits(db: Database) {
  * was meant to prevent. The reserve comes off the limit, so a share of it is a
  * share of the cut the user asked for (`5%` of a 250k limit is 12.5k) and a size
  * is that many tokens; the built-in one is a tenth of the limit or 20k, whichever
- * is larger. It is capped at a quarter of the ceiling, so a window far smaller
- * than the limit still leaves a conversation somewhere to live.
+ * is larger.
+ *
+ * A reserve below the measured size of the summary instruction is raised to it,
+ * so `1%` of a small window cannot leave the prompt the summary sends with
+ * nowhere to sit. The figure is `promptTokens`, the measurement recorded from a
+ * real compaction request (`readCompactPromptTokens`), or the source-measured
+ * default before one has been seen. It is still capped at a quarter of the
+ * ceiling: where a window is so small that keeping the prompt free would leave
+ * the conversation no room at all, the cap wins and the cut keeps a quarter. The
+ * floor only ever touches a reserve the user made small; the built-in rule is
+ * already far above it.
  */
 export function compactionReserve(input: {
 	/** The cut the limit asks for, before the model's window clamps it. */
@@ -321,12 +374,17 @@ export function compactionReserve(input: {
 	/** What the cut can actually land on: the model's window, or the limit. */
 	ceiling: number;
 	buffer?: SizeOrShare;
+	/** The measured summary-instruction size, when one has been recorded. */
+	promptTokens?: number;
 }): number {
 	const requested =
 		input.buffer === undefined
 			? Math.max(Math.round(input.limit / 10), 20_000)
 			: measure(input.buffer, input.limit);
-	return Math.min(requested, Math.round(input.ceiling / 4));
+	return Math.min(
+		Math.max(requested, input.promptTokens ?? COMPACT_PROMPT_TOKENS),
+		Math.round(input.ceiling / 4),
+	);
 }
 
 /** A size or a share, read as a count of tokens against one window. */
@@ -383,6 +441,8 @@ export function effectiveThreshold(input: {
 	 * keeps its room either way.
 	 */
 	bufferEnforcement?: BufferEnforcement;
+	/** The measured summary-instruction size, when one has been recorded. */
+	promptTokens?: number;
 }): number {
 	const real =
 		typeof input.realContext === "number" && input.realContext > 0
@@ -408,6 +468,11 @@ export function effectiveThreshold(input: {
 
 	return (
 		ceiling -
-		compactionReserve({ buffer: input.buffer, ceiling, limit: chosen })
+		compactionReserve({
+			buffer: input.buffer,
+			ceiling,
+			limit: chosen,
+			promptTokens: input.promptTokens,
+		})
 	);
 }
