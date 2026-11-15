@@ -221,6 +221,30 @@ describe("chain rpc", () => {
 		expect(reply.ok).toBe(false);
 	});
 
+	test("a chain drop names the slot it landed on", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		await rpc.chainAdd({
+			key: "deepseek-v4.1-flash",
+			modelID: "mimo-v2.6-flash",
+			providerID: "p2",
+		});
+
+		const reply = (await rpc.chainMove({
+			key: "deepseek-v4.1-flash",
+			providerID: "p2",
+			to: 0,
+		})) as { ok: boolean };
+
+		expect(reply.ok).toBe(true);
+		expect(
+			getStoredChain(db, "deepseek-v4.1-flash")?.targets.map(
+				(target) => target.providerID,
+			)[0],
+		).toBe("p2");
+	});
+
 	test("priority carries provider names", async () => {
 		const db = freshDb();
 		const rpc = await handlers(db);
@@ -280,6 +304,41 @@ describe("chain rpc", () => {
 		expect(
 			orderedAccounts(db).map((row) => `${row.providerID}/${row.alias}`),
 		).toEqual(["p2/a", "p1/a"]);
+	});
+
+	test("a drop names the slot, not a number of steps", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		const rpc = await handlers(db);
+
+		expect(orderedAccounts(db).map((row) => row.providerID)).toEqual([
+			"p1",
+			"p2",
+			"p3",
+		]);
+
+		// The top row dropped on the last slot: one call, two places, which the
+		// step control could not have done without being pressed twice.
+		await rpc.move({ alias: "a", providerID: "p1", to: 2 });
+
+		expect(orderedAccounts(db).map((row) => row.providerID)).toEqual([
+			"p2",
+			"p3",
+			"p1",
+		]);
+	});
+
+	test("a drop on a credential the store does not have is refused", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db);
+
+		const reply = (await rpc.move({
+			alias: "gone",
+			providerID: "p1",
+			to: 0,
+		})) as { ok: boolean };
+
+		expect(reply.ok).toBe(false);
 	});
 
 	test("chainCreate starts a custom row from one model", async () => {

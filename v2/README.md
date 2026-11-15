@@ -78,7 +78,8 @@ order the router walks them, and every row carries its own three switches:
 
 - `enabled` — a switched-off credential is never chosen, and its row still shows what is parked on it;
 - `free` — only models that cost nothing may be sent to it, see below;
-- `↑ ↓` — where the row sits in the order, which is the order automatic rows route in.
+- a **grip** — drag it to put the row where you want it in the order, which is the order automatic rows
+  route in. Focused, the arrow keys move it one place, so the mouse is not the only way.
 
 `use` tells a provider to serve with that credential: the row moves to the top of that provider's
 rows, and picking a parked row is the retry it was waiting for, so `use` clears that credential's
@@ -115,8 +116,9 @@ as free when it is priced at zero or its id carries a `free` marker; unknown pri
 /balancer free opencode/work off     # just the one named `work`
 ```
 
-The Desktop panel edits the same chains: `↑ ↓ ×` per target, `+ add target` with provider and model
-pickers, and a `reset` on any customised row. A target names the model it will actually be sent to —
+The Desktop panel edits the same chains: drag a target by its grip to move it, `×` to remove it, `+ add
+target` with provider and model pickers, and a `reset` on any customised row. With the grip focused, the
+arrow keys move the row one place, so reordering does not need a mouse. A target names the model it will actually be sent to —
 the `-free` spelling where the credential that would serve is set to spend nothing — and that stays on
 screen while the credential sits out a park, because what a row is set up to send does not change just
 because its key is briefly out of service. The **model's own** `limit` field sits on the row rather

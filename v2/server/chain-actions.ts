@@ -4,6 +4,7 @@ import {
 	type ChainTarget,
 	deleteChain,
 	moveTarget,
+	moveTargetTo,
 	saveChain,
 } from "../core/chains";
 import { matchModel } from "../core/models";
@@ -245,6 +246,23 @@ export function shiftTarget(
 				message: `${providerID} cannot move further ${direction}.`,
 				ok: false,
 			};
+}
+
+/** Moves one target to a position, for a drag rather than a single step. */
+export function shiftTargetTo(
+	db: Database,
+	family: ModelFamily,
+	providerID: string,
+	to: number,
+): ActionResult {
+	// The same snapshot as a step, for the same reason: the order a drag lands in
+	// has to be the one the user was looking at.
+	if (!family.stored) store(db, family, rowTargets(db, family));
+	const moved = moveTargetTo(db, family.key, providerID, to);
+	invalidateCatalog();
+	return moved
+		? { message: `Moved ${providerID}.`, ok: true }
+		: { message: `${providerID} is already there.`, ok: false };
 }
 
 /** Hands a row back to provider priority. Returns false when it was automatic. */

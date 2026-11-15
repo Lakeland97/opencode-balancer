@@ -169,6 +169,40 @@ export function moveTarget(
 	if (index === -1) return false;
 	const destination = index + direction;
 	if (destination < 0 || destination >= chain.targets.length) return false;
+	return reorderTarget(db, familyKey, index, destination);
+}
+
+/**
+ * Moves one target to a position, for a drag rather than a single step. Out of
+ * range lands on the nearest end rather than being refused: a drop past the last
+ * row means the last row.
+ */
+export function moveTargetTo(
+	db: Database,
+	familyKey: string,
+	providerID: string,
+	to: number,
+): boolean {
+	const chain = getStoredChain(db, familyKey);
+	if (!chain) return false;
+	const index = chain.targets.findIndex(
+		(target) => target.providerID === providerID,
+	);
+	if (index === -1) return false;
+	const destination = Math.max(0, Math.min(to, chain.targets.length - 1));
+	if (destination === index) return false;
+	return reorderTarget(db, familyKey, index, destination);
+}
+
+/** Rewrites the order once the move has been decided. */
+function reorderTarget(
+	db: Database,
+	familyKey: string,
+	index: number,
+	destination: number,
+): boolean {
+	const chain = getStoredChain(db, familyKey);
+	if (!chain) return false;
 
 	const reordered = chain.targets.slice();
 	const [moved] = reordered.splice(index, 1);

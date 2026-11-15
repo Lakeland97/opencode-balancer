@@ -47,6 +47,7 @@ import {
 	resetRow,
 	rowByKey,
 	shiftTarget,
+	shiftTargetTo,
 } from "./chain-actions";
 import {
 	type FamilyRoute,
@@ -172,14 +173,19 @@ export async function registerBalancerRpc({
 		},
 
 		chainMove: async (input) => {
-			const { key, providerID, direction } = input as {
+			const { key, providerID, to, direction } = input as {
 				key: string;
 				providerID: string;
-				direction: "up" | "down";
+				direction?: "up" | "down";
+				to?: number;
 			};
 			const family = await rowByKey(ctx, db, key);
 			if (!family) return { message: `No row named ${key}.`, ok: false };
-			const result = shiftTarget(db, family, providerID, direction);
+			// A drag names the slot it landed on; the step controls name a direction.
+			const result =
+				typeof to === "number"
+					? shiftTargetTo(db, family, providerID, to)
+					: shiftTarget(db, family, providerID, direction ?? "down");
 			if (result.ok) forgetRoutingMemory();
 			return result;
 		},
@@ -298,15 +304,36 @@ export async function registerBalancerRpc({
 		log: async () => ({ entries: readLog() }),
 
 		move: async (input) => {
-			const { providerID, alias, direction } = input as {
+			const { providerID, alias, to, direction } = input as {
 				providerID: string;
 				alias: string;
-				direction: "up" | "down";
+				direction?: "up" | "down";
+				to?: number;
 			};
-			moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
+			// A drag names the slot it landed on; the step controls name a direction.
+			if (typeof to === "number") {
+				const all = orderedAccounts(db);
+				const from = all.findIndex(
+					(account) =>
+						account.providerID === providerID && account.alias === alias,
+				);
+				if (from === -1) {
+					return {
+						message: `No credential ${providerID}/${alias}.`,
+						ok: false,
+					};
+				}
+				const delta = Math.max(0, Math.min(to, all.length - 1)) - from;
+				if (delta !== 0) moveAccount(db, providerID, alias, delta);
+			} else {
+				moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
+			}
 			forgetRoutingMemory();
 			return {
-				message: `Moved ${providerID}/${alias} ${direction}.`,
+				message:
+					typeof to === "number"
+						? `Moved ${providerID}/${alias}.`
+						: `Moved ${providerID}/${alias} ${direction}.`,
 				ok: true,
 			};
 		},

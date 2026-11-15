@@ -54,12 +54,12 @@ balancer model and compact it ourselves") removed the whole buffer mechanism:
 **What changed after this plan, and is not described below.** The unit of routing became
 the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
 
-- One panel row per credential, each with its own `enabled`, `free` and `↑ ↓`. `free` and
+- One panel row per credential, each with its own `enabled`, `free` and a reorder grip. `free` and
   the on/off switch are `accounts.free_only` / `accounts.disabled`; the order is
   `accounts.position`, a global order spanning providers. `provider_priority` is emptied
   by `migrateProviderSettings` and no longer consulted.
 - An **automatic** row now walks the credential order itself — the list the panel shows —
-  so `↑ ↓` means what it looks like. A **stored** chain is still an explicit order of
+  so the order the panel draws is the order requests take. A **stored** chain is still an explicit order of
   providers and is walked as written, each provider's credentials tried in turn.
 - `exclude` and the session's tried-set hold `provider/alias` keys, so parking one
   credential hands over to the provider's next one instead of writing off the provider.
@@ -69,7 +69,7 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   model it names and carries its provider's free spelling beside it, so a credential told
   to spend nothing gets that spelling *and* its real window.
 
-**Follow-ons after this reconcile.** Eleven changes landed afterwards, on 2026-11-15:
+**Follow-ons after this reconcile.** Twelve changes landed afterwards, on 2026-11-15:
 
 - A row's compaction share is the **model's**, not the target's: `model_percent:<row>` replaces
   `context_percent:<row>:<provider>`, `migrateModelPercent` folds anything the old scheme left onto the
@@ -159,6 +159,18 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   `packages/core/src/session/compaction.ts`, ~2.5k characters, ~640 tokens, ~680 with the nudge, rounded
   up. **No UI change** — the panel shows the limit and the buffer as typed; the floor is a server-side
   detail that moves the trigger, not a control.
+- **Reordering is a drag, not a pair of arrows.** The credential rows and a row's targets carried `↑`/`↓`
+  buttons — one step per press, two controls per row, for lists a person would rather drag. Each row now
+  has one grip: drag it onto the row whose place it should take, or focus it and press the arrow keys, so
+  nothing a keyboard could do is lost. The drop is unambiguous by construction rather than by luck —
+  credentials are one flat list in `accounts.position` order (the **models** list is the only grouped
+  one, and it is not reordered), and targets are a per-row ordered list — so a drop names a slot, not a
+  direction. `move` and `chainMove` now accept `to` as well as `direction`; `moveAccount` already took a
+  delta, and `moveTargetTo` (`core/chains.ts`) was split out of `moveTarget` so a target can leap several
+  places, with `shiftTargetTo` (`server/chain-actions.ts`) snapshotting an automatic row first exactly as
+  a step does. The pointer finds the row under it with `elementsFromPoint` and a `data-reorder` slot, so
+  the hit area follows the rows themselves rather than any DOM nesting. The grip is a `role="button"`
+  with `tabindex`, so focus and keyboard reordering survive the buttons going away.
 
 **Outstanding**
 
