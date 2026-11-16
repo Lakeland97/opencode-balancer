@@ -511,6 +511,58 @@ describe("two models in one session", () => {
 		expect(again.headers.authorization).toBe("Bearer sk-3");
 	});
 
+	test("an HTTP retry stays on the account its model request chose", async () => {
+		const { registry } = await twoModels();
+
+		const first = { ...row("http-retry", "alpha-1"), request: newRequest() };
+		await registry["model.request"](first);
+		await registry["http.request"](first);
+		expect(first.request.headers.get("authorization")).toBe("Bearer sk-1");
+
+		// The endpoint rejects the call, so `p1` is parked. The host's HTTP
+		// stack retries the same model request; routing it again here is what
+		// turns one failure into errors from two providers.
+		await registry["http.response"]({
+			...first,
+			response: new Response(null, { status: 429 }),
+		});
+		const retry = { ...row("http-retry", "alpha-1"), request: newRequest() };
+		await registry["http.request"](retry);
+
+		expect(retry.request.headers.get("authorization")).toBe("Bearer sk-1");
+	});
+
+	test("an auxiliary call does not move the primary's failure to its own account", async () => {
+		const { db, registry } = await twoModels();
+
+		// The conversation is served by `p1` and its request is rejected.
+		const primary = { ...row("aux-race", "alpha-1"), request: newRequest() };
+		await registry["model.request"](primary);
+		await registry["http.request"](primary);
+		expect(primary.headers.authorization).toBe("Bearer sk-1");
+		await registry["http.response"]({
+			...primary,
+			response: new Response(null, { status: 429 }),
+		});
+
+		// While `p1` is parked, the host titles the session. An auxiliary call
+		// must not rebalance the row: it stays on the credential the primary
+		// attempt went to, so the failure below is still charged there.
+		const title = { ...row("aux-race", "alpha-1"), kind: "title" };
+		await registry["model.request"](title);
+		expect(title.headers.authorization).toBe("Bearer sk-1");
+
+		// The primary attempt's typed error arrives after the title routed.
+		await registry.retry({
+			...retryEvent("aux-race", { delay: 1_000, retry: false }),
+			error: { message: "OpenCode Go monthly usage limit reached" },
+			model: { id: "alpha-1", providerID: "balancer" },
+		});
+
+		expect(getAccount(db, "p2", "a")?.rateLimitedUntil).toBeUndefined();
+		expect(readLimitedReason(db, "p1", "a")).toContain("monthly usage limit");
+	});
+
 	test("an auxiliary call does not decide where the conversation is cut", async () => {
 		const { registry } = await twoModels();
 

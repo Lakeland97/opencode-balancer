@@ -109,6 +109,77 @@ function track(sessionID: string, tracked: Tracked, familyKey?: string) {
 	bySession.set(sessionKey(sessionID, ROUTED), tracked);
 }
 
+/**
+ * The route one model request chose, kept for the HTTP requests that carry it.
+ * The host's HTTP stack retries a failed request on its own, and each of those
+ * retries must stay on the credential the request was routed to: re-selecting
+ * there turns one failure into errors from several providers, and the retry
+ * hook can only charge the last one it sees.
+ */
+type BoundRoute = { readonly at: number; readonly route: ChosenRoute };
+const boundRoutes = new Map<string, BoundRoute>();
+const PRIMARY_KIND = "primary";
+
+/**
+ * Title and one-off generation run beside the conversation. They must use its
+ * account so a failure belongs to the same credential, but they must not
+ * replace the target a conversation failure is charged to.
+ */
+const SIDE_KINDS = new Set(["title", "generate"]);
+
+function boundKey(sessionID: string, familyKey: string, kind: string) {
+	return `${sessionID}\u0000${familyKey}\u0000${kind}`;
+}
+
+function boundRoute(sessionID: string, familyKey: string, kind: string) {
+	const value = boundRoutes.get(boundKey(sessionID, familyKey, kind));
+	return value && now() - value.at <= STALE_AFTER_MS ? value.route : undefined;
+}
+
+function bindRoute(
+	sessionID: string,
+	familyKey: string,
+	kind: string,
+	route: ChosenRoute,
+) {
+	boundRoutes.set(boundKey(sessionID, familyKey, kind), {
+		at: now(),
+		route,
+	});
+}
+
+function clearBoundRoutes(sessionID: string, familyKey: string) {
+	const prefix = `${sessionID}\u0000${familyKey}\u0000`;
+	for (const key of [...boundRoutes.keys()]) {
+		if (key.startsWith(prefix)) boundRoutes.delete(key);
+	}
+}
+
+/**
+ * A side call uses the conversation's current target when there is one. It is
+ * allowed to send to a parked credential: the park describes the next choice,
+ * not a request already bound for that account, and sending elsewhere is what
+ * put two providers' errors on one attempt.
+ */
+function chooseSideRoute(input: {
+	db: Database;
+	family: ModelFamily;
+	sessionID: string;
+}) {
+	const primary = boundRoute(input.sessionID, input.family.key, PRIMARY_KIND);
+	if (primary) {
+		const account = getAccount(
+			input.db,
+			primary.providerID,
+			primary.account.alias,
+		);
+		if (account && !account.disabled) {
+			return { parkedFallback: false as const, route: { ...primary, account } };
+		}
+	}
+	return chooseStickyRoute(input);
+}
+
 function fresh(tracked: Tracked) {
 	return now() - tracked.at <= STALE_AFTER_MS;
 }
@@ -209,6 +280,7 @@ function forgetStaleTrail(db: Database, sessionID: string, familyKey: string) {
 export function forgetRoutingMemory() {
 	trailsByModel.clear();
 	announced.clear();
+	boundRoutes.clear();
 	for (const key of [...bySession.keys()]) {
 		if (isRoutedSlot(key)) bySession.delete(key);
 	}
@@ -417,20 +489,30 @@ export async function registerHooks({
 		if (event.model.providerID !== BALANCER_PROVIDER_ID) return;
 		const family = await familyFor(ctx, db, event.model.id);
 		if (!family) return;
+		const kind = String(event.kind);
+		const side = SIDE_KINDS.has(kind);
 		// The same route the request hook will pick, so the URL and credential
 		// set here cannot point at a different provider than the one it uses.
-		const chosen = chooseStickyRoute({
-			db,
-			family,
-			sessionID: event.sessionID,
-		});
+		const chosen = side
+			? chooseSideRoute({ db, family, sessionID: event.sessionID })
+			: chooseStickyRoute({
+					db,
+					family,
+					sessionID: event.sessionID,
+				});
 		if (!chosen) return;
 		const route = chosen.route;
+		bindRoute(event.sessionID, family.key, kind, route);
 
 		event.baseURL = route.baseURL;
 		const headers = new Headers(event.headers);
 		applyAuthToHeaders(headers, route.account.auth);
 		event.headers = Object.fromEntries(headers);
+
+		// A side call is not the conversation serving: it must not report the
+		// account as in use (which clears its park) or replace the target a
+		// conversation failure will be charged to.
+		if (side) return;
 
 		markAccountUsed(db, route.providerID, route.account.alias);
 		track(
@@ -475,13 +557,26 @@ export async function registerHooks({
 			const family = await familyFor(ctx, db, event.model.id);
 			if (!family) return;
 
-			const chosen = chooseStickyRoute({
-				db,
-				family,
-				sessionID: event.sessionID,
-			});
-			if (!chosen) return;
-			const route = chosen.route;
+			const kind = String(event.kind);
+			const side = SIDE_KINDS.has(kind);
+			// Reuse the route this model request chose. The host's HTTP stack
+			// retries the request itself, and choosing a new credential for each
+			// retry is what mixed two providers' errors into one attempt.
+			let route = boundRoute(event.sessionID, family.key, kind);
+			let parkedFallback = false;
+			if (!route) {
+				const chosen = side
+					? chooseSideRoute({ db, family, sessionID: event.sessionID })
+					: chooseStickyRoute({
+							db,
+							family,
+							sessionID: event.sessionID,
+						});
+				if (!chosen) return;
+				route = chosen.route;
+				parkedFallback = chosen.parkedFallback;
+			}
+			bindRoute(event.sessionID, family.key, kind, route);
 
 			let request = event.request;
 			const url = routedURL(request.url, route.baseURL);
@@ -493,50 +588,48 @@ export async function registerHooks({
 			request = new Request(request, { headers });
 
 			event.request = request;
-			announceRoute({
-				db,
-				// Per row, so one model's switch is not announced as another's:
-				// with two models in a session these lines would otherwise
-				// alternate for no reason at all.
-				key: modelKey(event.sessionID, family.key),
-				modelID: family.key,
-				next: { alias: route.account.alias, providerID: route.providerID },
-				reason: chosen.parkedFallback
-					? "nothing healthy could answer; trying it anyway"
-					: undefined,
-			});
-			markAccountUsed(db, route.providerID, route.account.alias);
-			byRequest.set(request, {
+			if (!side) {
+				announceRoute({
+					db,
+					// Per row, so one model's switch is not announced as another's:
+					// with two models in a session these lines would otherwise
+					// alternate for no reason at all.
+					key: modelKey(event.sessionID, family.key),
+					modelID: family.key,
+					next: { alias: route.account.alias, providerID: route.providerID },
+					reason: parkedFallback
+						? "nothing healthy could answer; trying it anyway"
+						: undefined,
+				});
+				markAccountUsed(db, route.providerID, route.account.alias);
+			}
+			const tracked = {
 				alias: route.account.alias,
 				at: now(),
 				context: route.context,
 				familyKey: family.key,
 				providerID: route.providerID,
-			});
-			track(
-				event.sessionID,
-				{
-					alias: route.account.alias,
-					at: now(),
-					context: route.context,
-					familyKey: family.key,
-					providerID: route.providerID,
-				},
-				family.key,
-			);
-			// Where the conversation is running, for the compaction watcher. An
-			// auxiliary call — a title, a summary, a one-off generation — is the
-			// host doing housekeeping in the same session, and its model must not
-			// decide where that conversation is cut. Anything else counts as the
-			// conversation, including a kind this host has not told us about:
-			// refusing to record would mean refusing to compact, and a session
-			// that quietly stops being compacted overflows instead.
-			if (!AUXILIARY_KINDS.has(String(event.kind))) {
-				recordTarget(event.sessionID, {
-					context: route.context,
-					familyKey: family.key,
-					providerID: route.providerID,
-				});
+			};
+			byRequest.set(request, tracked);
+			// A side call keeps its failure on its own request, so the response
+			// hook charges the right credential, but never rewrites the
+			// conversation's remembered target.
+			if (!side) {
+				track(event.sessionID, tracked, family.key);
+				// Where the conversation is running, for the compaction watcher. An
+				// auxiliary call — a title, a summary, a one-off generation — is the
+				// host doing housekeeping in the same session, and its model must not
+				// decide where that conversation is cut. Anything else counts as the
+				// conversation, including a kind this host has not told us about:
+				// refusing to record would mean refusing to compact, and a session
+				// that quietly stops being compacted overflows instead.
+				if (!AUXILIARY_KINDS.has(String(event.kind))) {
+					recordTarget(event.sessionID, {
+						context: route.context,
+						familyKey: family.key,
+						providerID: route.providerID,
+					});
+				}
 			}
 			return;
 		}
@@ -735,6 +828,7 @@ export async function registerHooks({
 
 		// Forget this row's target so the retry routes from scratch; the account
 		// just marked limited is skipped by the health check either way.
+		clearBoundRoutes(event.sessionID, rowKey);
 		bySession.delete(modelKey(event.sessionID, rowKey));
 		bySession.delete(sessionKey(event.sessionID, ROUTED));
 		bySession.delete(sessionKey(event.sessionID, tracked.providerID));
