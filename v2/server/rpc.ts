@@ -1,17 +1,11 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import {
-	clearAccountPark,
-	getAccount,
 	listAccounts,
 	mostRecentlyUsed,
-	moveAccount,
 	orderedAccounts,
 	readLimitedReason,
 	readLimitedUntil,
-	setAccountEnabled,
-	setAccountFreeOnly,
-	useAccount,
 } from "../core/accounts";
 import {
 	readBuffer,
@@ -39,7 +33,7 @@ import {
 	resolveChain,
 } from "./connectors";
 import { forgetRoutingMemory } from "./hooks";
-import { clearLog, readLog, recordLog } from "./log";
+import { clearLog, readLog } from "./log";
 import { chooseRoute } from "./routing";
 import { enabledAccounts, selectHealthyAccount } from "./selection";
 import {
@@ -51,6 +45,12 @@ import {
 	writeRebalance,
 	writeRebalanceAuto,
 } from "./settings";
+import {
+	writeMove,
+	writeSetEnabled,
+	writeSetFreeOnly,
+	writeUse,
+} from "./writes";
 
 type Pair = { providerID: string; alias: string };
 
@@ -292,32 +292,7 @@ export async function registerBalancerRpc({
 				direction?: "up" | "down";
 				to?: number;
 			};
-			// A drag names the slot it landed on; the step controls name a direction.
-			if (typeof to === "number") {
-				const all = orderedAccounts(db);
-				const from = all.findIndex(
-					(account) =>
-						account.providerID === providerID && account.alias === alias,
-				);
-				if (from === -1) {
-					return {
-						message: `No credential ${providerID}/${alias}.`,
-						ok: false,
-					};
-				}
-				const delta = Math.max(0, Math.min(to, all.length - 1)) - from;
-				if (delta !== 0) moveAccount(db, providerID, alias, delta);
-			} else {
-				moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
-			}
-			forgetRoutingMemory();
-			return {
-				message:
-					typeof to === "number"
-						? `Moved ${providerID}/${alias}.`
-						: `Moved ${providerID}/${alias} ${direction}.`,
-				ok: true,
-			};
+			return writeMove(db, { alias, direction, providerID, to });
 		},
 
 		priority: async () => {
@@ -383,16 +358,7 @@ export async function registerBalancerRpc({
 				alias: string;
 				enabled: boolean;
 			};
-			setAccountEnabled(db, providerID, alias, enabled);
-			forgetRoutingMemory();
-			recordLog(
-				"config",
-				`${providerID}/${alias} ${enabled ? "enabled" : "disabled"}`,
-			);
-			return {
-				message: `${providerID}/${alias} ${enabled ? "enabled" : "disabled"}.`,
-				ok: true,
-			};
+			return writeSetEnabled(db, { alias, enabled, providerID });
 		},
 
 		setFreeOnly: async (input) => {
@@ -401,16 +367,7 @@ export async function registerBalancerRpc({
 				alias: string;
 				enabled: boolean;
 			};
-			setAccountFreeOnly(db, providerID, alias, enabled);
-			forgetRoutingMemory();
-			recordLog(
-				"config",
-				`${providerID}/${alias} ${enabled ? "free models only" : "paid models too"}`,
-			);
-			return {
-				message: `${providerID}/${alias} uses ${enabled ? "free models only" : "paid models too"}.`,
-				ok: true,
-			};
+			return writeSetFreeOnly(db, { alias, enabled, providerID });
 		},
 
 		setModelLimit: async (input) => {
@@ -441,27 +398,7 @@ export async function registerBalancerRpc({
 
 		use: async (input) => {
 			const { providerID, alias } = input as Pair;
-			const account = getAccount(db, providerID, alias);
-			if (!account) {
-				return { message: `No credential ${providerID}/${alias}.`, ok: false };
-			}
-			// Picking a credential is how its provider is told to serve with it:
-			// the row moves ahead of that provider's other credentials, and the
-			// stored alias names it. Routing reads the order, so the two agree.
-			useAccount(db, providerID, alias);
-			// It is also the retry a park was waiting for, so a parked credential
-			// becomes eligible again and the next call actually goes there.
-			clearAccountPark(db, account.providerID, account.alias);
-			// The pick takes effect now, not after this session's next answer:
-			// the trail and the pin are dropped so the next request derives its
-			// route from the order the pick just changed. The window restarts by
-			// construction — the new trail begins at the current time.
-			forgetRoutingMemory();
-			recordLog("config", `serving with ${providerID}/${account.alias}`);
-			return {
-				message: `Serving with ${providerID}/${account.alias}.`,
-				ok: true,
-			};
+			return writeUse(db, { alias, providerID });
 		},
 	});
 
