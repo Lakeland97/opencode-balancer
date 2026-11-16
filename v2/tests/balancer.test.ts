@@ -5,6 +5,7 @@ import {
 	getAccount,
 	getActiveAccount,
 	listAccounts,
+	markAccountUsed,
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
@@ -233,6 +234,7 @@ describe("chain commands", () => {
 			connectorModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
 			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
 		]);
+		markAccountUsed(db, "p1", "a");
 
 		const reply = await runCommand({
 			ctx,

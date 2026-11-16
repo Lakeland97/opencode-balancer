@@ -7,25 +7,12 @@ import {
 	readLimitedReason,
 	readLimitedUntil,
 } from "../core/accounts";
-import {
-	readBuffer,
-	readBufferEnforcement,
-	readLimit,
-	readModelLimit,
-} from "../core/context";
+import { readBuffer, readBufferEnforcement, readLimit } from "../core/context";
 import { getBalancingEnabled } from "../core/priority";
 import { getRebalanceAuto, readRebalance } from "../core/rebalance";
-import { now } from "../core/time";
 import { Balancer } from "../rpc";
-import {
-	type FamilyRoute,
-	loadCatalog,
-	type ModelFamily,
-	resolveChain,
-} from "./connectors";
+import { listChainRows } from "./chain-actions";
 import { clearLog, readLog } from "./log";
-import { chooseRoute } from "./routing";
-import { enabledAccounts, selectHealthyAccount } from "./selection";
 import {
 	writeBalancing,
 	writeBufferEnforcement,
@@ -48,52 +35,6 @@ import {
 } from "./writes";
 
 type Pair = { providerID: string; alias: string };
-
-/**
- * The model a target will actually be sent to.
- *
- * `free` is a property of the credential now, so the row shows the free spelling
- * when the credential that would serve is told to spend nothing, and the id it
- * was configured with otherwise. The walk is the one routing makes: down the
- * credentials in the balancer's order, stopping at the first that can answer, so
- * a free-only credential whose provider has no free spelling is passed over
- * exactly as routing passes it over.
- *
- * A park is not a reason to stop saying it. The park is temporary and the row's
- * `state` already reports it; consulting only *healthy* credentials meant the
- * free spelling vanished the moment the key was parked, which is how the panel
- * stopped telling the user that a free model was the one in play.
- */
-function resolvedModelID(db: Database, target: FamilyRoute): string {
-	if (target.free !== false) return target.modelID;
-	for (const account of enabledAccounts(db, target.providerID)) {
-		if (!account.freeOnly) return target.modelID;
-		if (target.freeVariant) return target.freeVariant.modelID;
-	}
-	return target.modelID;
-}
-
-function targetState(
-	db: Database,
-	family: ModelFamily,
-	target: { providerID: string; modelID: string; available?: boolean },
-): string {
-	const live = chooseRoute(db, family);
-	const serving =
-		live?.providerID === target.providerID && live.modelID === target.modelID;
-	if (target.available === false) return "unavailable";
-	// No healthy credential means the provider is switched off entirely, or every
-	// one of its credentials is disabled, parked, or waiting on a cooldown.
-	const account = selectHealthyAccount(db, target.providerID);
-	if (!account) return "unavailable";
-	if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
-		return "limited";
-	}
-	// A row's targets are labelled by what would serve the next request — the
-	// model currently selected for the row. Only one target carries it, and only
-	// one credential is genuinely in use at a time.
-	return serving ? "in use" : "available";
-}
 
 /**
  * Typed RPC surface so clients (a GUI part, the TUI, or any SDK client) can
@@ -166,27 +107,9 @@ export async function registerBalancerRpc({
 			return writeChainReset(ctx, db, key);
 		},
 
-		chains: async () => {
-			const catalog = await loadCatalog(ctx, db);
-			return {
-				rows: catalog.families.map((family) => ({
-					key: family.key,
-					label: family.name,
-					// This model's own limit as typed, or empty when it follows
-					// the global one. One value per model: the credential
-					// serving it does not change it.
-					limit: readModelLimit(db, family.key) ?? "",
-					package: family.package,
-					stored: Boolean(family.stored),
-					targets: resolveChain(db, family).map((target) => ({
-						modelID: target.modelID,
-						providerID: target.providerID,
-						resolved: resolvedModelID(db, target),
-						state: targetState(db, family, target),
-					})),
-				})),
-			};
-		},
+		chains: async () => ({
+			rows: await listChainRows(ctx, db),
+		}),
 
 		clearLog: async () => {
 			clearLog();

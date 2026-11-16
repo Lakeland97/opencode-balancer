@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
+import { mostRecentlyUsed } from "../core/accounts";
 import {
 	type ChainTarget,
 	deleteChain,
@@ -7,13 +8,16 @@ import {
 	moveTargetTo,
 	saveChain,
 } from "../core/chains";
+import { readModelLimit } from "../core/context";
 import { matchModel } from "../core/models";
 import {
+	type FamilyRoute,
 	invalidateCatalog,
 	loadCatalog,
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
+import { enabledAccounts, selectHealthyAccount } from "./selection";
 
 const DEFAULT_CHAIN_PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -270,4 +274,87 @@ export function resetRow(db: Database, family: ModelFamily): boolean {
 	const existed = deleteChain(db, family.key);
 	invalidateCatalog();
 	return existed;
+}
+
+/**
+ * The model a target will actually be sent to.
+ *
+ * `free` is a property of the credential now, so the row shows the free spelling
+ * when the credential that would serve is told to spend nothing, and the id it
+ * was configured with otherwise. The walk is the one routing makes: down the
+ * credentials in the balancer's order, stopping at the first that can answer, so
+ * a free-only credential whose provider has no free spelling is passed over
+ * exactly as routing passes it over.
+ *
+ * A park is not a reason to stop saying it. The park is temporary and the row's
+ * `state` already reports it; consulting only *healthy* credentials meant the
+ * free spelling vanished the moment the key was parked, which is how the panel
+ * stopped telling the user that a free model was the one in play.
+ */
+function resolvedModelID(db: Database, target: FamilyRoute): string {
+	if (target.free !== false) return target.modelID;
+	for (const account of enabledAccounts(db, target.providerID)) {
+		if (!account.freeOnly) return target.modelID;
+		if (target.freeVariant) return target.freeVariant.modelID;
+	}
+	return target.modelID;
+}
+
+function targetState(
+	db: Database,
+	target: { providerID: string; modelID: string; available?: boolean },
+): string {
+	if (target.available === false) return "unavailable";
+	// No healthy credential means the provider is switched off entirely, or every
+	// one of its credentials is disabled, parked, or waiting on a cooldown.
+	const account = selectHealthyAccount(db, target.providerID);
+	if (!account) return "unavailable";
+	// "In use" is the credential that served the most recent request, the same
+	// definition the credential rows use. Choosing the next route instead made a
+	// fresh, untouched chain claim it was already serving.
+	const used = mostRecentlyUsed(db);
+	return used?.providerID === target.providerID && used.alias === account.alias
+		? "in use"
+		: "available";
+}
+
+export type ChainRow = {
+	key: string;
+	label: string;
+	package: string;
+	/** This model's own limit as typed, or empty when it follows the global one. */
+	limit: string;
+	stored: boolean;
+	targets: Array<{
+		providerID: string;
+		modelID: string;
+		resolved: string;
+		state: string;
+	}>;
+};
+
+/**
+ * Every row the panel can show, shaped once. The RPC returns them all and the
+ * `/balancer chains` command filters; either way the panel and the terminal are
+ * describing the same catalogue with the same state words.
+ */
+export async function listChainRows(
+	ctx: Context,
+	db: Database,
+): Promise<ChainRow[]> {
+	const catalog = await loadCatalog(ctx, db);
+	return catalog.families.map((family) => ({
+		key: family.key,
+		label: family.name,
+		// One value per model: the credential serving it does not change it.
+		limit: readModelLimit(db, family.key) ?? "",
+		package: family.package,
+		stored: Boolean(family.stored),
+		targets: resolveChain(db, family).map((target) => ({
+			modelID: target.modelID,
+			providerID: target.providerID,
+			resolved: resolvedModelID(db, target),
+			state: targetState(db, target),
+		})),
+	}));
 }

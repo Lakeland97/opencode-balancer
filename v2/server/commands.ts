@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
+import { copy } from "../copy";
 import {
 	clearAccountPark,
 	getAccount,
@@ -8,27 +9,42 @@ import {
 	mostRecentlyUsed,
 	moveAccount,
 	orderedAccounts,
+	readLimitedReason,
+	readLimitedUntil,
 	setAccountEnabled,
 	setAccountFreeOnly,
 	type UsedAccount,
 	useAccount,
 } from "../core/accounts";
+import {
+	cutFor,
+	DEFAULT_PERCENT,
+	formatTokens,
+	readBuffer,
+	readBufferEnforcement,
+	readLimit,
+} from "../core/context";
+import { credentialNote, formatAttempt, routeMarkers } from "../core/format";
 import { matchModel } from "../core/models";
+import { storePath } from "../core/path";
 import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
-import { now } from "../core/time";
+import {
+	formatDuration,
+	getRebalanceAuto,
+	rebalanceAfterMs,
+} from "../core/rebalance";
 import type { Account } from "../core/types";
 import {
 	addTarget,
 	findRow,
+	listChainRows,
 	removeTarget,
 	resetRow,
-	rowTargets,
 	shiftTarget,
 } from "./chain-actions";
 import { invalidateCatalog } from "./connectors";
 import { syncAccounts } from "./import-credentials";
-import { chooseRoute } from "./routing";
-import { selectHealthyAccount } from "./selection";
+import { clearLog, readLog } from "./log";
 
 function parseArgs(input: string) {
 	return (
@@ -37,49 +53,119 @@ function parseArgs(input: string) {
 	);
 }
 
+function accountNote(db: Database, account: Account) {
+	return credentialNote({
+		limited: account.rateLimitedUntil != null,
+		limitedUntil: readLimitedUntil(db, account.providerID, account.alias),
+		reason: readLimitedReason(db, account.providerID, account.alias),
+		resets: copy.resets,
+	});
+}
+
 function accountLine(db: Database, account: Account, used?: UsedAccount) {
-	const marks: string[] = [];
-	const limited = Boolean(
-		account.rateLimitedUntil && account.rateLimitedUntil > now(),
-	);
-	// Only one account served the most recent request; the rest are merely
-	// configured. A limited or disabled account is not also "active", which
-	// reads as a contradiction next to the parked marker.
-	if (
-		!account.disabled &&
-		used?.providerID === account.providerID &&
-		used.alias === account.alias
-	) {
-		marks.push("in use");
-	}
-	if (
-		!account.disabled &&
-		!limited &&
-		getActiveAccount(db, account.providerID)?.alias === account.alias
-	) {
-		marks.push("active");
-	}
+	const limited = account.rateLimitedUntil != null;
+	// A park is cleared by the next attempt, so any park at all reads as
+	// limited. `active` means the balancer can route to the credential: switched
+	// on and not sitting out a failure. A provider with two keys has two active
+	// rows, which is the question `list` is answering.
+	const marks: string[] = routeMarkers({
+		active: !account.disabled && !limited,
+		inUse:
+			!account.disabled &&
+			used?.providerID === account.providerID &&
+			used.alias === account.alias,
+		limited,
+	}).map((marker) => copy[marker]);
 	if (account.disabled) marks.push("disabled");
-	if (limited) {
-		const seconds = Math.ceil(((account.rateLimitedUntil ?? 0) - now()) / 1000);
-		marks.push(`limited ${seconds}s`);
-	}
 	const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
-	return `${account.providerID}/${account.alias}${suffix}`;
+	const note = accountNote(db, account);
+	return `${account.providerID}/${account.alias}${suffix}${
+		note ? `  ${note}` : ""
+	}`;
 }
 
 function statusSummary(db: Database) {
 	const balancing = getBalancingEnabled(db) ? "on" : "off";
 	const accounts = listAccounts(db);
 	const providers = new Set(accounts.map((account) => account.providerID));
+	// Any park counts: the credential failed and has not been tried since. An
+	// expired park is still a state the user has to see, not a silent zero.
 	const limited = accounts.filter(
-		(account) => account.rateLimitedUntil && account.rateLimitedUntil > now(),
+		(account) => account.rateLimitedUntil != null,
 	).length;
 	return [
 		`Automatic balancing: ${balancing}`,
 		`Accounts: ${accounts.length} across ${providers.size} provider(s)`,
 		`Currently rate limited: ${limited}`,
 	].join("\n");
+}
+
+/**
+ * The settings summary the panel and `settings`/`diag` share: what is stored,
+ * and the cut it actually produces.
+ */
+function settingsLines(db: Database) {
+	const limit = readLimit(db);
+	const buffer = readBuffer(db);
+	const enforcement = readBufferEnforcement(db);
+	const cut = cutFor(limit ?? "", buffer ?? "", enforcement);
+	return [
+		`Automatic balancing: ${getBalancingEnabled(db) ? "on" : "off"}`,
+		`Context limit: ${
+			limit ?? `default (${DEFAULT_PERCENT}% of the declared window)`
+		}`,
+		`Buffer: ${buffer ?? "built-in"}`,
+		`Enforcement: ${enforcement}`,
+		`Rebalance after: ${
+			getRebalanceAuto(db) ? formatDuration(rebalanceAfterMs(db)) : "off"
+		}`,
+		`Cut at ${formatTokens(cut) || "—"}`,
+	];
+}
+
+/** Credentials sitting out a park, whether or not its clock has run out. */
+function errorList(db: Database) {
+	const accounts = orderedAccounts(db).filter(
+		(account) => account.rateLimitedUntil != null,
+	);
+	if (accounts.length === 0) {
+		return "No credential is sitting out a rate limit.";
+	}
+	return accounts
+		.map((account) => {
+			const note = accountNote(db, account);
+			return [
+				`${account.providerID}/${account.alias}  [${copy.limited}]`,
+				...(note ? [`  ${note}`] : []),
+				`  last tried ${formatAttempt(account.lastUsedAt)}`,
+			].join("\n");
+		})
+		.join("\n\n");
+}
+
+/**
+ * The rows worth listing as chains: every custom row, plus an automatic row
+ * only when it has more than one target, because a single-target automatic row
+ * says nothing the credential list does not.
+ */
+async function chainList(ctx: Context, db: Database) {
+	const rows = (await listChainRows(ctx, db)).filter(
+		(row) => row.stored || row.targets.length > 1,
+	);
+	if (rows.length === 0) {
+		return "No custom chains; every row follows the credential order.";
+	}
+	return rows
+		.map((row) =>
+			[
+				row.key,
+				row.label,
+				row.limit ? `limit ${row.limit}` : "global",
+				row.stored ? "custom" : "automatic",
+				`${row.targets.length} target${row.targets.length === 1 ? "" : "s"}`,
+			].join(" — "),
+		)
+		.join("\n");
 }
 
 function accountList(db: Database, providerID?: string) {
@@ -163,6 +249,11 @@ export async function runCommand({
 			"  gui                          Open the Desktop panel",
 			"  list [provider]              Credentials, in the order they are tried",
 			"  status                       Balancing state and account totals",
+			"  errors                       Credentials sitting out a rate limit, with refills",
+			"  settings                     Limits, buffer and the cut they produce",
+			"  chains                       Custom rows, or automatic rows with several targets",
+			"  log [n] | log clear          Recent decisions, or clear the log",
+			"  diag                         Store path, counts and settings",
 			"  use <provider> <alias>       Serve this provider with that credential",
 			"  import                       Re-read the credentials OpenCode holds",
 			"  on | off                     Toggle automatic failover",
@@ -190,6 +281,49 @@ export async function runCommand({
 
 	if (action === "status") {
 		return statusSummary(db);
+	}
+
+	if (action === "errors") {
+		return errorList(db);
+	}
+
+	if (action === "settings") {
+		return settingsLines(db).join("\n");
+	}
+
+	if (action === "chains") {
+		return chainList(ctx, db);
+	}
+
+	if (action === "log") {
+		const [verb] = args;
+		if (verb === "clear") {
+			clearLog();
+			return "Cleared the log.";
+		}
+		const entries = readLog();
+		if (entries.length === 0) return "The log is empty.";
+		const wanted = verb ? Number.parseInt(verb, 10) : 50;
+		const take = Number.isFinite(wanted) && wanted > 0 ? wanted : 50;
+		return entries
+			.slice(-take)
+			.map(
+				(entry) =>
+					`${new Date(entry.at).toTimeString().slice(0, 8)} ${entry.text}`,
+			)
+			.join("\n");
+	}
+
+	if (action === "diag") {
+		const accounts = listAccounts(db);
+		const rows = await listChainRows(ctx, db);
+		const custom = rows.filter((row) => row.stored).length;
+		const logs = readLog().length;
+		return [
+			`Store: ${storePath()}`,
+			`${accounts.length} credential${accounts.length === 1 ? "" : "s"}, ${custom} custom row${custom === 1 ? "" : "s"}, ${logs} log entr${logs === 1 ? "y" : "ies"}`,
+			...settingsLines(db),
+		].join("\n");
 	}
 
 	if (action === "add" || action === "import") {
@@ -273,25 +407,16 @@ export async function runCommand({
 		const [verb, providerID, ...modelWords] = rest;
 
 		if (!verb) {
-			const live = chooseRoute(db, family);
-			const lines = rowTargets(db, family).map((target, index) => {
-				const marks: string[] = [];
-				if (
-					live?.providerID === target.providerID &&
-					live.modelID === target.modelID
-				) {
-					marks.push("in use");
-				}
-				const account = selectHealthyAccount(db, target.providerID);
-				if (!account) marks.push("no healthy account");
-				else if (account.rateLimitedUntil && account.rateLimitedUntil > now()) {
-					marks.push("limited");
-				}
-				const suffix = marks.length > 0 ? `  [${marks.join(", ")}]` : "";
-				return `  ${index + 1}. ${target.providerID}  ${target.modelID}${suffix}`;
+			const row = (await listChainRows(ctx, db)).find(
+				(entry) => entry.key === family.key,
+			);
+			const lines = (row?.targets ?? []).map((target, index) => {
+				const resolved =
+					target.resolved !== target.modelID ? ` → ${target.resolved}` : "";
+				return `  ${index + 1}. ${target.providerID}  ${target.modelID}${resolved}  [${target.state}]`;
 			});
 			return [
-				`${family.name} (${family.key}) — ${family.stored ? "custom order" : "automatic order"}`,
+				`${family.name} (${family.key}) — ${family.stored ? "custom order" : "automatic order"} — ${row?.limit ? `limit ${row.limit}` : "global"}`,
 				...lines,
 			].join("\n");
 		}
