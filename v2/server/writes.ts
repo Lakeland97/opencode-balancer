@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import type { Context } from "@opencode/plugin/promise/plugin";
 import {
 	clearAccountPark,
 	getAccount,
@@ -8,12 +9,23 @@ import {
 	setAccountFreeOnly,
 	useAccount,
 } from "../core/accounts";
+import {
+	addTarget,
+	createChain,
+	removeTarget,
+	resetRow,
+	rowByKey,
+	shiftTarget,
+	shiftTargetTo,
+} from "./chain-actions";
 import { invalidateCatalog } from "./connectors";
 import { forgetRoutingMemory } from "./hooks";
 import { recordLog } from "./log";
 import type { WriteResult } from "./settings";
 
 type Pair = { providerID: string; alias: string };
+/** A chain target is named by its provider alone; a credential pair is not its key. */
+type TargetRef = { providerID: string };
 
 /**
  * Account writes shared by the RPC handlers and the command parser. The side
@@ -110,6 +122,82 @@ export function writeMove(
 			typeof to === "number"
 				? `Moved ${providerID}/${alias}.`
 				: `Moved ${providerID}/${alias} ${direction}.`,
+		ok: true,
+	};
+}
+
+/**
+ * Chain writes shared by the panel and the command parser. A chain edit changes
+ * which provider serves, so a successful one drops the routing memory exactly
+ * as the panel's own call does.
+ */
+export async function writeChainAdd(
+	ctx: Context,
+	db: Database,
+	input: TargetRef & { key: string; modelID: string },
+): Promise<WriteResult> {
+	const { key, providerID, modelID } = input;
+	const family = await rowByKey(ctx, db, key);
+	if (!family) return { message: `No row named ${key}.`, ok: false };
+	const result = await addTarget(ctx, db, family, providerID, modelID);
+	if (result.ok) forgetRoutingMemory();
+	return result;
+}
+
+export async function writeChainCreate(
+	ctx: Context,
+	db: Database,
+	input: TargetRef & { modelID: string },
+): Promise<WriteResult & { key: string }> {
+	const result = await createChain(ctx, db, input.providerID, input.modelID);
+	if (result.ok) forgetRoutingMemory();
+	// The caller needs the row's key to address it next; a refusal has none.
+	return { ...result, key: result.key ?? "" };
+}
+
+export async function writeChainMove(
+	ctx: Context,
+	db: Database,
+	input: TargetRef & { key: string; direction?: "up" | "down"; to?: number },
+): Promise<WriteResult> {
+	const { key, providerID, to, direction } = input;
+	const family = await rowByKey(ctx, db, key);
+	if (!family) return { message: `No row named ${key}.`, ok: false };
+	// A drag names the slot it landed on; the step controls name a direction.
+	const result =
+		typeof to === "number"
+			? shiftTargetTo(db, family, providerID, to)
+			: shiftTarget(db, family, providerID, direction ?? "down");
+	if (result.ok) forgetRoutingMemory();
+	return result;
+}
+
+export async function writeChainRemove(
+	ctx: Context,
+	db: Database,
+	input: TargetRef & { key: string },
+): Promise<WriteResult> {
+	const { key, providerID } = input;
+	const family = await rowByKey(ctx, db, key);
+	if (!family) return { message: `No row named ${key}.`, ok: false };
+	const result = removeTarget(db, family, providerID);
+	if (result.ok) forgetRoutingMemory();
+	return result;
+}
+
+export async function writeChainReset(
+	ctx: Context,
+	db: Database,
+	key: string,
+): Promise<WriteResult> {
+	const family = await rowByKey(ctx, db, key);
+	if (!family) return { message: `No row named ${key}.`, ok: false };
+	const existed = resetRow(db, family);
+	if (existed) forgetRoutingMemory();
+	return {
+		message: existed
+			? `${key} is back to automatic order.`
+			: `${key} was already automatic.`,
 		ok: true,
 	};
 }

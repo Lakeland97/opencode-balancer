@@ -18,21 +18,11 @@ import { getRebalanceAuto, readRebalance } from "../core/rebalance";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
 import {
-	addTarget,
-	createChain,
-	removeTarget,
-	resetRow,
-	rowByKey,
-	shiftTarget,
-	shiftTargetTo,
-} from "./chain-actions";
-import {
 	type FamilyRoute,
 	loadCatalog,
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
-import { forgetRoutingMemory } from "./hooks";
 import { clearLog, readLog } from "./log";
 import { chooseRoute } from "./routing";
 import { enabledAccounts, selectHealthyAccount } from "./selection";
@@ -46,6 +36,11 @@ import {
 	writeRebalanceAuto,
 } from "./settings";
 import {
+	writeChainAdd,
+	writeChainCreate,
+	writeChainMove,
+	writeChainRemove,
+	writeChainReset,
 	writeMove,
 	writeSetEnabled,
 	writeSetFreeOnly,
@@ -118,11 +113,7 @@ export async function registerBalancerRpc({
 				providerID: string;
 				modelID: string;
 			};
-			const family = await rowByKey(ctx, db, key);
-			if (!family) return { message: `No row named ${key}.`, ok: false };
-			const result = await addTarget(ctx, db, family, providerID, modelID);
-			if (result.ok) forgetRoutingMemory();
-			return result;
+			return writeChainAdd(ctx, db, { key, modelID, providerID });
 		},
 
 		chainCreate: async (input) => {
@@ -130,9 +121,7 @@ export async function registerBalancerRpc({
 				providerID: string;
 				modelID: string;
 			};
-			const result = await createChain(ctx, db, providerID, modelID);
-			if (result.ok) forgetRoutingMemory();
-			return result;
+			return writeChainCreate(ctx, db, { modelID, providerID });
 		},
 
 		chainModels: async (input) => {
@@ -161,15 +150,7 @@ export async function registerBalancerRpc({
 				direction?: "up" | "down";
 				to?: number;
 			};
-			const family = await rowByKey(ctx, db, key);
-			if (!family) return { message: `No row named ${key}.`, ok: false };
-			// A drag names the slot it landed on; the step controls name a direction.
-			const result =
-				typeof to === "number"
-					? shiftTargetTo(db, family, providerID, to)
-					: shiftTarget(db, family, providerID, direction ?? "down");
-			if (result.ok) forgetRoutingMemory();
-			return result;
+			return writeChainMove(ctx, db, { direction, key, providerID, to });
 		},
 
 		chainRemove: async (input) => {
@@ -177,25 +158,12 @@ export async function registerBalancerRpc({
 				key: string;
 				providerID: string;
 			};
-			const family = await rowByKey(ctx, db, key);
-			if (!family) return { message: `No row named ${key}.`, ok: false };
-			const result = removeTarget(db, family, providerID);
-			if (result.ok) forgetRoutingMemory();
-			return result;
+			return writeChainRemove(ctx, db, { key, providerID });
 		},
 
 		chainReset: async (input) => {
 			const { key } = input as { key: string };
-			const family = await rowByKey(ctx, db, key);
-			if (!family) return { message: `No row named ${key}.`, ok: false };
-			const existed = resetRow(db, family);
-			if (existed) forgetRoutingMemory();
-			return {
-				message: existed
-					? `${key} is back to automatic order.`
-					: `${key} was already automatic.`,
-				ok: true,
-			};
+			return writeChainReset(ctx, db, key);
 		},
 
 		chains: async () => {
