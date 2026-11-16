@@ -23,62 +23,21 @@ import { credentialNote, formatAttempt, routeMarkers } from "./core/format";
 import { groupByBrand } from "./core/models";
 import { DEFAULT_REBALANCE_MS, formatDuration } from "./core/rebalance";
 import { Balancer } from "./rpc";
-
-type LogEntry = { at: number; kind: string; text: string };
-
-type Account = {
-	providerID: string;
-	alias: string;
-	/** Whether the balancer can send to it: switched on and not parked. */
-	active: boolean;
-	/** What would authorise the next request, fallback included. */
-	inUse: boolean;
-	limited: boolean;
-	/** What the endpoint reported when it parked this account. */
-	limitedReason?: string;
-	/** When the endpoint said its own quota returns, in ms; 0 when it did not say. */
-	limitedUntil: number;
-	/** When the balancer last pointed at this credential, in ms; 0 when never. */
-	lastUsedAt: number;
-	failures: number;
-};
-
-type Status = { balancing: boolean };
-type Listed = { accounts: Account[] };
-type Reply = { ok: boolean; message: string };
-type ContextState = { value: string };
-type BufferState = { enforce: string; value: string };
-type RebalanceState = { auto: boolean; value: string };
-
-type Target = {
-	modelID: string;
-	providerID: string;
-	/** What is actually sent, once a free-only provider substitutes. */
-	resolved: string;
-	state: string;
-};
-type Chain = {
-	key: string;
-	label: string;
-	package: string;
-	/** This model's own limit as typed, empty when it follows the global. */
-	limit: string;
-	stored: boolean;
-	targets: Target[];
-};
-type Chains = { rows: Chain[] };
-type Provider = {
-	/** The credential's own name within the provider. */
-	alias: string;
-	enabled: boolean;
-	freeOnly: boolean;
-	/** The provider's display name. */
-	name: string;
-	position: number;
-	providerID: string;
-};
-type Providers = { entries: Provider[] };
-type Models = { models: { modelID: string; name: string }[] };
+import type {
+	Account,
+	BufferState,
+	Chain,
+	Chains,
+	ContextState,
+	Listed,
+	LogEntry,
+	Models,
+	Provider,
+	Providers,
+	RebalanceState,
+	Reply,
+	Status,
+} from "./types";
 
 /** Model pickers read alphabetically, by the name the picker shows. */
 function sortByName(models: { modelID: string; name: string }[]) {

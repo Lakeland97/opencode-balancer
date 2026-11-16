@@ -3,24 +3,20 @@ import { useKeyboard } from "@opentui/solid";
 import { createSignal, onCleanup, onMount, Show } from "solid-js";
 import { copy } from "../copy";
 import { Balancer } from "../rpc";
-
-/** The answer every write gives, until `v2/types.ts` owns the view types. */
-type Reply = { ok: boolean; message: string };
-
-type Status = {
-	accounts: number;
-	balancing: boolean;
-	limited: number;
-	providers: number;
-};
-type Listed = { accounts: unknown[] };
-type Chains = { rows: unknown[] };
-type Providers = { entries: unknown[] };
-type ContextState = { value: string };
-type BufferState = { enforce: string; value: string };
-type RebalanceState = { auto: boolean; value: string };
-type LogEntry = { at: number; kind: string; text: string };
-type Log = { entries: LogEntry[] };
+import type {
+	Account,
+	BufferState,
+	Chain,
+	Chains,
+	ContextState,
+	Listed,
+	LogEntry,
+	Provider,
+	Providers,
+	RebalanceState,
+	Reply,
+	Status,
+} from "../types";
 
 /** The session-panel input the host passes to a contribution. */
 export type PanelInput = {
@@ -44,9 +40,9 @@ export function BalancerPanel(props: {
 }) {
 	const client = props.ctx.client.rpc(Balancer);
 	const [status, setStatus] = createSignal<Status>();
-	const [accounts, setAccounts] = createSignal<unknown[]>([]);
-	const [chains, setChains] = createSignal<unknown[]>([]);
-	const [priority, setPriority] = createSignal<unknown[]>([]);
+	const [accounts, setAccounts] = createSignal<Account[]>([]);
+	const [chains, setChains] = createSignal<Chain[]>([]);
+	const [priority, setPriority] = createSignal<Provider[]>([]);
 	const [contextLimit, setContextLimit] = createSignal<ContextState>({
 		value: "",
 	});
@@ -86,7 +82,7 @@ export function BalancerPanel(props: {
 			setContextLimit(limit as ContextState);
 			setContextBuffer(buffer as BufferState);
 			setRebalance(after as RebalanceState);
-			setLog([...(nextLog as Log).entries]);
+			setLog([...(nextLog as { entries: LogEntry[] }).entries]);
 		} catch {
 			// Keep the last good state.
 		}
