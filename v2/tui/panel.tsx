@@ -10,6 +10,8 @@ import {
 	Show,
 } from "solid-js";
 import { copy } from "../copy";
+import { bufferTokens, cutFor, formatTokens } from "../core/context";
+import { formatAttempt, routeMarkers } from "../core/format";
 import { Balancer } from "../rpc";
 import type {
 	Account,
@@ -34,6 +36,7 @@ import {
 	moveCursor,
 	pageCursor,
 } from "./items";
+import { providerEntries, rowNote } from "./rows";
 
 /** The session-panel input the host passes to a contribution. */
 export type PanelInput = {
@@ -52,10 +55,12 @@ export type PanelInput = {
  * starts and the callback that performs the matching RPC when it moves.
  */
 type Item = {
-	label: string;
+	id: string;
 	activate?: () => void;
 	grab?: Grab;
 	moveGrab?: (delta: number) => void;
+	/** The row a grip belongs to, so focus can find it again after a reorder. */
+	rowKey?: string;
 };
 
 /**
@@ -142,13 +147,148 @@ export function BalancerPanel(props: {
 	) => props.ctx.ui.dialog.select<T>({ options, title });
 
 	// The thin slice's one control. Later sections append in render order.
-	const items = createMemo<Item[]>(() => [
-		{
-			activate: () =>
-				void run(() => client.setBalancing({ enabled: !status()?.balancing })),
-			label: `${copy.balancing}: ${status()?.balancing ? "on" : "off"}`,
-		},
-	]);
+	const [openNote, setOpenNote] = createSignal("");
+
+	const providerKey = (providerID: string, alias: string) =>
+		`${providerID}/${alias}`;
+
+	const moveProvider = async (
+		providerID: string,
+		alias: string,
+		delta: -1 | 1,
+	) => {
+		const rows = providerEntries(accounts(), priority());
+		const from = rows.findIndex(
+			(row) => row.entry.providerID === providerID && row.entry.alias === alias,
+		);
+		if (from === -1) return;
+		// The reducer only bounds-checks here: the RPC moves the row itself, and
+		// focus is put back on its grip after the reorder lands.
+		const next = grabMove(
+			beginGrab(from, { kind: "provider" }),
+			delta,
+			rows.length,
+		);
+		if (next === undefined) return;
+		const result = (await client.move({
+			alias,
+			direction: delta < 0 ? "up" : "down",
+			providerID,
+		})) as Reply;
+		setMessage(result.ok ? "" : result.message);
+		await refresh();
+		const key = providerKey(providerID, alias);
+		const grip = items().findIndex(
+			(item) => item.rowKey === key && item.grab?.kind === "provider",
+		);
+		if (grip >= 0) setIndex(grip);
+	};
+
+	const toggleNote = (key: string) =>
+		setOpenNote((current) => (current === key ? "" : key));
+
+	const editEnforcement = async () => {
+		const value = await pick<"always" | "necessary">(copy.enforce, [
+			{ title: copy.always, value: "always" },
+			{ title: copy.necessary, value: "necessary" },
+		]);
+		if (value === undefined || value === contextBuffer().enforce) return;
+		await run(() => client.setBufferEnforce({ value }));
+	};
+
+	const items = createMemo<Item[]>(() => {
+		const list: Item[] = [
+			{
+				activate: () =>
+					void run(() =>
+						client.setBalancing({ enabled: !status()?.balancing }),
+					),
+				id: "balancing",
+			},
+			{
+				activate: () =>
+					void run(() =>
+						client.setRebalanceAuto({ enabled: !rebalance().auto }),
+					),
+				id: "rebalance-auto",
+			},
+			{
+				activate: () =>
+					void edit(copy.rebalance, rebalance().value, (value) =>
+						client.setRebalance({ value }),
+					),
+				id: "rebalance-length",
+			},
+			{
+				activate: () =>
+					void edit(copy.contextLimit, contextLimit().value, (value) =>
+						client.setContextLimit({ value }),
+					),
+				id: "limit",
+			},
+			{
+				activate: () =>
+					void edit(copy.buffer, contextBuffer().value, (value) =>
+						client.setContextBuffer({ value }),
+					),
+				id: "buffer",
+			},
+			{
+				activate: () => void editEnforcement(),
+				id: "enforce",
+			},
+		];
+		for (const row of providerEntries(accounts(), priority())) {
+			const { entry, account } = row;
+			const key = providerKey(entry.providerID, entry.alias);
+			list.push({
+				activate: () =>
+					void run(() =>
+						client.setEnabled({
+							alias: entry.alias,
+							enabled: !entry.enabled,
+							providerID: entry.providerID,
+						}),
+					),
+				id: `${key}:enable`,
+			});
+			if (rowNote(account, copy.resets)) {
+				list.push({
+					activate: () => toggleNote(key),
+					id: `${key}:note`,
+				});
+			}
+			list.push({
+				activate: () =>
+					void run(() =>
+						client.setFreeOnly({
+							alias: entry.alias,
+							enabled: !entry.freeOnly,
+							providerID: entry.providerID,
+						}),
+					),
+				id: `${key}:free`,
+			});
+			list.push({
+				activate: () =>
+					void run(() =>
+						client.use({
+							alias: entry.alias,
+							providerID: entry.providerID,
+						}),
+					),
+				id: `${key}:use`,
+			});
+			list.push({
+				grab: { kind: "provider" },
+				id: `${key}:grip`,
+				moveGrab: (delta) =>
+					void moveProvider(entry.providerID, entry.alias, delta < 0 ? -1 : 1),
+				rowKey: key,
+			});
+		}
+		return list;
+	});
 	const [cursor, setCursor] = createSignal<{ index: number; grab?: Grab }>({
 		index: 0,
 	});
@@ -198,12 +338,15 @@ export function BalancerPanel(props: {
 		}));
 
 	const moveGrab = (delta: number) => {
-		const current = cursor();
-		const item = items()[current.index];
-		const next = grabMove(current, delta, items().length);
-		if (next === undefined || !item?.moveGrab) return;
-		setIndex(next);
-		item.moveGrab(delta);
+		const item = items()[cursor().index];
+		item?.moveGrab?.(delta);
+	};
+
+	const releaseGrab = () => {
+		setCursor(endGrab);
+		// Polling paused while the row was held; read the world once more now
+		// that it can move under the cursor again.
+		void refresh();
 	};
 
 	useKeyboard((key) => {
@@ -221,7 +364,7 @@ export function BalancerPanel(props: {
 				name === "left" ||
 				name === "right"
 			) {
-				return setCursor(endGrab);
+				return releaseGrab();
 			}
 			return;
 		}
@@ -258,9 +401,23 @@ export function BalancerPanel(props: {
 	onMount(() => {
 		container?.focus();
 		void refresh();
-		const timer = setInterval(() => void refresh(), 2000);
+		const timer = setInterval(() => {
+			// A held row owns the screen: the list must not shift under it.
+			if (!cursor().grab) void refresh();
+		}, 2000);
 		onCleanup(() => clearInterval(timer));
 	});
+
+	const itemIndex = (id: string) => items().findIndex((item) => item.id === id);
+	const itemID = (id: string) => `balancer-item-${itemIndex(id)}`;
+	const focused = (id: string) => itemIndex(id) === cursor().index;
+	const mark = (id: string) => (focused(id) ? "›" : " ");
+	const cut = () =>
+		cutFor(
+			contextLimit().value,
+			contextBuffer().value,
+			contextBuffer().enforce,
+		);
 
 	return (
 		<scrollbox
@@ -279,17 +436,99 @@ export function BalancerPanel(props: {
 			<text>
 				{`${copy.title}  ${status()?.balancing ? copy.balancing : "off"}`}
 			</text>
+			<box id={itemID("balancing")}>
+				<text>{`${mark("balancing")} ${copy.balancing}: ${
+					status()?.balancing ? "on" : "off"
+				}`}</text>
+			</box>
+			<box id={itemID("rebalance-auto")}>
+				<text>{`${mark("rebalance-auto")} [${rebalance().auto ? "x" : " "}] ${
+					copy.rebalance
+				}`}</text>
+			</box>
+			<box id={itemID("rebalance-length")}>
+				<text>{`${mark("rebalance-length")} ${copy.rebalance}: ${
+					rebalance().value || "built-in"
+				}`}</text>
+			</box>
+			<box id={itemID("limit")}>
+				<text>{`${mark("limit")} ${copy.contextLimit}: ${
+					contextLimit().value || "default"
+				}  at ${formatTokens(cut()) || "—"}`}</text>
+			</box>
+			<box id={itemID("buffer")}>
+				<text>{`${mark("buffer")} ${copy.buffer}: ${
+					contextBuffer().value || "built-in"
+				}${
+					bufferTokens(contextBuffer().value) > 0
+						? ` (${formatTokens(bufferTokens(contextBuffer().value))})`
+						: ""
+				}`}</text>
+			</box>
+			<box id={itemID("enforce")}>
+				<text>{`${mark("enforce")} ${copy.enforce}: ${
+					contextBuffer().enforce
+				}`}</text>
+			</box>
 			<Show when={message()}>
 				{(text) => <text style={{ fg: "red" }}>{text()}</text>}
 			</Show>
-			<For each={items()}>
-				{(item, index) => (
-					<box id={`balancer-item-${index()}`}>
-						<text>
-							{`${index() === cursor().index ? "›" : " "} ${item.label}`}
-						</text>
-					</box>
-				)}
+			<text>{copy.providers}</text>
+			<For each={providerEntries(accounts(), priority())}>
+				{(row) => {
+					const key = providerKey(row.entry.providerID, row.entry.alias);
+					const note = () => rowNote(row.account, copy.resets);
+					const markers = () =>
+						row.account
+							? routeMarkers({
+									active: row.account.active,
+									inUse: row.account.inUse,
+									limited: row.account.limited,
+								})
+									.map((marker) => ` · ${copy[marker]}`)
+									.join("")
+							: "";
+					const moving = () =>
+						Boolean(cursor().grab) && items()[cursor().index]?.rowKey === key;
+					return (
+						<box style={{ flexDirection: "column", marginBottom: 1 }}>
+							<box id={itemID(`${key}:enable`)}>
+								<text>{`${mark(`${key}:enable`)} [${
+									row.entry.enabled ? "x" : " "
+								}] ${row.entry.name} / ${row.entry.alias}${markers()}${
+									moving() ? "  moving" : ""
+								}`}</text>
+							</box>
+							<Show when={note()}>
+								{(value) => (
+									<>
+										<box id={itemID(`${key}:note`)}>
+											<text>{`${mark(`${key}:note`)}   ${value()}`}</text>
+										</box>
+										<Show when={openNote() === key}>
+											<text>{`      last tried ${formatAttempt(
+												row.account?.lastUsedAt,
+											)}`}</text>
+										</Show>
+									</>
+								)}
+							</Show>
+							<box style={{ flexDirection: "row", gap: 2 }}>
+								<box id={itemID(`${key}:free`)}>
+									<text>{`${mark(`${key}:free`)}[${
+										row.entry.freeOnly ? "x" : " "
+									}] ${copy.free}`}</text>
+								</box>
+								<box id={itemID(`${key}:use`)}>
+									<text>{`${mark(`${key}:use`)}[${copy.use}]`}</text>
+								</box>
+								<box id={itemID(`${key}:grip`)}>
+									<text>{`${mark(`${key}:grip`)}⠿`}</text>
+								</box>
+							</box>
+						</box>
+					);
+				}}
 			</For>
 		</scrollbox>
 	);
