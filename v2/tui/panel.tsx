@@ -1,4 +1,5 @@
 import type { Plugin } from "@opencode/plugin/tui";
+import { TextAttributes } from "@opentui/core";
 import { useKeyboard } from "@opentui/solid";
 import {
 	createEffect,
@@ -122,6 +123,7 @@ export function BalancerPanel(props: {
 			setContextBuffer(buffer as BufferState);
 			setRebalance(after as RebalanceState);
 			setLog([...(nextLog as { entries: LogEntry[] }).entries]);
+			setLastRefreshed(Date.now());
 		} catch {
 			// Keep the last good state.
 		}
@@ -160,6 +162,8 @@ export function BalancerPanel(props: {
 		Record<string, boolean>
 	>({});
 	const [creating, setCreating] = createSignal(false);
+	const [diagOpen, setDiagOpen] = createSignal(false);
+	const [lastRefreshed, setLastRefreshed] = createSignal(0);
 
 	const providerKey = (providerID: string, alias: string) =>
 		`${providerID}/${alias}`;
@@ -520,6 +524,20 @@ export function BalancerPanel(props: {
 				}
 			}
 		}
+		list.push({
+			activate: () => setDiagOpen(!diagOpen()),
+			id: "diag:fold",
+		});
+		list.push({
+			activate: () => void refresh(),
+			id: "diag:refresh",
+		});
+		if (diagOpen() && log().length > 0) {
+			list.push({
+				activate: () => void run(() => client.clearLog({})),
+				id: "diag:clear",
+			});
+		}
 		return list;
 	});
 	const [cursor, setCursor] = createSignal<{ index: number; grab?: Grab }>({
@@ -864,6 +882,50 @@ export function BalancerPanel(props: {
 				</For>
 				<Show when={visibleChains(chains()).length === 0}>
 					<text>No chains.</text>
+				</Show>
+			</Show>
+			<box style={{ flexDirection: "row", gap: 2 }}>
+				<box id={itemID("diag:fold")}>
+					<text>{`${mark("diag:fold")} ${
+						diagOpen() ? "▾" : "▸"
+					} ${copy.diagnostics}  ${log().length}`}</text>
+				</box>
+				<box id={itemID("diag:refresh")}>
+					<text>{`${mark("diag:refresh")}[${copy.refresh}]`}</text>
+				</box>
+			</box>
+			<Show when={diagOpen()}>
+				<text>{`version ${props.ctx.app.version}`}</text>
+				<text>{`values ${new Date(
+					lastRefreshed(),
+				).toLocaleTimeString()}`}</text>
+				<text>{`${accounts().length} credential${
+					accounts().length === 1 ? "" : "s"
+				} · ${visibleChains(chains()).length} row${
+					visibleChains(chains()).length === 1 ? "" : "s"
+				} · ${log().length} log line${log().length === 1 ? "" : "s"}`}</text>
+				<text>{`limit ${contextLimit().value || "default"} · cut ${
+					formatTokens(cut()) || "—"
+				} · buffer ${contextBuffer().value || "built-in"}`}</text>
+				<Show when={log().length > 0}>
+					<box id={itemID("diag:clear")}>
+						<text>{`${mark("diag:clear")}[${copy.clear}]`}</text>
+					</box>
+					<For each={log()}>
+						{(entry) => (
+							<text
+								attributes={
+									entry.kind === "route" ? undefined : TextAttributes.DIM
+								}
+								wrapMode="word"
+							>{`${new Date(entry.at).toTimeString().slice(0, 8)} ${
+								entry.text
+							}`}</text>
+						)}
+					</For>
+				</Show>
+				<Show when={log().length === 0}>
+					<text attributes={TextAttributes.DIM}>{copy.logEmpty}</text>
 				</Show>
 			</Show>
 		</scrollbox>
