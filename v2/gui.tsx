@@ -137,6 +137,7 @@ export default Plugin.define({
 			at: "at",
 			balancing: "balancing",
 			buffer: "buffer",
+			cancel: "cancel",
 			clear: "clear",
 			collapse: "collapse all",
 			contextLimit: "context limit",
@@ -355,6 +356,35 @@ export default Plugin.define({
 			} catch (error) {
 				setMessage(describe(error));
 			}
+		};
+
+		// Dismiss a chain draft. The form lives inside the models section, so
+		// both the header button and a fold have to be able to drop it: a
+		// half-picked provider that survived a fold would come back on the next
+		// open looking like it had been kept on purpose.
+		const cancelCreate = () => {
+			setCreating(false);
+			setCreateProvider("");
+			setCreateModels([]);
+		};
+
+		const toggleCreate = () => {
+			if (creating()) {
+				cancelCreate();
+				return;
+			}
+			setCreating(true);
+			// The form lives inside the models section. Opening it without
+			// opening the section reads as a click that did nothing.
+			setModelsOpen(true);
+		};
+
+		// Folding the section is also a dismissal: the draft it holds is gone,
+		// so reopening starts from an empty form rather than a stale one.
+		const toggleModels = () => {
+			const open = !modelsOpen();
+			setModelsOpen(open);
+			if (!open) cancelCreate();
 		};
 
 		// The panel lists rows that actually triage between providers, plus any
@@ -1055,28 +1085,27 @@ export default Plugin.define({
 
 					<div style={{ ...row, "margin-top": "4px" }}>
 						<button
-							onClick={() => setModelsOpen(!modelsOpen())}
+							onClick={toggleModels}
 							style={{ ...button, "min-width": "1.4em" }}
 							title={modelsOpen() ? ctx.t("collapse") : ctx.t("expand")}
 						>
 							{modelsOpen() ? "▾" : "▸"}
 						</button>
 						<strong
-							onClick={() => setModelsOpen(!modelsOpen())}
+							onClick={toggleModels}
 							style={titleToggle}
 							title={modelsOpen() ? ctx.t("collapse") : ctx.t("expand")}
 						>
 							{ctx.t("models")}
 						</strong>
 						<button
-							onClick={() => {
-								setCreating(!creating());
-								setCreateProvider("");
-								setCreateModels([]);
-							}}
+							onClick={toggleCreate}
 							style={{ ...button, "margin-left": "auto" }}
+							title={
+								creating() ? "discard this chain draft" : "start a new chain"
+							}
 						>
-							+ {ctx.t("newChain")}
+							{creating() ? ctx.t("cancel") : `+ ${ctx.t("newChain")}`}
 						</button>
 						<button
 							onClick={toggleAll}
@@ -1115,7 +1144,7 @@ export default Plugin.define({
 													modelID: event.currentTarget.value,
 													providerID: createProvider(),
 												}),
-											).then(() => setCreating(false))
+											).then(cancelCreate)
 										}
 										style={select}
 										value=""
