@@ -199,9 +199,10 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   A chain draft has a way out now. `+ new chain` becomes `cancel` while the form is open, so dismissing
   it no longer means finding and re-pressing the same unchanged button. That button also opens the
   **models** section when it starts a draft: the form lives inside the section, and a click that revealed
-  nothing read as a no-op. Folding **models** — from the chevron, the title or the button's own cancel —
-  drops the draft, as does a completed creation, so a stale provider and its model list cannot reappear
-  in the next form.
+  nothing read as a no-op. Folding **models** — from the chevron, the title, collapse all or the button's
+  own cancel — drops the draft, as does a completed creation, so a stale provider and its model list
+  cannot reappear in the next form. **expand all** / **collapse all** now counts the models section too,
+  so one click reaches every header on the panel, not just the chain rows and their brands.
 
 **Outstanding**
 

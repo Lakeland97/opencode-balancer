@@ -425,11 +425,11 @@ export default Plugin.define({
 			setCollapsed({ ...collapsed(), [key]: !isCollapsed(key) });
 
 		// Collapse all flips the whole list at once, so a long catalogue is one
-		// click away from a single screen of headers.
-		const allCollapsed = () => {
-			const rows = visibleChains();
-			return rows.length > 0 && rows.every((chain) => isCollapsed(chain.key));
-		};
+		// click away from a single screen of headers. The models section counts
+		// as one of those headers: leaving it out made "collapse all" stop one
+		// fold short of everything.
+		const allCollapsed = () =>
+			!modelsOpen() && visibleChains().every((chain) => isCollapsed(chain.key));
 		const toggleAll = () => {
 			const collapse = !allCollapsed();
 			const rows: Record<string, boolean> = {};
@@ -440,6 +440,10 @@ export default Plugin.define({
 			}
 			setCollapsed(rows);
 			setCollapsedGroups(groups);
+			// Folding the section also drops a chain draft, exactly as its own
+			// fold control does.
+			setModelsOpen(!collapse);
+			if (collapse) cancelCreate();
 		};
 
 		const row = {
