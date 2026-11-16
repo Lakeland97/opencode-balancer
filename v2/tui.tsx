@@ -1,6 +1,7 @@
 import { Plugin } from "@opencode/plugin/tui";
 import { copy } from "./copy";
 import { Balancer } from "./rpc";
+import { balancerLayer } from "./tui/layer";
 import { BalancerPanel } from "./tui/panel";
 
 export default Plugin.define({
@@ -20,17 +21,7 @@ export default Plugin.define({
 			}
 		};
 
-		ctx.keymap.layer(() => ({
-			commands: [
-				{
-					bind: "ctrl+shift+b",
-					id: "balancer.open",
-					palette: true,
-					run: open,
-					title: copy.open,
-				},
-			],
-		}));
+		ctx.keymap.layer(() => balancerLayer(open));
 
 		const offOpen = ctx.client.rpc(Balancer).events.on("open", open);
 
