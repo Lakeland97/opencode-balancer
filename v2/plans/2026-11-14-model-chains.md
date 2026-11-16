@@ -718,3 +718,22 @@ Register the row, add a target by hand, confirm the picker still lists it, and c
 git add v2/README.md v2/design/model-chains.md
 git commit --no-verify -m "Document model chains"
 ```
+
+---
+
+## Follow-on: TUI panel and command parity
+
+The chain editor grew a second renderer and the commands caught up with it. The
+follow-on entry is [2026-11-16-tui-parity.md](2026-11-16-tui-parity.md), with
+the approved design in [v2/design/tui-panel-parity.md](../design/tui-panel-parity.md).
+
+- The `./tui` part renders the same panel in a terminal: palette **Open
+  Balancer**, `ctrl+shift+b`, and `/balancer gui`.
+- Every setting, account and chain write moved behind shared setters in
+  `v2/server/settings.ts` and `v2/server/writes.ts`, so a command writes the same
+  log line, routing-memory reset and catalogue invalidation as the panel.
+- `/balancer` gained the panel's reads (`errors`, `settings`, `chains`, `log`,
+  `diag`) and writes (`limit`, `buffer`, `rebalance`, `create`, `chain <model>
+  limit`), plus `default` as the reset keyword.
+- Words, markers and notes come from `v2/copy.ts`, `v2/core/format.ts` and the
+  shared cut math in `v2/core/context.ts`, so the three surfaces cannot drift.

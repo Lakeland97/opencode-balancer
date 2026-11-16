@@ -1,6 +1,6 @@
 # TUI and command parity
 
-Status: approved; implementation plan at [v2/plans/2026-11-16-tui-parity.md](../plans/2026-11-16-tui-parity.md)
+Status: implemented; implementation plan at [v2/plans/2026-11-16-tui-parity.md](../plans/2026-11-16-tui-parity.md)
 Date: 2026-11-16
 Related: [model chains](model-chains.md), [follow-on ledger](../plans/2026-11-14-model-chains.md)
 

@@ -313,25 +313,34 @@ well, with its reason, so a cut-off in the conversation is always explained here
   the model does not.
 - **Pre-stream failover only.** A retry can hop connectors until the first token arrives; a
   stream already in progress cannot move.
-- **No TUI.** OpenCode Desktop renders only plugins that export `./gui-experimental`. The V2
-  plugin ships one (`v2/gui.tsx`); the V1 terminal dashboard cannot run there.
 
 ## Commands
 
 ```
 /balancer help                        command list
 /balancer status                      balancing state, account totals, rate-limited count
+/balancer errors                      parked credentials, refills and last attempt
 /balancer list [provider]             credentials in tried order, with markers
+/balancer settings                    limits, buffer and the cut they produce
 /balancer use <provider> <alias>      serve this provider with that credential
-/balancer import                       re-read the credentials OpenCode holds
+/balancer import                      re-read the credentials OpenCode holds
 /balancer on | off                    toggle automatic failover
-/balancer priority                     credential order with each one's switches
-/balancer chain <model>                targets for a row, in the order they are tried
+/balancer limit <value|default>       context limit as a size or a share
+/balancer buffer <value|default> [always|necessary]
+/balancer buffer <always|necessary>   when the buffer applies
+/balancer rebalance on [length] | off | <length> | default
+/balancer priority                    credential order with each one's switches
+/balancer chains                      custom rows, or automatic rows with several targets
+/balancer chain <model>               targets for a row, in the order they are tried
 /balancer chain <model> add <provider> <model>
 /balancer chain <model> remove|up|down <provider>
-/balancer chain <model> reset          hand the row back to the credential order
+/balancer chain <model> limit <value|default>
+/balancer chain <model> reset         hand the row back to the credential order
+/balancer create <provider> <model>   start a custom row from one model
+/balancer log [n] | log clear         recent decisions, or clear the log
+/balancer diag                        store path, counts and settings
 /balancer enable <credential> | disable <credential>
-/balancer free <credential> on | off   use only that credential's free models
+/balancer free <credential> on | off  use only that credential's free models
 /balancer up <credential> | down <credential>
 
 `<credential>` is `<provider>`, meaning every credential that provider has, or `<provider>/<alias>`
@@ -359,7 +368,7 @@ OpenCode loads the server part from `exports["."]`. It provides `@opencode/plugi
 npx --yes bun test        # unit tests: account store, selection, failover marking, commands
 ```
 
-## Desktop GUI
+## Desktop and terminal panels
 
 OpenCode Desktop 2.2+ loads the `./gui-experimental` part automatically, giving a Balancer side
 panel with a balancing toggle, the accounts OpenCode holds, a chain editor per model, and the
@@ -372,6 +381,11 @@ npx --yes bun run build:gui    # vite build → v2/dist/gui-experimental.cjs
 
 Open it from the command palette (**Open Balancer**), the **Balancer** pill in the titlebar, the
 **Balancer** tab in the side region, the side region's **+** menu, or by running `/balancer gui`.
+
+A terminal session renders the same panel from the `./tui` part (`v2/tui.tsx`). Open it from the
+command palette (**Open Balancer**), `ctrl+shift+b`, or `/balancer gui`. The TUI reads and writes
+through the same RPC as Desktop and the commands, so switches, order, chains, limits and the log
+are one state with three surfaces.
 
 ## Upstream sync
 
