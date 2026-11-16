@@ -12,16 +12,16 @@ import {
 	TitlebarItem,
 } from "@opencode/plugin/gui";
 import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import { copy } from "./copy";
 import {
-	effectiveThreshold,
+	bufferTokens,
+	cutFor,
 	formatTokens,
 	MAX_PERCENT,
-	parseBuffer,
-	parseLimit,
 } from "./core/context";
+import { credentialNote, formatAttempt, routeMarkers } from "./core/format";
 import { groupByBrand } from "./core/models";
 import { DEFAULT_REBALANCE_MS, formatDuration } from "./core/rebalance";
-import { formatRollover } from "./core/rollover";
 import { Balancer } from "./rpc";
 
 type LogEntry = { at: number; kind: string; text: string };
@@ -107,65 +107,9 @@ function builtAt() {
 		: "dev";
 }
 
-/**
- * When a credential was last tried: the clock time when that was today, the
- * date too when it was older. A credential that has never been tried has no
- * time to show, and says so with a dash rather than an invented one.
- */
-function formatAttempt(at?: number) {
-	if (!at) return "—";
-	const date = new Date(at);
-	const today = new Date();
-	const sameDay =
-		date.getFullYear() === today.getFullYear() &&
-		date.getMonth() === today.getMonth() &&
-		date.getDate() === today.getDate();
-	const time = date.toLocaleTimeString([], {
-		hour: "2-digit",
-		minute: "2-digit",
-	});
-	return sameDay ? time : `${date.toLocaleDateString()} ${time}`;
-}
-
 export default Plugin.define({
 	i18n: {
-		en: {
-			active: "active",
-			addTarget: "add target",
-			always: "always",
-			apply: "apply",
-			at: "at",
-			balancing: "balancing",
-			buffer: "buffer",
-			cancel: "cancel",
-			clear: "clear",
-			collapse: "collapse all",
-			contextLimit: "context limit",
-			diagnostics: "diagnostics",
-			enforce: "enforce",
-			everyProviderUsed: "every provider is already in this chain",
-			expand: "expand all",
-			free: "free",
-			globalShare: "global",
-			inUse: "in use",
-			lastTried: "last tried",
-			limit: "limit",
-			limited: "limited",
-			logEmpty: "nothing yet",
-			models: "models",
-			necessary: "when necessary",
-			newChain: "new chain",
-			open: "Open Balancer",
-			pickProvider: "pick a provider first",
-			provider: "provider",
-			providers: "providers",
-			rebalance: "rebalance after",
-			refresh: "refresh",
-			reset: "reset",
-			resets: "resets",
-			title: "Balancer",
-			use: "use",
-		},
+		en: { ...copy },
 	},
 	setup(ctx) {
 		const [accounts, setAccounts] = createSignal<Account[]>([]);
@@ -286,35 +230,10 @@ export default Plugin.define({
 			void run(() => rpc().setContextLimit({ value: globalLimitDraft() }));
 		};
 
-		// What a limit and a buffer work out to as an actual cut, by the same rule
-		// the balancer uses, against the declared 1M — the window a model that
-		// holds at least that much offers. A model that holds less is cut lower
-		// still, which the limit field's title says.
-		const cutFor = (limitText: string, bufferText: string, enforce: string) => {
-			const limit = parseLimit(limitText);
-			if (!limit.ok) return 0;
-			const room = parseBuffer(bufferText);
-			return effectiveThreshold({
-				buffer: room.ok ? room.size : undefined,
-				bufferEnforcement: enforce === "necessary" ? "necessary" : "always",
-				globalLimit: limit.size,
-			});
-		};
-
 		const cutTokens = () =>
 			cutFor(globalLimitDraft(), bufferDraft(), bufferEnforce());
 
 		const storedCut = () => cutFor(globalLimit(), buffer(), bufferEnforce());
-
-		// What the buffer being typed works out to in tokens, for the readout
-		// that confirms `20` means twenty thousand. A share has no single size,
-		// so it shows none and the field's title explains what it measures.
-		const bufferTokens = () => {
-			const parsed = parseBuffer(bufferDraft());
-			return parsed.ok && parsed.size && "tokens" in parsed.size
-				? parsed.size.tokens
-				: 0;
-		};
 
 		const commitBuffer = () => {
 			if (bufferDraft() === buffer()) return;
@@ -715,15 +634,13 @@ export default Plugin.define({
 		// endpoint named and the provider's own words when it refused. The marker
 		// above clears on the next attempt, so this reports the last attempt
 		// rather than predicting the next one.
-		const rowNote = (account?: Account) => {
-			if (!account?.limited) return undefined;
-			const until = rollover(account);
-			const parts = [
-				until ? `${ctx.t("resets")} ${formatRollover(until, Date.now())}` : "",
-				account.limitedReason ?? "",
-			].filter((part) => part.length > 0);
-			return parts.length > 0 ? parts.join(" · ") : undefined;
-		};
+		const rowNote = (account?: Account) =>
+			credentialNote({
+				limited: Boolean(account?.limited),
+				limitedUntil: rollover(account),
+				reason: account?.limitedReason,
+				resets: ctx.t("resets"),
+			});
 
 		const View = () => {
 			onMount(() => {
@@ -851,12 +768,12 @@ export default Plugin.define({
 						/>
 						{/* `20` meaning twenty thousand is worth confirming, since
 						    the field above it takes a share as readily. */}
-						<Show when={bufferTokens() > 0}>
+						<Show when={bufferTokens(bufferDraft()) > 0}>
 							<span
 								style={{ opacity: 0.6 }}
 								title="what the buffer works out to"
 							>
-								{formatTokens(bufferTokens())}
+								{formatTokens(bufferTokens(bufferDraft()))}
 							</span>
 						</Show>
 						{/* Where the limit and the buffer land, labelled: a bare
@@ -967,16 +884,21 @@ export default Plugin.define({
 										<Show when={item.account}>
 											{(account) => (
 												<>
-													{account().inUse
-														? ` · ${ctx.t("inUse")}`
-														: account().active
-															? ` · ${ctx.t("active")}`
-															: ""}
-													<Show when={account().limited}>
-														<span title={account().limitedReason || undefined}>
-															{` · ${ctx.t("limited")}`}
+													{routeMarkers({
+														active: account().active,
+														inUse: account().inUse,
+														limited: account().limited,
+													}).map((marker) => (
+														<span
+															title={
+																marker === "limited"
+																	? account().limitedReason || undefined
+																	: undefined
+															}
+														>
+															{` · ${ctx.t(marker)}`}
 														</span>
-													</Show>
+													))}
 												</>
 											)}
 										</Show>

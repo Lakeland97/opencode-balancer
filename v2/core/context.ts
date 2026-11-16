@@ -476,3 +476,35 @@ export function effectiveThreshold(input: {
 		})
 	);
 }
+
+/**
+ * Where the cut lands for a limit and buffer as typed, measured against the
+ * declared window. The same rule the balancer uses, because a panel readout that
+ * computes it differently is a second opinion about the same number.
+ */
+export function cutFor(
+	limitText: string,
+	bufferText: string,
+	enforcement: string,
+): number {
+	const limit = parseLimit(limitText);
+	if (!limit.ok) return 0;
+	const room = parseBuffer(bufferText);
+	return effectiveThreshold({
+		buffer: room.ok ? room.size : undefined,
+		bufferEnforcement: enforcement === "necessary" ? "necessary" : "always",
+		globalLimit: limit.size,
+	});
+}
+
+/**
+ * What a buffer as typed works out to in tokens, for the readout that confirms
+ * `20` means twenty thousand. A share has no single size, so it reports 0 and
+ * the field's own help explains what it measures.
+ */
+export function bufferTokens(value: string): number {
+	const parsed = parseBuffer(value);
+	return parsed.ok && parsed.size && "tokens" in parsed.size
+		? parsed.size.tokens
+		: 0;
+}
