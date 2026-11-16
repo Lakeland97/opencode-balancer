@@ -178,7 +178,7 @@ describe("tui plugin", () => {
 
 	test("falls back to keymap registration when command api is unavailable", async () => {
 		withTempConfigDir();
-		const { api, keymapLayers, legacyCommandCallbacks } = createApi({
+		const { api, keymapLayers, legacyCommandCallbacks, disposes } = createApi({
 			command: false,
 		});
 
@@ -197,6 +197,8 @@ describe("tui plugin", () => {
 				title: "Open Balancer Dashboard",
 			}),
 		);
+
+		for (const dispose of disposes) await dispose();
 	});
 
 	test("passes dynamic session provider lookups to reactive sidebar/status handlers", async () => {
