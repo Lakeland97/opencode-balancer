@@ -14,30 +14,13 @@ import {
 	useAccount,
 } from "../core/accounts";
 import {
-	DEFAULT_PERCENT,
-	formatTokens,
-	parseBuffer,
-	parseLimit,
 	readBuffer,
 	readBufferEnforcement,
 	readLimit,
 	readModelLimit,
-	type SizeOrShare,
-	setBuffer,
-	setBufferEnforcement,
-	setLimit,
-	setModelLimit,
 } from "../core/context";
-import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
-import {
-	formatDuration,
-	getRebalanceAuto,
-	parseDuration,
-	readRebalance,
-	rebalanceAfterMs,
-	setRebalance,
-	setRebalanceAuto,
-} from "../core/rebalance";
+import { getBalancingEnabled } from "../core/priority";
+import { getRebalanceAuto, readRebalance } from "../core/rebalance";
 import { now } from "../core/time";
 import { Balancer } from "../rpc";
 import {
@@ -59,6 +42,15 @@ import { forgetRoutingMemory } from "./hooks";
 import { clearLog, readLog, recordLog } from "./log";
 import { chooseRoute } from "./routing";
 import { enabledAccounts, selectHealthyAccount } from "./selection";
+import {
+	writeBalancing,
+	writeBufferEnforcement,
+	writeContextBuffer,
+	writeContextLimit,
+	writeModelLimit,
+	writeRebalance,
+	writeRebalanceAuto,
+} from "./settings";
 
 type Pair = { providerID: string; alias: string };
 
@@ -106,16 +98,6 @@ function targetState(
 	// model currently selected for the row. Only one target carries it, and only
 	// one credential is genuinely in use at a time.
 	return serving ? "in use" : "available";
-}
-
-/**
- * How a limit reads in a sentence: a size in tokens, or a share of the window it
- * is measured against.
- */
-function describeLimit(size: SizeOrShare, window: string): string {
-	return "tokens" in size
-		? formatTokens(size.tokens)
-		: `${size.percent}% of ${window}`;
 }
 
 /**
@@ -377,79 +359,22 @@ export async function registerBalancerRpc({
 
 		setBalancing: async (input) => {
 			const { enabled } = input as { enabled: boolean };
-			setBalancingEnabled(db, enabled);
-			// Turning routing back on starts from the order as it now stands;
-			// a trail from before the switch describes another world.
-			if (enabled) forgetRoutingMemory();
-			recordLog("config", `automatic balancing ${enabled ? "on" : "off"}`);
-			return {
-				message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
-				ok: true,
-			};
+			return writeBalancing(db, enabled);
 		},
 
 		setBufferEnforce: async (input) => {
 			const { value } = input as { value: string };
-			if (value !== "always" && value !== "necessary") {
-				return {
-					message: `"${value}" is not when the buffer is enforced: give "always" or "necessary".`,
-					ok: false,
-				};
-			}
-			setBufferEnforcement(db, value);
-			recordLog(
-				"config",
-				value === "necessary"
-					? "buffer enforced only where it is needed"
-					: "buffer always enforced",
-			);
-			return {
-				message:
-					value === "necessary"
-						? "The buffer is enforced only when the limit has reached what the model holds."
-						: "The buffer comes off every cut.",
-				ok: true,
-			};
+			return writeBufferEnforcement(db, value);
 		},
 
 		setContextBuffer: async (input) => {
 			const { value } = input as { value: string };
-			const parsed = parseBuffer(value);
-			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setBuffer(db, value);
-			const stored = readBuffer(db);
-			recordLog(
-				"config",
-				stored === undefined
-					? "the compaction buffer follows the built-in rule again"
-					: `the compaction buffer is ${stored}`,
-			);
-			return {
-				message:
-					stored === undefined
-						? "the compaction buffer follows the built-in rule again."
-						: `the compaction buffer is ${stored}.`,
-				ok: true,
-			};
+			return writeContextBuffer(db, value);
 		},
 
 		setContextLimit: async (input) => {
 			const { value } = input as { value: string };
-			const parsed = parseLimit(value);
-			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setLimit(db, value);
-			const where =
-				parsed.size && describeLimit(parsed.size, "the declared window");
-			recordLog(
-				"config",
-				where ? `context limit ${where}` : "context limit back to the default",
-			);
-			return {
-				message: where
-					? `Context limit is ${where}.`
-					: `Context limit is back to the default (${DEFAULT_PERCENT}% of the declared window).`,
-				ok: true,
-			};
+			return writeContextLimit(db, value);
 		},
 
 		setEnabled: async (input) => {
@@ -490,86 +415,17 @@ export async function registerBalancerRpc({
 
 		setModelLimit: async (input) => {
 			const { key, value } = input as { key: string; value: string };
-			const parsed = parseLimit(value);
-			if (!parsed.ok) return { message: parsed.message, ok: false };
-			setModelLimit(db, key, value);
-			const where = parsed.size && describeLimit(parsed.size, "its own window");
-			recordLog(
-				"config",
-				where
-					? `${key} compacts at ${where}`
-					: `${key} follows the global limit`,
-			);
-			return {
-				message: where
-					? `${key} compacts at ${where}.`
-					: `${key} follows the global limit again.`,
-				ok: true,
-			};
+			return writeModelLimit(db, key, value);
 		},
 
 		setRebalance: async (input) => {
 			const { value } = input as { value: string };
-			const parsed = parseDuration(value);
-			if (!parsed.ok) return { message: parsed.error, ok: false };
-			setRebalance(db, value);
-			// The field is authoritative over the switch in both directions: a
-			// length of zero is the window being turned off, and any positive
-			// length is it being turned back on. Otherwise the same field would
-			// mean two things depending on which way it was last typed, and a
-			// length typed while the switch read "off" would do nothing visible.
-			const shut = parsed.ms !== undefined && parsed.ms <= 0;
-			setRebalanceAuto(db, !shut);
-			const ms = rebalanceAfterMs(db);
-			recordLog(
-				"config",
-				ms > 0
-					? `rebalance after ${formatDuration(ms)} idle`
-					: "rebalance window off; a trail never goes stale on its own",
-			);
-			return {
-				message:
-					ms > 0
-						? `A session starts over from the head after ${formatDuration(ms)} idle.`
-						: "A trail no longer goes stale on its own; only a change to the order starts it over.",
-				ok: true,
-			};
+			return writeRebalance(db, value);
 		},
 
 		setRebalanceAuto: async (input) => {
 			const { enabled } = input as { enabled: boolean };
-			if (!enabled) {
-				setRebalanceAuto(db, false);
-				recordLog(
-					"config",
-					"rebalance window off; a trail never goes stale on its own",
-				);
-				return {
-					message:
-						"A trail no longer goes stale on its own; only a change to the order starts it over.",
-					ok: true,
-				};
-			}
-			// Switching it on has to mean something: a stored zero would leave the
-			// toggle on and the window still shut, so that length is cleared and
-			// the built-in one comes back. Any other length is the user's and stays.
-			const stored = readRebalance(db);
-			const storedWindow =
-				stored === undefined ? undefined : parseDuration(stored);
-			if (
-				storedWindow?.ok &&
-				storedWindow.ms !== undefined &&
-				storedWindow.ms <= 0
-			) {
-				setRebalance(db, "");
-			}
-			setRebalanceAuto(db, true);
-			const ms = rebalanceAfterMs(db);
-			recordLog("config", `rebalance after ${formatDuration(ms)} idle`);
-			return {
-				message: `A session starts over from the head after ${formatDuration(ms)} idle.`,
-				ok: true,
-			};
+			return writeRebalanceAuto(db, enabled);
 		},
 
 		status: async () => {
