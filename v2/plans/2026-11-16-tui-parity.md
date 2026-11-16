@@ -1085,7 +1085,7 @@ git commit --no-verify -m "Add diagnostics and full live refresh to the TUI pane
 **Files:**
 - Modify: `README.md`, `v2/design/tui-panel-parity.md`, `v2/plans/2026-11-14-model-chains.md`
 
-- [ ] **Step 1: Update the docs**
+- [x] **Step 1: Update the docs**
 
 - `README.md`: replace the “No TUI” deliberate limit with a terminal-panel
   paragraph: the `./tui` part, the palette entry, `ctrl+shift+b`, and
@@ -1095,7 +1095,7 @@ git commit --no-verify -m "Add diagnostics and full live refresh to the TUI pane
 - `v2/plans/2026-11-14-model-chains.md`: add a follow-on entry naming the TUI
   panel, command parity and the shared setters.
 
-- [ ] **Step 2: Run the full gate**
+- [x] **Step 2: Run the full gate**
 
 ```bash
 npx --yes bun run lint
@@ -1107,7 +1107,7 @@ npx --yes bun run build:gui
 Expected: lint and types clean; tests pass (if the SQLite I/O flake appears,
 rerun once); GUI build succeeds.
 
-- [ ] **Step 3: Walk the parity matrix**
+- [ ] **Step 3: Walk the parity matrix — OUTSTANDING (no interactive TTY in this session)**
 
 With Desktop and a terminal on the same session, walk
 `v2/design/tui-panel-parity.md` top to bottom. For each row, perform the
@@ -1115,7 +1115,7 @@ Desktop action, the TUI action and the command; confirm the same state and the
 same words. Exercise a parked credential with a long error, a new chain, target
 add/remove/reorder, model limit, clear log, and a 60-column terminal.
 
-- [ ] **Step 4: Commit and push**
+- [x] **Step 4: Commit and push**
 
 ```bash
 git add README.md v2/design/tui-panel-parity.md v2/plans/2026-11-14-model-chains.md
@@ -1123,7 +1123,7 @@ git commit --no-verify -m "Document TUI and command parity"
 git push origin main
 ```
 
-- [ ] **Step 5: Verify CI**
+- [ ] **Step 5: Verify CI — recorded in the session ledger after the push**
 
 Wait for the `test` and `Release` workflows on the pushed commit; both must be
 green. No changeset is created by this task; do not cut a release without the

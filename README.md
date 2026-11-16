@@ -41,7 +41,7 @@ re-implements the integration on the V2 hook surface.
 | Credential injection | `session.hook("http.request")` instead of a global `fetch` patch |
 | Rate-limit detection | `session.hook("http.response")` |
 | Failover | `session.hook("retry")` forces a retry; the next request selects another account or connector |
-| Control surface | `/balancer` command + `balancer_command` tool, replacing the terminal dashboard |
+| Control surface | `/balancer` command + `balancer_command` tool, plus the Desktop and terminal panels |
 | Base URL / provider switching | the `balancer` provider, which routing rewrites per request |
 
 ## The Balancer provider
@@ -384,8 +384,8 @@ Open it from the command palette (**Open Balancer**), the **Balancer** pill in t
 
 A terminal session renders the same panel from the `./tui` part (`v2/tui.tsx`). Open it from the
 command palette (**Open Balancer**), `ctrl+shift+b`, or `/balancer gui`. The TUI reads and writes
-through the same RPC as Desktop and the commands, so switches, order, chains, limits and the log
-are one state with three surfaces.
+through the same RPC as Desktop, and commands go through the same shared setters, so switches,
+order, chains, limits and the log are one state with three surfaces.
 
 ## Upstream sync
 
