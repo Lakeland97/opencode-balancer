@@ -172,6 +172,12 @@ the **credential**, not the provider (commits `ff0a5f8`, `f5481b5`):
   windows used to produce that shape only by wrapping; it is now the row itself, so a long provider error
   has somewhere to sit instead of being reachable only by hovering `limited`.
 
+  That note is a disclosure. `▸` opens the provider's message in full, wrapped across as many lines as it
+  needs, with `last tried <time>` underneath — `accounts.last_used_at`, the instant the router last
+  pointed at the credential, which is the attempt that parked it. `▾` folds it back to the one
+  truncated line, and one note is open at a time. The time was already in `list`'s reply, so the whole
+  thing is the panel alone: no change to routing, storage or the RPC surface.
+
   The drop is unambiguous by construction rather than by luck — credentials are one flat list in
   `accounts.position` order (the **models** list is the only grouped one, and it is not reordered), and
   targets are a per-row ordered list — so a drop names a slot, not a direction. `move` and `chainMove` now

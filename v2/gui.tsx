@@ -38,6 +38,8 @@ type Account = {
 	limitedReason?: string;
 	/** When the endpoint said its own quota returns, in ms; 0 when it did not say. */
 	limitedUntil: number;
+	/** When the balancer last pointed at this credential, in ms; 0 when never. */
+	lastUsedAt: number;
 	failures: number;
 };
 
@@ -105,6 +107,26 @@ function builtAt() {
 		: "dev";
 }
 
+/**
+ * When a credential was last tried: the clock time when that was today, the
+ * date too when it was older. A credential that has never been tried has no
+ * time to show, and says so with a dash rather than an invented one.
+ */
+function formatAttempt(at?: number) {
+	if (!at) return "—";
+	const date = new Date(at);
+	const today = new Date();
+	const sameDay =
+		date.getFullYear() === today.getFullYear() &&
+		date.getMonth() === today.getMonth() &&
+		date.getDate() === today.getDate();
+	const time = date.toLocaleTimeString([], {
+		hour: "2-digit",
+		minute: "2-digit",
+	});
+	return sameDay ? time : `${date.toLocaleDateString()} ${time}`;
+}
+
 export default Plugin.define({
 	i18n: {
 		en: {
@@ -125,6 +147,7 @@ export default Plugin.define({
 			free: "free",
 			globalShare: "global",
 			inUse: "in use",
+			lastTried: "last tried",
 			limit: "limit",
 			limited: "limited",
 			logEmpty: "nothing yet",
@@ -169,6 +192,9 @@ export default Plugin.define({
 		const [providers, setProviders] = createSignal<Provider[]>([]);
 		// The row whose add form is open, plus what the user has picked in it.
 		const [adding, setAdding] = createSignal("");
+		// Which credential's note is open, as `provider/alias`: one at a time, so
+		// the panel cannot fill with expanded messages.
+		const [openNote, setOpenNote] = createSignal("");
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
@@ -523,14 +549,33 @@ export default Plugin.define({
 			"padding-right": "1.4em",
 			position: "relative",
 		} as const;
+		// The note's box: the control line's left side, and the thing a pointer
+		// clicks to read the whole message. It is a column because the attempt
+		// time sits under the message once it is open.
 		const detail = {
+			cursor: "pointer",
+			display: "flex",
 			flex: "1 1 auto",
+			"flex-direction": "column",
 			"font-size": "12px",
+			gap: "2px",
 			"min-width": 0,
 			opacity: 0.7,
-			overflow: "hidden",
-			"text-overflow": "ellipsis",
-			"white-space": "nowrap",
+		} as const;
+		// Closed it is one line ending in an ellipsis, like every other row
+		// label; open it wraps, so a long provider message is all there.
+		const detailLine = (open: boolean) =>
+			({
+				overflow: "hidden",
+				"overflow-wrap": "anywhere",
+				"text-overflow": "ellipsis",
+				"white-space": open ? "pre-wrap" : "nowrap",
+			}) as const;
+		// The attempt time, under the message rather than beside it: the message
+		// is what a person opened this for.
+		const attempt = {
+			"font-size": "11px",
+			opacity: 0.8,
 		} as const;
 		// The row's own switches, pulled together at its right edge beside the grip
 		// and divided from the label by a hairline: a row reads as "this credential"
@@ -905,11 +950,40 @@ export default Plugin.define({
 								</label>
 								<div style={controlLine}>
 									<Show when={rowNote(item.account)}>
-										{(note) => (
-											<span style={detail} title={note()}>
-												{note()}
-											</span>
-										)}
+										{(note) => {
+											const key = `${item.entry.providerID}/${item.entry.alias}`;
+											const open = () => openNote() === key;
+											const toggle = () => setOpenNote(open() ? "" : key);
+											return (
+												<div
+													aria-expanded={open()}
+													onClick={toggle}
+													onKeyDown={(event) => {
+														if (event.key !== "Enter" && event.key !== " ")
+															return;
+														event.preventDefault();
+														toggle();
+													}}
+													role="button"
+													style={detail}
+													tabIndex={0}
+													title={
+														open()
+															? "hide the message"
+															: "show the whole message and when this credential was last tried"
+													}
+												>
+													<span style={detailLine(open())}>
+														{open() ? "▾" : "▸"} {note()}
+													</span>
+													<Show when={open()}>
+														<div style={attempt}>
+															{`${ctx.t("lastTried")} ${formatAttempt(item.account?.lastUsedAt)}`}
+														</div>
+													</Show>
+												</div>
+											);
+										}}
 									</Show>
 									<span style={controls}>
 										<span style={rule} />
