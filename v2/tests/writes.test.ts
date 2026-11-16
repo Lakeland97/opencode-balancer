@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { getAccount, orderedAccounts, saveAccount } from "../core/accounts";
-import { getStoredChain } from "../core/chains";
+import { getStoredChain, saveChain } from "../core/chains";
 import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
 import { clearLog, readLog } from "../server/log";
@@ -158,5 +158,31 @@ describe("chain writes", () => {
 			ok: false,
 		});
 		expect(readLog()).toHaveLength(0);
+	});
+});
+
+describe("create safety", () => {
+	test("create refuses to replace an existing chain", async () => {
+		const db = freshDb();
+		const target = (providerID: string) => ({
+			baseURL: `https://${providerID}.invalid/v1`,
+			modelID: "deepseek-v4.1-flash",
+			providerID,
+		});
+		saveChain(db, {
+			familyKey: "deepseek-v4.1-flash",
+			label: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			targets: [target("p1"), target("p2")],
+		});
+
+		const created = await writeChainCreate(ctx, db, {
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p1",
+		});
+
+		expect(created.ok).toBe(false);
+		expect(created.key).toBe("");
+		expect(targets(db, "deepseek-v4.1-flash")).toEqual(["p1", "p2"]);
 	});
 });

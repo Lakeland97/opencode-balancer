@@ -6,9 +6,11 @@ import {
 	createMemo,
 	createSignal,
 	For,
+	on,
 	onCleanup,
 	onMount,
 	Show,
+	untrack,
 } from "solid-js";
 import { copy } from "../copy";
 import { bufferTokens, cutFor, formatTokens } from "../core/context";
@@ -36,6 +38,7 @@ import {
 	grabMove,
 	moveCursor,
 	pageCursor,
+	panelOwnsKey,
 } from "./items";
 import {
 	allCollapsed,
@@ -44,6 +47,17 @@ import {
 	rowNote,
 	visibleChains,
 } from "./rows";
+
+/** A failure the RPC layer raised: not everything it throws is an Error. */
+function describe(error: unknown) {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	try {
+		return JSON.stringify(error);
+	} catch {
+		return String(error);
+	}
+}
 
 /** The session-panel input the host passes to a contribution. */
 export type PanelInput = {
@@ -96,12 +110,17 @@ export function BalancerPanel(props: {
 	});
 	const [log, setLog] = createSignal<LogEntry[]>([]);
 	const [message, setMessage] = createSignal("");
+	const [dialogOpen, setDialogOpen] = createSignal(false);
+	// Every read gets a generation; only the newest may apply its result.
+	let refreshGeneration = 0;
 
 	/**
 	 * Read everything at once. A failed poll keeps the last good state: the
 	 * panel going blank because one request dropped is worse than a stale row.
+	 * A slower, older read never overwrites a newer one.
 	 */
 	const refresh = async () => {
+		const generation = ++refreshGeneration;
 		try {
 			const [nextStatus, list, nextChains, nextPriority] = await Promise.all([
 				client.status({}),
@@ -115,6 +134,7 @@ export function BalancerPanel(props: {
 				client.rebalance({}),
 				client.log({}),
 			]);
+			if (generation !== refreshGeneration) return;
 			setStatus(nextStatus as Status);
 			setAccounts([...(list as Listed).accounts]);
 			setChains([...(nextChains as Chains).rows]);
@@ -135,7 +155,16 @@ export function BalancerPanel(props: {
 			setMessage(reply.ok ? "" : reply.message);
 			await refresh();
 		} catch (error) {
-			setMessage(error instanceof Error ? error.message : String(error));
+			setMessage(describe(error));
+		}
+	};
+
+	const withDialog = async <T,>(show: () => Promise<T>) => {
+		setDialogOpen(true);
+		try {
+			return await show();
+		} finally {
+			setDialogOpen(false);
 		}
 	};
 
@@ -144,7 +173,9 @@ export function BalancerPanel(props: {
 		value: string,
 		apply: (value: string) => Promise<unknown>,
 	) => {
-		const next = await props.ctx.ui.dialog.prompt({ title, value });
+		const next = await withDialog(() =>
+			props.ctx.ui.dialog.prompt({ title, value }),
+		);
 		if (next === undefined || next === value) return;
 		await run(() => apply(next));
 	};
@@ -152,7 +183,7 @@ export function BalancerPanel(props: {
 	const pick = <T extends string>(
 		title: string,
 		options: readonly { title: string; value: T }[],
-	) => props.ctx.ui.dialog.select<T>({ options, title });
+	) => withDialog(() => props.ctx.ui.dialog.select<T>({ options, title }));
 
 	// The thin slice's one control. Later sections append in render order.
 	const [openNote, setOpenNote] = createSignal("");
@@ -186,18 +217,27 @@ export function BalancerPanel(props: {
 			rows.length,
 		);
 		if (next === undefined) return;
-		const result = (await client.move({
-			alias,
-			direction: delta < 0 ? "up" : "down",
-			providerID,
-		})) as Reply;
+		let result: Reply;
+		try {
+			result = (await client.move({
+				alias,
+				direction: delta < 0 ? "up" : "down",
+				providerID,
+			})) as Reply;
+		} catch (error) {
+			// The grab stays held: the row did not move, and the user can retry
+			// or release it.
+			setMessage(describe(error));
+			await refresh();
+			return;
+		}
 		setMessage(result.ok ? "" : result.message);
 		await refresh();
 		const key = providerKey(providerID, alias);
 		const grip = items().findIndex(
 			(item) => item.rowKey === key && item.grab?.kind === "provider",
 		);
-		if (grip >= 0) setIndex(grip);
+		if (grip >= 0) focusAt(grip);
 	};
 
 	const toggleNote = (key: string) =>
@@ -276,9 +316,15 @@ export function BalancerPanel(props: {
 	};
 
 	const chooseModel = async (providerID: string) => {
-		const data = (await client.chainModels({ providerID })) as {
-			models: { modelID: string; name: string }[];
-		};
+		let data: { models: { modelID: string; name: string }[] };
+		try {
+			data = (await client.chainModels({ providerID })) as {
+				models: { modelID: string; name: string }[];
+			};
+		} catch (error) {
+			setMessage(describe(error));
+			return undefined;
+		}
 		return pick(
 			copy.models,
 			sortModels(data.models).map((model) => ({
@@ -354,18 +400,25 @@ export function BalancerPanel(props: {
 			chain.targets.length,
 		);
 		if (next === undefined) return;
-		const result = (await client.chainMove({
-			direction: delta < 0 ? "up" : "down",
-			key: chain.key,
-			providerID,
-		})) as Reply;
+		let result: Reply;
+		try {
+			result = (await client.chainMove({
+				direction: delta < 0 ? "up" : "down",
+				key: chain.key,
+				providerID,
+			})) as Reply;
+		} catch (error) {
+			setMessage(describe(error));
+			await refresh();
+			return;
+		}
 		setMessage(result.ok ? "" : result.message);
 		await refresh();
 		const rowKey = `${chain.key}:${providerID}`;
 		const grip = items().findIndex(
 			(item) => item.rowKey === rowKey && item.grab?.kind === "target",
 		);
-		if (grip >= 0) setIndex(grip);
+		if (grip >= 0) focusAt(grip);
 	};
 
 	const items = createMemo<Item[]>(() => {
@@ -540,7 +593,11 @@ export function BalancerPanel(props: {
 		}
 		return list;
 	});
-	const [cursor, setCursor] = createSignal<{ index: number; grab?: Grab }>({
+	const [cursor, setCursor] = createSignal<{
+		grab?: Grab;
+		id?: string;
+		index: number;
+	}>({
 		index: 0,
 	});
 	// The scrollbox may come from a different OpenTUI install than the one this
@@ -554,19 +611,36 @@ export function BalancerPanel(props: {
 		| undefined;
 
 	const pageSize = () => Math.max(1, props.ctx.renderer.height - 6);
-	const setIndex = (index: number) =>
-		setCursor((current) => ({ ...current, index }));
 
-	// A list that grows or shrinks under the cursor must not leave it pointing
-	// past the end.
-	createEffect(() => {
-		const count = items().length;
-		setCursor((current) =>
-			current.index < count
-				? current
-				: { ...current, index: clampCursor(current.index, count) },
-		);
-	});
+	/** Move focus to an index and remember which item it landed on. */
+	const focusAt = (index: number) =>
+		setCursor((current) => {
+			const next = clampCursor(index, items().length);
+			return { ...current, id: items()[next]?.id, index: next };
+		});
+
+	// A list that grows, shrinks or reorders under the cursor must keep focus on
+	// the same control, not the same number. When that control disappears (a row
+	// reset, a removed target, a cleared log), the nearest slot takes over.
+	createEffect(
+		on(items, (list) => {
+			const current = untrack(cursor);
+			if (current.id) {
+				const found = list.findIndex((item) => item.id === current.id);
+				if (found !== -1) {
+					if (found !== current.index) {
+						setCursor((value) => ({ ...value, index: found }));
+					}
+					return;
+				}
+			}
+			const index = clampCursor(current.index, list.length);
+			const id = list[index]?.id;
+			if (index !== current.index || id !== current.id) {
+				setCursor((value) => ({ ...value, id, index }));
+			}
+		}),
+	);
 
 	// Keep the focused row visible. The scrollbox can bring a child into view by
 	// id; older renderers fall back to centring the index in the viewport.
@@ -583,10 +657,7 @@ export function BalancerPanel(props: {
 	});
 
 	const move = (delta: number) =>
-		setCursor((current) => ({
-			...current,
-			index: moveCursor(current.index, delta, items().length),
-		}));
+		focusAt(moveCursor(cursor().index, delta, items().length));
 
 	const moveGrab = (delta: number) => {
 		const item = items()[cursor().index];
@@ -601,7 +672,23 @@ export function BalancerPanel(props: {
 	};
 
 	useKeyboard((key) => {
+		// The composer and dialogs own the keyboard when the panel is not the
+		// focused surface. Without this guard, typing a space in a session would
+		// toggle whatever control the hidden cursor happened to be on.
+		if (
+			!panelOwnsKey({
+				ctrl: key.ctrl,
+				dialogOpen: dialogOpen(),
+				focused: props.panel.focused,
+				meta: key.meta,
+				option: key.option,
+				super: key.super,
+			})
+		) {
+			return;
+		}
 		const name = key.name;
+		key.preventDefault();
 		const grabbing = cursor().grab;
 		if (grabbing) {
 			// While a grip is held, the arrows move the row itself; everything
@@ -622,24 +709,28 @@ export function BalancerPanel(props: {
 		if (name === "up" || name === "k") return move(-1);
 		if (name === "down" || name === "j") return move(1);
 		if (name === "pageup") {
-			return setCursor((current) => ({
-				...current,
-				index: pageCursor(current.index, -1, items().length, pageSize()),
-			}));
+			return focusAt(
+				pageCursor(cursor().index, -1, items().length, pageSize()),
+			);
 		}
 		if (name === "pagedown") {
-			return setCursor((current) => ({
-				...current,
-				index: pageCursor(current.index, 1, items().length, pageSize()),
-			}));
+			return focusAt(pageCursor(cursor().index, 1, items().length, pageSize()));
 		}
-		if (name === "home") return setIndex(0);
-		if (name === "end") return setIndex(Math.max(0, items().length - 1));
+		if (name === "home") return focusAt(0);
+		if (name === "end") return focusAt(Math.max(0, items().length - 1));
 		if (name === "tab") return move(key.shift ? -1 : 1);
 		if (name === "return" || name === "enter" || name === "space") {
 			const item = items()[cursor().index];
 			if (!item) return;
-			if (item.grab) return setCursor(beginGrab(cursor().index, item.grab));
+			if (item.grab) {
+				// A poll already on the wire must not land mid-grab.
+				refreshGeneration += 1;
+				setCursor({
+					...beginGrab(cursor().index, item.grab),
+					id: item.id,
+				});
+				return;
+			}
 			item.activate?.();
 			return;
 		}
@@ -650,6 +741,7 @@ export function BalancerPanel(props: {
 	});
 
 	onMount(() => {
+		props.panel.focus();
 		container?.focus();
 		void refresh();
 		const timer = setInterval(() => {
@@ -699,17 +791,17 @@ export function BalancerPanel(props: {
 			</box>
 			<box id={itemID("rebalance-length")}>
 				<text>{`${mark("rebalance-length")} ${copy.rebalance}: ${
-					rebalance().value || "built-in"
+					rebalance().value || copy.builtIn
 				}`}</text>
 			</box>
 			<box id={itemID("limit")}>
 				<text>{`${mark("limit")} ${copy.contextLimit}: ${
-					contextLimit().value || "default"
-				}  at ${formatTokens(cut()) || "—"}`}</text>
+					contextLimit().value || copy.defaultValue
+				}  ${copy.at} ${formatTokens(cut()) || "—"}`}</text>
 			</box>
 			<box id={itemID("buffer")}>
 				<text>{`${mark("buffer")} ${copy.buffer}: ${
-					contextBuffer().value || "built-in"
+					contextBuffer().value || copy.builtIn
 				}${
 					bufferTokens(contextBuffer().value) > 0
 						? ` (${formatTokens(bufferTokens(contextBuffer().value))})`
@@ -747,7 +839,7 @@ export function BalancerPanel(props: {
 								<text>{`${mark(`${key}:enable`)} [${
 									row.entry.enabled ? "x" : " "
 								}] ${row.entry.name} / ${row.entry.alias}${markers()}${
-									moving() ? "  moving" : ""
+									moving() ? `  ${copy.moving}` : ""
 								}`}</text>
 							</box>
 							<Show when={note()}>
@@ -757,7 +849,7 @@ export function BalancerPanel(props: {
 											<text>{`${mark(`${key}:note`)}   ${value()}`}</text>
 										</box>
 										<Show when={openNote() === key}>
-											<text>{`      last tried ${formatAttempt(
+											<text>{`      ${copy.lastTried} ${formatAttempt(
 												row.account?.lastUsedAt,
 											)}`}</text>
 										</Show>
@@ -822,7 +914,7 @@ export function BalancerPanel(props: {
 													} ${chain.label}`}</text>
 												</box>
 												<text>{`${chain.targets.length} · ${
-													chain.stored ? "custom" : "automatic"
+													chain.stored ? copy.custom : copy.automatic
 												}`}</text>
 												<box id={itemID(`c:${chain.key}:limit`)}>
 													<text>{`${mark(`c:${chain.key}:limit`)}${copy.limit}: ${
@@ -856,7 +948,7 @@ export function BalancerPanel(props: {
 																	target.state !== "available"
 																		? ` [${target.state}]`
 																		: ""
-																}${moving() ? "  moving" : ""}`}</text>
+																}${moving() ? `  ${copy.moving}` : ""}`}</text>
 																<box id={itemID(`${rowKey}:grip`)}>
 																	<text>{`${mark(`${rowKey}:grip`)}⠿`}</text>
 																</box>
@@ -881,7 +973,7 @@ export function BalancerPanel(props: {
 					)}
 				</For>
 				<Show when={visibleChains(chains()).length === 0}>
-					<text>No chains.</text>
+					<text>{copy.noChains}</text>
 				</Show>
 			</Show>
 			<box style={{ flexDirection: "row", gap: 2 }}>
@@ -895,18 +987,22 @@ export function BalancerPanel(props: {
 				</box>
 			</box>
 			<Show when={diagOpen()}>
-				<text>{`version ${props.ctx.app.version}`}</text>
-				<text>{`values ${new Date(
-					lastRefreshed(),
-				).toLocaleTimeString()}`}</text>
+				<text>{`${copy.version} ${props.ctx.app.version}`}</text>
+				<text>{`${copy.values} ${
+					lastRefreshed()
+						? new Date(lastRefreshed()).toLocaleTimeString()
+						: copy.notReadYet
+				}`}</text>
 				<text>{`${accounts().length} credential${
 					accounts().length === 1 ? "" : "s"
 				} · ${visibleChains(chains()).length} row${
 					visibleChains(chains()).length === 1 ? "" : "s"
 				} · ${log().length} log line${log().length === 1 ? "" : "s"}`}</text>
-				<text>{`limit ${contextLimit().value || "default"} · cut ${
-					formatTokens(cut()) || "—"
-				} · buffer ${contextBuffer().value || "built-in"}`}</text>
+				<text>{`${copy.limit} ${
+					contextLimit().value || copy.defaultValue
+				} · ${copy.cut} ${formatTokens(cut()) || "—"} · ${copy.buffer} ${
+					contextBuffer().value || copy.builtIn
+				}`}</text>
 				<Show when={log().length > 0}>
 					<box id={itemID("diag:clear")}>
 						<text>{`${mark("diag:clear")}[${copy.clear}]`}</text>

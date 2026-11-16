@@ -18,6 +18,8 @@ import {
 	writeContextBuffer,
 	writeContextLimit,
 	writeModelLimit,
+	writeRebalance,
+	writeRebalanceAuto,
 } from "../server/settings";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
@@ -210,5 +212,89 @@ describe("command write parity", () => {
 		expect(
 			readLog().some((entry) => entry.text === "p1/a free models only"),
 		).toBe(true);
+	});
+});
+
+describe("review parity cases", () => {
+	test("errors keeps in-use and disabled markers", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p1", "b", apiAuth("k2"));
+		saveAccount(db, "p2", "a", apiAuth("k3"));
+		saveAccount(db, "p3", "a", apiAuth("k4"));
+		// Used then parked: both markers belong on the row.
+		markAccountUsed(db, "p1", "a");
+		markRateLimited(db, "p1", "a", 60_000, "quota");
+		// Parked while switched off: the switch word is not lost.
+		markRateLimited(db, "p2", "a", 60_000, "quota");
+		await runCommand({ ctx: {} as never, db, raw: "disable p2/a" });
+		// Parked with no words from the endpoint: the fallback explains it.
+		markRateLimited(db, "p3", "a");
+		const out = await runCommand({ ctx: {} as never, db, raw: "errors" });
+		expect(out).toContain("[in use, limited]");
+		expect(out).toContain("[limited, disabled]");
+		expect(out).toContain("no reason was recorded for this park");
+	});
+	test("settings keeps the stored length while the switch is off", async () => {
+		const db = freshDb();
+		writeRebalance(db, "90m");
+		writeRebalanceAuto(db, false);
+		const out = await runCommand({ ctx: {} as never, db, raw: "settings" });
+		expect(out).toContain("Rebalance after: off");
+		expect(out).toContain("stored 90m");
+	});
+	test("diag survives a missing catalogue", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		const failing = {
+			model: {
+				list: async () => {
+					throw new Error("catalogue unavailable");
+				},
+			},
+		} as never;
+		const out = await runCommand({ ctx: failing, db, raw: "diag" });
+		expect(out).toContain("balancer.sqlite");
+		expect(out).toContain("1 credential");
+		expect(out).toContain("rows unavailable: catalogue unavailable");
+	});
+	test("a target is in use when a provider's second key served", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p1", "b", apiAuth("k2"));
+		markAccountUsed(db, "p1", "b");
+		const out = await runCommand({
+			ctx: workingCtx(),
+			db,
+			raw: `chain ${KEY}`,
+		});
+		expect(out).toContain("[in use]");
+	});
+	test("trailing arguments are refused before any write", async () => {
+		const db = freshDb();
+		await runCommand({ ctx: {} as never, db, raw: "buffer 20 always" });
+		const buffer = await runCommand({
+			ctx: {} as never,
+			db,
+			raw: "buffer 30 always junk",
+		});
+		expect(buffer).toContain("Usage:");
+		expect(readBuffer(db)).toBe("20");
+		expect(readBufferEnforcement(db)).toBe("always");
+		recordLog("config", "kept");
+		const log = await runCommand({
+			ctx: {} as never,
+			db,
+			raw: "log clear junk",
+		});
+		expect(log).toContain("Usage:");
+		expect(readLog().some((entry) => entry.text === "kept")).toBe(true);
+		const limit = await runCommand({
+			ctx: {} as never,
+			db,
+			raw: "limit default extra",
+		});
+		expect(limit).toContain("Usage:");
+		expect(readLimit(db)).toBeUndefined();
 	});
 });

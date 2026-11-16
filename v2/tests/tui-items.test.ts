@@ -6,6 +6,7 @@ import {
 	grabMove,
 	moveCursor,
 	pageCursor,
+	panelOwnsKey,
 } from "../tui/items";
 
 describe("cursor", () => {
@@ -29,6 +30,28 @@ describe("cursor", () => {
 		expect(
 			grabMove({ grab: { kind: "provider" }, index: 0 }, -1, 3),
 		).toBeUndefined();
-		expect(endGrab(cursor).grab).toBeUndefined();
+		expect(endGrab({ ...cursor, id: "row:grip" }).grab).toBeUndefined();
+		expect(endGrab({ ...cursor, id: "row:grip" }).id).toBe("row:grip");
+	});
+});
+
+describe("panel keyboard scope", () => {
+	const plain = {
+		ctrl: false,
+		dialogOpen: false,
+		focused: true,
+		meta: false,
+		option: false,
+	};
+	test("only the focused panel without a dialog owns the keys", () => {
+		expect(panelOwnsKey(plain)).toBe(true);
+		expect(panelOwnsKey({ ...plain, focused: false })).toBe(false);
+		expect(panelOwnsKey({ ...plain, dialogOpen: true })).toBe(false);
+	});
+	test("chords and modifiers belong to the host", () => {
+		expect(panelOwnsKey({ ...plain, ctrl: true })).toBe(false);
+		expect(panelOwnsKey({ ...plain, meta: true })).toBe(false);
+		expect(panelOwnsKey({ ...plain, option: true })).toBe(false);
+		expect(panelOwnsKey({ ...plain, super: true })).toBe(false);
 	});
 });

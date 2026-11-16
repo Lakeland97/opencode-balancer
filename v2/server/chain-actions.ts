@@ -4,6 +4,7 @@ import { mostRecentlyUsed } from "../core/accounts";
 import {
 	type ChainTarget,
 	deleteChain,
+	getStoredChain,
 	moveTarget,
 	moveTargetTo,
 	saveChain,
@@ -184,6 +185,16 @@ export async function createChain(
 		),
 	);
 	const key = existing?.key ?? familyKeyFor(record.modelID);
+	// Creating a row replaces its whole target list. A stored chain is the
+	// user's own configuration, so it is never silently reshaped; an automatic
+	// row is just the catalogue's order, and registering it is what `create` is
+	// for. Add to a stored row instead.
+	if (existing?.stored || getStoredChain(db, key)) {
+		return {
+			message: `${key} already exists; use its model row to add or edit targets.`,
+			ok: false,
+		};
+	}
 	saveChain(db, {
 		familyKey: key,
 		label: record.name ?? existing?.name ?? record.modelID,
@@ -303,19 +314,16 @@ function resolvedModelID(db: Database, target: FamilyRoute): string {
 function targetState(
 	db: Database,
 	target: { providerID: string; modelID: string; available?: boolean },
+	used = mostRecentlyUsed(db),
 ): string {
 	if (target.available === false) return "unavailable";
 	// No healthy credential means the provider is switched off entirely, or every
 	// one of its credentials is disabled, parked, or waiting on a cooldown.
-	const account = selectHealthyAccount(db, target.providerID);
-	if (!account) return "unavailable";
-	// "In use" is the credential that served the most recent request, the same
-	// definition the credential rows use. Choosing the next route instead made a
-	// fresh, untouched chain claim it was already serving.
-	const used = mostRecentlyUsed(db);
-	return used?.providerID === target.providerID && used.alias === account.alias
-		? "in use"
-		: "available";
+	if (!selectHealthyAccount(db, target.providerID)) return "unavailable";
+	// "In use" is the provider whose credential served the most recent request,
+	// the same definition the credential rows use. Comparing against the first
+	// healthy credential instead missed the second key of a provider.
+	return used?.providerID === target.providerID ? "in use" : "available";
 }
 
 export type ChainRow = {
@@ -343,6 +351,7 @@ export async function listChainRows(
 	db: Database,
 ): Promise<ChainRow[]> {
 	const catalog = await loadCatalog(ctx, db);
+	const used = mostRecentlyUsed(db);
 	return catalog.families.map((family) => ({
 		key: family.key,
 		label: family.name,
@@ -354,7 +363,7 @@ export async function listChainRows(
 			modelID: target.modelID,
 			providerID: target.providerID,
 			resolved: resolvedModelID(db, target),
-			state: targetState(db, target),
+			state: targetState(db, target, used),
 		})),
 	}));
 }

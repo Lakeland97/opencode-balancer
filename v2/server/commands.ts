@@ -26,6 +26,7 @@ import { getBalancingEnabled } from "../core/priority";
 import {
 	formatDuration,
 	getRebalanceAuto,
+	readRebalance,
 	rebalanceAfterMs,
 } from "../core/rebalance";
 import type { Account } from "../core/types";
@@ -116,7 +117,14 @@ function settingsLines(db: Database) {
 	const limit = readLimit(db);
 	const buffer = readBuffer(db);
 	const enforcement = readBufferEnforcement(db);
+	const stored = readRebalance(db);
 	const cut = cutFor(limit ?? "", buffer ?? "", enforcement);
+	const auto = getRebalanceAuto(db);
+	const effective = auto ? formatDuration(rebalanceAfterMs(db)) : "off";
+	// The switch and the stored length are separate facts. Hiding the length
+	// while the switch is off loses a value the panel still shows; printing it
+	// again when it is exactly what is running adds nothing.
+	const storedNote = stored && stored !== effective ? `  stored ${stored}` : "";
 	return [
 		`Automatic balancing: ${getBalancingEnabled(db) ? "on" : "off"}`,
 		`Context limit: ${
@@ -124,9 +132,7 @@ function settingsLines(db: Database) {
 		}`,
 		`Buffer: ${buffer ?? "built-in"}`,
 		`Enforcement: ${enforcement}`,
-		`Rebalance after: ${
-			getRebalanceAuto(db) ? formatDuration(rebalanceAfterMs(db)) : "off"
-		}`,
+		`Rebalance after: ${effective}${storedNote}`,
 		`Cut at ${formatTokens(cut) || "—"}`,
 	];
 }
@@ -139,11 +145,33 @@ function errorList(db: Database) {
 	if (accounts.length === 0) {
 		return "No credential is sitting out a rate limit.";
 	}
+	const used = mostRecentlyUsed(db);
 	return accounts
 		.map((account) => {
-			const note = accountNote(db, account);
+			// The same markers the `list` row carries: a parked credential that
+			// served the last request is both in use and limited, and a disabled
+			// one keeps its switch word.
+			const marks: string[] = routeMarkers({
+				active: false,
+				inUse:
+					!account.disabled &&
+					used?.providerID === account.providerID &&
+					used.alias === account.alias,
+				limited: true,
+			}).map((marker) => copy[marker]);
+			if (account.disabled) marks.push("disabled");
+			// The panel never leaves a park unexplained; the fallback reason says
+			// so when the endpoint gave no words at all.
+			const note = credentialNote({
+				limited: true,
+				limitedUntil: readLimitedUntil(db, account.providerID, account.alias),
+				reason:
+					readLimitedReason(db, account.providerID, account.alias) ||
+					copy.noReason,
+				resets: copy.resets,
+			});
 			return [
-				`${account.providerID}/${account.alias}  [${copy.limited}]`,
+				`${account.providerID}/${account.alias}  [${marks.join(", ")}]`,
 				...(note ? [`  ${note}`] : []),
 				`  last tried ${formatAttempt(account.lastUsedAt)}`,
 			].join("\n");
@@ -157,9 +185,11 @@ function errorList(db: Database) {
  * says nothing the credential list does not.
  */
 async function chainList(ctx: Context, db: Database) {
-	const rows = (await listChainRows(ctx, db)).filter(
-		(row) => row.stored || row.targets.length > 1,
-	);
+	const rows = (await listChainRows(ctx, db))
+		.filter((row) => row.stored || row.targets.length > 1)
+		.sort((a, b) =>
+			a.label.localeCompare(b.label, undefined, { sensitivity: "base" }),
+		);
 	if (rows.length === 0) {
 		return "No custom chains; every row follows the credential order.";
 	}
@@ -310,10 +340,14 @@ export async function runCommand({
 	}
 
 	if (action === "log") {
-		const [verb] = args;
+		const [verb, ...rest] = args;
+		if (rest.length > 0) return "Usage: /balancer log [n] | log clear";
 		if (verb === "clear") {
 			clearLog();
 			return "Cleared the log.";
+		}
+		if (verb !== undefined && !/^\d+$/.test(verb)) {
+			return "Usage: /balancer log [n] | log clear";
 		}
 		const entries = readLog();
 		if (entries.length === 0) return "The log is empty.";
@@ -330,19 +364,34 @@ export async function runCommand({
 
 	if (action === "diag") {
 		const accounts = listAccounts(db);
-		const rows = await listChainRows(ctx, db);
-		const custom = rows.filter((row) => row.stored).length;
+		// Diagnostics must survive the very failure that makes them useful. A
+		// missing catalogue costs the row count, not the store path or settings.
+		let rows: Awaited<ReturnType<typeof listChainRows>> | undefined;
+		let catalogueError = "";
+		try {
+			rows = await listChainRows(ctx, db);
+		} catch (error) {
+			catalogueError = error instanceof Error ? error.message : String(error);
+		}
+		const visible = rows?.filter(
+			(row) => row.stored || row.targets.length > 1,
+		).length;
 		const logs = readLog().length;
 		return [
 			`Store: ${storePath()}`,
-			`${accounts.length} credential${accounts.length === 1 ? "" : "s"}, ${custom} custom row${custom === 1 ? "" : "s"}, ${logs} log entr${logs === 1 ? "y" : "ies"}`,
+			`${accounts.length} credential${accounts.length === 1 ? "" : "s"}, ${
+				visible ?? "?"
+			} row${visible === 1 ? "" : "s"}, ${logs} log entr${
+				logs === 1 ? "y" : "ies"
+			}`,
 			...settingsLines(db),
+			...(catalogueError ? [`rows unavailable: ${catalogueError}`] : []),
 		].join("\n");
 	}
 
 	if (action === "limit") {
-		const value = args.join(" ");
-		if (!value) return "Usage: /balancer limit <value|default>";
+		if (args.length !== 1) return "Usage: /balancer limit <value|default>";
+		const value = args[0];
 		return writeContextLimit(db, value === "default" ? "" : value).message;
 	}
 
@@ -350,7 +399,7 @@ export async function runCommand({
 		const [first, second] = args;
 		const usage =
 			"Usage: /balancer buffer <value|default> [always|necessary], or /balancer buffer <always|necessary>";
-		if (!first) return usage;
+		if (!first || args.length > 2) return usage;
 		const enforcementOnly = first === "always" || first === "necessary";
 		if (enforcementOnly && second) return usage;
 		const enforcement = enforcementOnly ? first : second;
@@ -372,7 +421,7 @@ export async function runCommand({
 		if (enforcement) {
 			messages.push(writeBufferEnforcement(db, enforcement).message);
 		}
-		return messages.join(" ");
+		return messages.join("\n");
 	}
 
 	if (action === "rebalance") {
@@ -460,13 +509,23 @@ export async function runCommand({
 	if (action === "priority") {
 		const entries = orderedAccounts(db);
 		if (entries.length === 0) return "No providers saved.";
+		const used = mostRecentlyUsed(db);
 		return entries
-			.map(
-				(account, index) =>
-					`${index + 1}. ${account.providerID}/${account.alias}  ${
-						account.disabled ? "off" : "on"
-					}${account.freeOnly ? "  free-only" : ""}`,
-			)
+			.map((account, index) => {
+				const limited = account.rateLimitedUntil != null;
+				const marks: string[] = routeMarkers({
+					active: !account.disabled && !limited,
+					inUse:
+						!account.disabled &&
+						used?.providerID === account.providerID &&
+						used.alias === account.alias,
+					limited,
+				}).map((marker) => copy[marker]);
+				if (account.disabled) marks.push("disabled");
+				return `${index + 1}. ${account.providerID}/${account.alias}  [${marks.join(
+					", ",
+				)}]${account.freeOnly ? "  free-only" : ""}`;
+			})
 			.join("\n");
 	}
 

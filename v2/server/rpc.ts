@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
+import { copy } from "../copy";
 import {
 	listAccounts,
 	mostRecentlyUsed,
@@ -159,7 +160,7 @@ export async function registerBalancerRpc({
 								// A park from before reasons were kept, or one the
 								// host described with no words at all. Saying so is
 								// better than a marker that explains nothing.
-								"no reason was recorded for this park"
+								copy.noReason
 							: "",
 						// When the provider said its own quota comes back, in
 						// milliseconds, or 0 when it did not say. Evidence from the

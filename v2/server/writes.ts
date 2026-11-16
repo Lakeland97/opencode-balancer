@@ -99,22 +99,36 @@ export function writeMove(
 	input: Pair & { direction?: "up" | "down"; to?: number },
 ): WriteResult {
 	const { providerID, alias, to, direction } = input;
+	const all = orderedAccounts(db);
+	const from = all.findIndex(
+		(account) => account.providerID === providerID && account.alias === alias,
+	);
+	if (from === -1) {
+		return {
+			message: `No credential ${providerID}/${alias}.`,
+			ok: false,
+		};
+	}
 	// A drag names the slot it landed on; the step controls name a direction.
 	if (typeof to === "number") {
-		const all = orderedAccounts(db);
-		const from = all.findIndex(
-			(account) => account.providerID === providerID && account.alias === alias,
-		);
-		if (from === -1) {
+		const delta = Math.max(0, Math.min(to, all.length - 1)) - from;
+		if (delta === 0) {
 			return {
-				message: `No credential ${providerID}/${alias}.`,
+				message: `${providerID}/${alias} is already there.`,
+				ok: true,
+			};
+		}
+		moveAccount(db, providerID, alias, delta);
+	} else {
+		const step = direction === "up" ? -1 : 1;
+		const target = from + step;
+		if (target < 0 || target >= all.length) {
+			return {
+				message: `${providerID}/${alias} cannot move further ${direction}.`,
 				ok: false,
 			};
 		}
-		const delta = Math.max(0, Math.min(to, all.length - 1)) - from;
-		if (delta !== 0) moveAccount(db, providerID, alias, delta);
-	} else {
-		moveAccount(db, providerID, alias, direction === "up" ? -1 : 1);
+		moveAccount(db, providerID, alias, step);
 	}
 	forgetRoutingMemory();
 	return {

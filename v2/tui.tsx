@@ -1,4 +1,5 @@
 import { Plugin } from "@opencode/plugin/tui";
+import { copy } from "./copy";
 import { Balancer } from "./rpc";
 import { BalancerPanel } from "./tui/panel";
 
@@ -15,7 +16,7 @@ export default Plugin.define({
 
 		const open = () => {
 			if (!ctx.ui.panel.open("balancer.panel")) {
-				ctx.ui.toast.show({ message: "Open a session first." });
+				ctx.ui.toast.show({ message: copy.openSession });
 			}
 		};
 
@@ -26,7 +27,7 @@ export default Plugin.define({
 					id: "balancer.open",
 					palette: true,
 					run: open,
-					title: "Open Balancer",
+					title: copy.open,
 				},
 			],
 		}));
