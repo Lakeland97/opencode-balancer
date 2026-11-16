@@ -1,11 +1,18 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { markAccountUsed, saveAccount } from "../core/accounts";
-import { saveChain } from "../core/chains";
+import { getStoredChain, saveChain } from "../core/chains";
+import {
+	readBuffer,
+	readBufferEnforcement,
+	readLimit,
+	readModelLimit,
+} from "../core/context";
+import { getRebalanceAuto } from "../core/rebalance";
 import { migrate } from "../core/schema";
 import { runCommand } from "../server/commands";
 import { invalidateCatalog } from "../server/connectors";
-import { clearLog, recordLog } from "../server/log";
+import { clearLog, readLog, recordLog } from "../server/log";
 import { markRateLimited } from "../server/request-state";
 import {
 	writeContextBuffer,
@@ -134,5 +141,74 @@ describe("command read parity", () => {
 		const out = await runCommand({ ctx: workingCtx(), db, raw: "diag" });
 		expect(out).toContain("balancer.sqlite");
 		expect(out).toContain("1 credential");
+	});
+});
+
+describe("command write parity", () => {
+	test("limit sets and default clears", async () => {
+		const db = freshDb();
+		await runCommand({ ctx: {} as never, db, raw: "limit 200" });
+		expect(readLimit(db)).toBe("200");
+		await runCommand({ ctx: {} as never, db, raw: "limit default" });
+		expect(readLimit(db)).toBeUndefined();
+	});
+	test("buffer validates both parts before writing either", async () => {
+		const db = freshDb();
+		await runCommand({ ctx: {} as never, db, raw: "buffer 20 necessary" });
+		expect(readBuffer(db)).toBe("20");
+		expect(readBufferEnforcement(db)).toBe("necessary");
+		await runCommand({ ctx: {} as never, db, raw: "buffer nonsense always" });
+		expect(readBuffer(db)).toBe("20");
+		expect(readBufferEnforcement(db)).toBe("necessary");
+	});
+	test("rebalance off with a length is refused", async () => {
+		const db = freshDb();
+		const before = getRebalanceAuto(db);
+		const out = await runCommand({
+			ctx: {} as never,
+			db,
+			raw: "rebalance off 90m",
+		});
+		expect(out).toContain("Usage:");
+		expect(getRebalanceAuto(db)).toBe(before);
+	});
+	test("a model limit sets and clears", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		const ctx = workingCtx();
+		await runCommand({
+			ctx,
+			db,
+			raw: `chain ${KEY} limit 100`,
+		});
+		expect(readModelLimit(db, KEY)).toBe("100");
+		await runCommand({
+			ctx,
+			db,
+			raw: `chain ${KEY} limit default`,
+		});
+		expect(readModelLimit(db, KEY)).toBeUndefined();
+	});
+	test("create registers a row", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		const out = await runCommand({
+			ctx: workingCtx(),
+			db,
+			raw: `create p1 ${KEY}`,
+		});
+		expect(out).toContain(KEY);
+		expect(getStoredChain(db, KEY)).toBeDefined();
+	});
+	test("existing verbs now write the config log", async () => {
+		const db = freshDb();
+		clearLog();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		await runCommand({ ctx: {} as never, db, raw: "enable p1/a" });
+		expect(readLog().some((entry) => entry.text === "p1/a enabled")).toBe(true);
+		await runCommand({ ctx: {} as never, db, raw: "free p1 on" });
+		expect(
+			readLog().some((entry) => entry.text === "p1/a free models only"),
+		).toBe(true);
 	});
 });

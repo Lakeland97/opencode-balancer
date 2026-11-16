@@ -2,19 +2,14 @@ import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
 import { copy } from "../copy";
 import {
-	clearAccountPark,
 	getAccount,
 	getActiveAccount,
 	listAccounts,
 	mostRecentlyUsed,
-	moveAccount,
 	orderedAccounts,
 	readLimitedReason,
 	readLimitedUntil,
-	setAccountEnabled,
-	setAccountFreeOnly,
 	type UsedAccount,
-	useAccount,
 } from "../core/accounts";
 import {
 	cutFor,
@@ -27,24 +22,37 @@ import {
 import { credentialNote, formatAttempt, routeMarkers } from "../core/format";
 import { matchModel } from "../core/models";
 import { storePath } from "../core/path";
-import { getBalancingEnabled, setBalancingEnabled } from "../core/priority";
+import { getBalancingEnabled } from "../core/priority";
 import {
 	formatDuration,
 	getRebalanceAuto,
 	rebalanceAfterMs,
 } from "../core/rebalance";
 import type { Account } from "../core/types";
-import {
-	addTarget,
-	findRow,
-	listChainRows,
-	removeTarget,
-	resetRow,
-	shiftTarget,
-} from "./chain-actions";
+import { findRow, listChainRows } from "./chain-actions";
 import { invalidateCatalog } from "./connectors";
 import { syncAccounts } from "./import-credentials";
 import { clearLog, readLog } from "./log";
+import {
+	writeBalancing,
+	writeBufferEnforcement,
+	writeContextBuffer,
+	writeContextLimit,
+	writeModelLimit,
+	writeRebalance,
+	writeRebalanceAuto,
+} from "./settings";
+import {
+	writeChainAdd,
+	writeChainCreate,
+	writeChainMove,
+	writeChainRemove,
+	writeChainReset,
+	writeMove,
+	writeSetEnabled,
+	writeSetFreeOnly,
+	writeUse,
+} from "./writes";
 
 function parseArgs(input: string) {
 	return (
@@ -246,7 +254,7 @@ export async function runCommand({
 	if (["help", "--help", "-h"].includes(action)) {
 		return [
 			"Balancer commands:",
-			"  gui                          Open the Desktop panel",
+			"  gui                          Open the Balancer panel",
 			"  list [provider]              Credentials, in the order they are tried",
 			"  status                       Balancing state and account totals",
 			"  errors                       Credentials sitting out a rate limit, with refills",
@@ -257,11 +265,17 @@ export async function runCommand({
 			"  use <provider> <alias>       Serve this provider with that credential",
 			"  import                       Re-read the credentials OpenCode holds",
 			"  on | off                     Toggle automatic failover",
+			"  limit <value|default>        Context limit as a size or a share",
+			"  buffer <value|default> [always|necessary]",
+			"  buffer <always|necessary>    Change only when the buffer applies",
+			"  rebalance on [length] | off | <length> | default",
 			"  priority                     Credential order, with each one's switches",
 			"  chain <model>                Targets for a row, in the order they are tried",
 			"  chain <model> add <provider> <model>",
 			"  chain <model> remove|up|down <provider>",
+			"  chain <model> limit <value|default>",
 			"  chain <model> reset          Hand the row back to the credential order",
+			"  create <provider> <model>    Start a custom row from one model",
 			"  enable <credential> | disable <credential>",
 			"  free <credential> on | off   Use only that credential's free models",
 			"  up <credential> | down <credential>",
@@ -326,6 +340,75 @@ export async function runCommand({
 		].join("\n");
 	}
 
+	if (action === "limit") {
+		const value = args.join(" ");
+		if (!value) return "Usage: /balancer limit <value|default>";
+		return writeContextLimit(db, value === "default" ? "" : value).message;
+	}
+
+	if (action === "buffer") {
+		const [first, second] = args;
+		const usage =
+			"Usage: /balancer buffer <value|default> [always|necessary], or /balancer buffer <always|necessary>";
+		if (!first) return usage;
+		const enforcementOnly = first === "always" || first === "necessary";
+		if (enforcementOnly && second) return usage;
+		const enforcement = enforcementOnly ? first : second;
+		if (
+			enforcement &&
+			enforcement !== "always" &&
+			enforcement !== "necessary"
+		) {
+			return usage;
+		}
+		const messages: string[] = [];
+		if (!enforcementOnly) {
+			// The value is validated and written before the enforcement choice is
+			// touched, so a typo in either half leaves both as they were.
+			const result = writeContextBuffer(db, first === "default" ? "" : first);
+			if (!result.ok) return result.message;
+			messages.push(result.message);
+		}
+		if (enforcement) {
+			messages.push(writeBufferEnforcement(db, enforcement).message);
+		}
+		return messages.join(" ");
+	}
+
+	if (action === "rebalance") {
+		const [first, ...rest] = args;
+		const usage =
+			"Usage: /balancer rebalance on [length] | off | <length> | default";
+		if (!first) return usage;
+		if (first === "off") {
+			if (rest.length > 0) return usage;
+			return writeRebalanceAuto(db, false).message;
+		}
+		if (first === "on") {
+			if (rest.length > 0) {
+				if (rest.length > 1) return usage;
+				return writeRebalance(db, rest[0]).message;
+			}
+			return writeRebalanceAuto(db, true).message;
+		}
+		if (rest.length > 0) return usage;
+		// `default` clears the stored length; any other word is a length the
+		// duration grammar either accepts or refuses with its own message.
+		return writeRebalance(db, first === "default" ? "" : first).message;
+	}
+
+	if (action === "create") {
+		const [providerID, ...modelWords] = args;
+		if (!providerID || modelWords.length === 0) {
+			return "Usage: /balancer create <provider> <model>";
+		}
+		const result = await writeChainCreate(ctx, db, {
+			modelID: modelWords.join(" "),
+			providerID,
+		});
+		return result.message;
+	}
+
 	if (action === "add" || action === "import") {
 		// Accounts mirror the credentials OpenCode holds, so this is a re-read
 		// rather than a way to type one in.
@@ -347,14 +430,7 @@ export async function runCommand({
 	if (action === "use") {
 		const [providerID, alias] = args;
 		if (!providerID || !alias) return "Usage: /balancer use <provider> <alias>";
-		const account = getAccount(db, providerID, alias);
-		if (!account) return `No credential ${providerID}/${alias}.`;
-		// Picking a credential is how its provider is told to serve with it: the
-		// row moves ahead of that provider's others, which is what routing reads.
-		useAccount(db, providerID, alias);
-		// Choosing an account is the retry a park was waiting for.
-		clearAccountPark(db, account.providerID, account.alias);
-		return `${providerID}/${account.alias} serves ${providerID} now.`;
+		return writeUse(db, { alias, providerID }).message;
 	}
 
 	if (action === "active") {
@@ -374,13 +450,11 @@ export async function runCommand({
 	}
 
 	if (action === "on") {
-		setBalancingEnabled(db, true);
-		return "Automatic balancing enabled.";
+		return writeBalancing(db, true).message;
 	}
 
 	if (action === "off") {
-		setBalancingEnabled(db, false);
-		return "Automatic balancing disabled.";
+		return writeBalancing(db, false).message;
 	}
 
 	if (action === "priority") {
@@ -422,22 +496,28 @@ export async function runCommand({
 		}
 
 		if (verb === "reset") {
-			return resetRow(db, family)
-				? `${family.key} is back to automatic order.`
-				: `${family.key} was already automatic.`;
+			return (await writeChainReset(ctx, db, family.key)).message;
+		}
+
+		if (verb === "limit") {
+			const words = [providerID, ...modelWords].filter(Boolean);
+			if (words.length === 0) {
+				return "Usage: /balancer chain <model> limit <value|default>";
+			}
+			const value = words.join(" ");
+			return writeModelLimit(db, family.key, value === "default" ? "" : value)
+				.message;
 		}
 
 		if (verb === "add") {
 			if (!providerID || modelWords.length === 0) {
 				return "Usage: /balancer chain <model> add <provider> <model>";
 			}
-			const result = await addTarget(
-				ctx,
-				db,
-				family,
+			const result = await writeChainAdd(ctx, db, {
+				key: family.key,
+				modelID: modelWords.join(" "),
 				providerID,
-				modelWords.join(" "),
-			);
+			});
 			return result.message;
 		}
 
@@ -445,10 +525,23 @@ export async function runCommand({
 			return `Usage: /balancer chain <model> ${verb} <provider>`;
 		}
 
-		if (verb === "remove") return removeTarget(db, family, providerID).message;
+		if (verb === "remove") {
+			return (
+				await writeChainRemove(ctx, db, {
+					key: family.key,
+					providerID,
+				})
+			).message;
+		}
 
 		if (verb === "up" || verb === "down") {
-			return shiftTarget(db, family, providerID, verb).message;
+			return (
+				await writeChainMove(ctx, db, {
+					direction: verb,
+					key: family.key,
+					providerID,
+				})
+			).message;
 		}
 
 		return `Unknown chain action: ${verb}.`;
@@ -462,14 +555,12 @@ export async function runCommand({
 		const targets = namedAccounts(db, token);
 		if (targets.length === 0) return `No credential matches "${token}".`;
 		for (const account of targets) {
-			setAccountFreeOnly(
-				db,
-				account.providerID,
-				account.alias,
-				toggle === "on",
-			);
+			writeSetFreeOnly(db, {
+				alias: account.alias,
+				enabled: toggle === "on",
+				providerID: account.providerID,
+			});
 		}
-		invalidateCatalog();
 		return `${targets.length} credential${targets.length === 1 ? "" : "s"} use ${
 			toggle === "on" ? "free models only" : "paid models too"
 		}.`;
@@ -481,12 +572,11 @@ export async function runCommand({
 		const targets = namedAccounts(db, token);
 		if (targets.length === 0) return `No credential matches "${token}".`;
 		for (const account of targets) {
-			setAccountEnabled(
-				db,
-				account.providerID,
-				account.alias,
-				action === "enable",
-			);
+			writeSetEnabled(db, {
+				alias: account.alias,
+				enabled: action === "enable",
+				providerID: account.providerID,
+			});
 		}
 		return `${targets.length} credential${targets.length === 1 ? "" : "s"} ${
 			action === "enable" ? "enabled" : "disabled"
@@ -504,13 +594,11 @@ export async function runCommand({
 			return `Say which credential: /balancer ${action} <provider>/<alias>.`;
 		}
 		const [account] = targets;
-		moveAccount(
-			db,
-			account.providerID,
-			account.alias,
-			action === "up" ? -1 : 1,
-		);
-		return `Moved ${account.providerID}/${account.alias} ${action}.`;
+		return writeMove(db, {
+			alias: account.alias,
+			direction: action,
+			providerID: account.providerID,
+		}).message;
 	}
 
 	return `Unknown command: ${action}. Use /balancer help.`;
