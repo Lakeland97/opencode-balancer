@@ -1,8 +1,11 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { Context } from "@opencode/plugin/promise/plugin";
 
-import { getActiveAccount, listAccounts } from "../core/accounts";
+import { getAccount, getActiveAccount, listAccounts } from "../core/accounts";
 import { migrate } from "../core/schema";
 import { syncAccounts } from "../server/import-credentials";
 
@@ -49,6 +52,18 @@ function fakeContext(options: Options) {
 }
 
 const key = (value: string) => ({ key: value, type: "api" as const });
+
+// Every sync in this file reads a config dir of its own, so the machine's real
+// providers never leak into the assertions.
+let configHome = "";
+beforeEach(() => {
+	configHome = mkdtempSync(join(tmpdir(), "balancer-config-"));
+	process.env.OPENCODE_CONFIG_DIR = configHome;
+});
+afterEach(() => {
+	delete process.env.OPENCODE_CONFIG_DIR;
+	rmSync(configHome, { force: true, recursive: true });
+});
 
 describe("importing OpenCode's credentials", () => {
 	test("two credentials on one provider are both imported", async () => {
@@ -341,5 +356,46 @@ describe("importing OpenCode's credentials", () => {
 
 		expect(result.pruned).toBe(1);
 		expect(listAccounts(db, "acme")).toHaveLength(0);
+	});
+});
+
+describe("providers configured with their own key", () => {
+	test("the key beside the provider name becomes an account, and leaves with it", async () => {
+		writeFileSync(
+			join(configHome, "opencode.json"),
+			JSON.stringify({
+				providers: {
+					"open-design": {
+						env: ["OPENDESIGN_API_KEY", "sk-live-abcdefghijklmnop"],
+						name: "Open-Design",
+						settings: { baseURL: "https://open-design.invalid/v1" },
+					},
+				},
+			}),
+		);
+		const db = freshDb();
+		const ctx = fakeContext({ integrations: [] });
+
+		const result = await syncAccounts(ctx, db);
+
+		expect(result.imported).toBe(1);
+		expect(getAccount(db, "open-design", "open-design")?.auth).toEqual(
+			key("sk-live-abcdefghijklmnop"),
+		);
+		expect(listAccounts(db, "open-design")).toHaveLength(1);
+
+		// The synthetic source survives a second sync instead of being pruned
+		// as a hand-added account.
+		await syncAccounts(ctx, db);
+		expect(listAccounts(db, "open-design")).toHaveLength(1);
+
+		// Taking the provider out of the config is how it leaves the balancer.
+		writeFileSync(
+			join(configHome, "opencode.json"),
+			JSON.stringify({ providers: {} }),
+		);
+		const removed = await syncAccounts(ctx, db);
+		expect(removed.pruned).toBe(1);
+		expect(listAccounts(db, "open-design")).toHaveLength(0);
 	});
 });

@@ -59,20 +59,36 @@ export function chooseRouteForRequest(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
+	minContext?: number,
 ): ChosenRoute | undefined {
 	return family.stored
-		? walkStoredChain(db, family, exclude)
-		: walkCredentialOrder(db, family, exclude);
+		? walkStoredChain(db, family, exclude, false, minContext)
+		: walkCredentialOrder(db, family, exclude, false, minContext);
 }
 
 /** The route to send for one credential, or undefined if free-only blocks it. */
 function targetFor(
 	route: FamilyRoute,
 	account: Account,
+	minContext?: number,
 ): ChosenRoute | undefined {
 	const target =
 		route.free === false && account.freeOnly ? freeVariantOf(route) : route;
-	return target ? { ...target, account } : undefined;
+	if (!target) return undefined;
+	// A conversation already larger than this target's window cannot be sent
+	// there: the provider would reject the whole request. The row reports one
+	// large window, so nothing else stops a failover from walking into a
+	// smaller sibling of the same model.
+	if (
+		minContext !== undefined &&
+		minContext > 0 &&
+		typeof target.context === "number" &&
+		target.context > 0 &&
+		target.context < minContext
+	) {
+		return undefined;
+	}
+	return { ...target, account };
 }
 
 function walkStoredChain(
@@ -80,6 +96,7 @@ function walkStoredChain(
 	family: ModelFamily,
 	exclude: ReadonlySet<string>,
 	includeParked = false,
+	minContext?: number,
 ): ChosenRoute | undefined {
 	for (const route of resolveChain(db, family)) {
 		if (route.available === false) continue;
@@ -88,7 +105,7 @@ function walkStoredChain(
 			: healthyAccounts(db, route.providerID);
 		for (const account of accounts) {
 			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
-			const chosen = targetFor(route, account);
+			const chosen = targetFor(route, account, minContext);
 			if (chosen) return chosen;
 		}
 	}
@@ -100,6 +117,7 @@ function walkCredentialOrder(
 	family: ModelFamily,
 	exclude: ReadonlySet<string>,
 	includeParked = false,
+	minContext?: number,
 ): ChosenRoute | undefined {
 	const byProvider = new Map(
 		family.targets.map((route) => [route.providerID, route]),
@@ -111,7 +129,7 @@ function walkCredentialOrder(
 		if (exclude.has(accountKey(account.providerID, account.alias))) continue;
 		const route = byProvider.get(account.providerID);
 		if (!route || route.available === false) continue;
-		const chosen = targetFor(route, account);
+		const chosen = targetFor(route, account, minContext);
 		if (chosen) return chosen;
 	}
 	return undefined;
@@ -131,10 +149,11 @@ export function chooseRouteIgnoringParks(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
+	minContext?: number,
 ): ChosenRoute | undefined {
 	return family.stored
-		? walkStoredChain(db, family, exclude, true)
-		: walkCredentialOrder(db, family, exclude, true);
+		? walkStoredChain(db, family, exclude, true, minContext)
+		: walkCredentialOrder(db, family, exclude, true, minContext);
 }
 
 /** The route the next request would take for this row. */
@@ -142,8 +161,9 @@ export function chooseRoute(
 	db: Database,
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
+	minContext?: number,
 ): ChosenRoute | undefined {
-	return chooseRouteForRequest(db, family, exclude);
+	return chooseRouteForRequest(db, family, exclude, minContext);
 }
 
 /**
@@ -154,8 +174,11 @@ export function hasAlternativeRoute(
 	db: Database,
 	family: ModelFamily,
 	excludeKey: string,
+	minContext?: number,
 ) {
-	return chooseRoute(db, family, new Set([excludeKey])) !== undefined;
+	return (
+		chooseRoute(db, family, new Set([excludeKey]), minContext) !== undefined
+	);
 }
 
 /**

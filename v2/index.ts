@@ -14,6 +14,7 @@ import {
 import { registerHooks } from "./server/hooks";
 import { syncAccounts } from "./server/import-credentials";
 import { recordLog } from "./server/log";
+import { watchProviderChanges } from "./server/provider-watch";
 import { registerBalancerRpc } from "./server/rpc";
 
 const COMMAND_INPUT = {
@@ -74,6 +75,9 @@ export default Plugin.define({
 		// connected mid-session can start serving without a restart.
 		const resync = async () => {
 			const result = await syncAccounts(ctx, db);
+			// Only a real change rebuilds the host's models. Rebuilding on every
+			// provider event would make the reload's own echo look like a change,
+			// and the two would keep waking each other up forever.
 			if (result.imported > 0 || result.pruned > 0) {
 				invalidateCatalog();
 				await refreshBalancerProvider({ ctx, db });
@@ -81,26 +85,26 @@ export default Plugin.define({
 		};
 		void (async () => {
 			try {
-				for await (const event of ctx.event.subscribe({
-					types: ["credential.updated", "credential.switched"],
-				})) {
-					if (
-						event.type !== "credential.updated" &&
-						event.type !== "credential.switched"
-					) {
-						continue;
-					}
-					try {
-						await resync();
-					} catch (error) {
-						recordLog(
-							"error",
-							`credential sync failed: ${
-								error instanceof Error ? error.message : String(error)
-							}`,
-						);
-					}
-				}
+				await watchProviderChanges(
+					ctx.event.subscribe({
+						types: [
+							"config.updated",
+							"credential.switched",
+							"credential.updated",
+							"provider.updated",
+						],
+					}),
+					{
+						onError: (error) =>
+							recordLog(
+								"error",
+								`credential sync failed: ${
+									error instanceof Error ? error.message : String(error)
+								}`,
+							),
+						sync: resync,
+					},
+				);
 			} catch {
 				// The event stream ended; imports still happen at startup.
 			}

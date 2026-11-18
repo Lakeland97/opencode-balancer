@@ -22,6 +22,7 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
+import { servedFor } from "./route-memory";
 import { enabledAccounts, selectHealthyAccount } from "./selection";
 
 const DEFAULT_CHAIN_PACKAGE = "@opencode/ai/providers/openai-compatible";
@@ -352,15 +353,19 @@ function resolvedModelID(db: Database, target: FamilyRoute): string {
 function targetState(
 	db: Database,
 	target: { providerID: string; modelID: string; available?: boolean },
-	used = mostRecentlyUsed(db),
+	familyKey: string,
 ): string {
 	if (target.available === false) return "unavailable";
 	// No healthy credential means the provider is switched off entirely, or every
 	// one of its credentials is disabled, parked, or waiting on a cooldown.
 	if (!selectHealthyAccount(db, target.providerID)) return "unavailable";
-	// "In use" is the provider whose credential served the most recent request,
-	// the same definition the credential rows use. Comparing against the first
-	// healthy credential instead missed the second key of a provider.
+	// "In use" is the provider this row itself last served with. The most
+	// recently used credential is global, so a row could otherwise claim a
+	// provider that had served another model while this row was elsewhere.
+	const served = servedFor(familyKey);
+	if (served)
+		return served.providerID === target.providerID ? "in use" : "available";
+	const used = mostRecentlyUsed(db);
 	return used?.providerID === target.providerID ? "in use" : "available";
 }
 
@@ -389,7 +394,6 @@ export async function listChainRows(
 	db: Database,
 ): Promise<ChainRow[]> {
 	const catalog = await loadCatalog(ctx, db);
-	const used = mostRecentlyUsed(db);
 	return catalog.families.map((family) => ({
 		key: family.key,
 		label: family.name,
@@ -401,7 +405,7 @@ export async function listChainRows(
 			modelID: target.modelID,
 			providerID: target.providerID,
 			resolved: resolvedModelID(db, target),
-			state: targetState(db, target, used),
+			state: targetState(db, target, family.key),
 		})),
 	}));
 }

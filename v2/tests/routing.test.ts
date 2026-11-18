@@ -207,6 +207,21 @@ describe("chain routing", () => {
 		expect(chooseRoute(db, family)?.providerID).toBe("p1");
 		expect(chooseRoute(db, family)?.context).toBe(200_000);
 	});
+
+	test("a conversation that fills a target's window is not handed to it", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, [
+			model("p1", "deepseek-v4.1-flash", 200_000),
+			model("p2", "deepseek-v4.1-flash", 1_000_000),
+		]);
+
+		// 250k already fills p1's window. The provider would reject the request
+		// outright, so it must not be a failover target for this prompt.
+		expect(chooseRoute(db, family, new Set(), 250_000)?.providerID).toBe("p2");
+
+		// A prompt that fits still prefers the first target.
+		expect(chooseRoute(db, family, new Set(), 150_000)?.providerID).toBe("p1");
+	});
 });
 
 describe("free-only credentials", () => {

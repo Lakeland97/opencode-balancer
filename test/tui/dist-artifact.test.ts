@@ -4,10 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function createApi() {
-	return {
+	const disposers: Array<() => void> = [];
+	const api = {
 		keymap: { registerLayer: () => () => {} },
 		lifecycle: {
-			onDispose: () => () => {},
+			onDispose: (callback: () => void) => {
+				disposers.push(callback);
+				return () => {};
+			},
 			signal: new AbortController().signal,
 		},
 		renderer: {},
@@ -21,6 +25,12 @@ function createApi() {
 		theme: { current: {} },
 		ui: { dialog: { open: false }, toast: () => {} },
 	} as any;
+	return {
+		api,
+		dispose: () => {
+			for (const run of disposers) run();
+		},
+	};
 }
 
 describe("TUI artifacts", () => {
@@ -104,10 +114,22 @@ describe("TUI artifacts", () => {
 				default: { tui: (api: unknown) => Promise<void> };
 			};
 
-			await expect(
-				serverModule.default.tui(createApi()),
-			).resolves.toBeUndefined();
-			await expect(tuiModule.default.tui(createApi())).resolves.toBeUndefined();
+			const serverApi = createApi();
+			const tuiApi = createApi();
+			try {
+				await expect(
+					serverModule.default.tui(serverApi.api),
+				).resolves.toBeUndefined();
+				await expect(
+					tuiModule.default.tui(tuiApi.api),
+				).resolves.toBeUndefined();
+			} finally {
+				// The built TUI starts a one-second refresh interval; leaving it
+				// running keeps a closed in-memory database open and breaks the
+				// next test file's handle.
+				serverApi.dispose();
+				tuiApi.dispose();
+			}
 		} finally {
 			if (previousConfigDir === undefined) delete Bun.env.OPENCODE_CONFIG_DIR;
 			else Bun.env.OPENCODE_CONFIG_DIR = previousConfigDir;

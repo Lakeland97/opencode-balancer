@@ -14,6 +14,7 @@ import { runCommand } from "../server/commands";
 import { invalidateCatalog } from "../server/connectors";
 import { clearLog, readLog, recordLog } from "../server/log";
 import { markRateLimited } from "../server/request-state";
+import { noteServed, resetRouteMemory } from "../server/route-memory";
 import {
 	writeContextBuffer,
 	writeContextLimit,
@@ -100,6 +101,7 @@ function chainFixture() {
 beforeEach(() => {
 	clearLog();
 	invalidateCatalog();
+	resetRouteMemory();
 });
 
 describe("command read parity", () => {
@@ -297,6 +299,32 @@ describe("review parity cases", () => {
 			raw: `chain ${KEY}`,
 		});
 		expect(out).toContain("[in use]");
+	});
+
+	test("a row marks the target it served, not the most recent one elsewhere", async () => {
+		const db = freshDb();
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [connectorModel("p1"), connectorModel("p2")],
+				}),
+			},
+		} as never;
+
+		// This row served through p2 ...
+		noteServed(KEY, { modelID: KEY, providerID: "p2" });
+		// ... while an unrelated request used p1 last. The row must not adopt
+		// p1's provider just because its credential is the global newest.
+		markAccountUsed(db, "p1", "a");
+
+		const out = await runCommand({ ctx, db, raw: `chain ${KEY}` });
+		const lines = out.split("\n");
+		const first = lines.find((line) => line.includes("1. p1")) ?? "";
+		const second = lines.find((line) => line.includes("2. p2")) ?? "";
+		expect(first).not.toContain("in use");
+		expect(second).toContain("in use");
 	});
 	test("trailing arguments are refused before any write", async () => {
 		const db = freshDb();

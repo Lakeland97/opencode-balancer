@@ -10,6 +10,7 @@ import {
 } from "../core/context";
 import { balancerTargetsFor, type SessionTarget } from "./hooks";
 import { recordLog } from "./log";
+import { forgetSessionTokens, noteSessionTokens } from "./route-memory";
 
 /** The row and connector a session is running on, as the watcher needs it. */
 export type { SessionTarget };
@@ -96,6 +97,9 @@ export function createCompactionController(input: {
 				event.type === "session.compaction.failed"
 			) {
 				inFlight.delete(sessionID);
+				// The conversation shrank (or the attempt failed); what was measured
+				// before it no longer describes the prompt.
+				forgetSessionTokens(sessionID);
 				return false;
 			}
 			if (event.type !== "session.step.ended") return false;
@@ -118,6 +122,9 @@ export function createCompactionController(input: {
 
 			const threshold = tightest.threshold;
 			const tokens = contextTokens(event.data?.tokens as TokenInfo | undefined);
+			// Routing uses this so a failover never walks into a target whose
+			// window is smaller than the conversation already fills.
+			noteSessionTokens(sessionID, tokens);
 			if (tokens < threshold) {
 				// Comfortably inside the window, which also means a compaction
 				// that was in flight has served its purpose as a guard.

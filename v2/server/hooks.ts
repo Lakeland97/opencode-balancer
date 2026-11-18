@@ -26,6 +26,7 @@ import {
 	markRateLimited,
 	retryAfterMs,
 } from "./request-state";
+import { noteServed, sessionTokens } from "./route-memory";
 import {
 	type ChosenRoute,
 	chooseRouteForRequest,
@@ -405,6 +406,10 @@ function chooseStickyRoute(input: {
 	sessionID: string;
 }): { parkedFallback: boolean; route: ChosenRoute } | undefined {
 	const { db, family, sessionID } = input;
+	// A conversation that already fills more than a target's window cannot be
+	// handed to it: the provider would reject the whole request, which reads as
+	// a failure of the account when it is really the row's own target choice.
+	const minContext = sessionTokens(sessionID);
 	// A trail older than the idle window is void, so the balance starts again.
 	forgetStaleTrail(db, sessionID, family.key);
 	const tried = triedFor(sessionID, family.key);
@@ -421,18 +426,20 @@ function chooseStickyRoute(input: {
 			: undefined;
 
 	const route =
-		(pinned ? chooseRouteForRequest(db, pinned, tried) : undefined) ??
-		chooseRouteForRequest(db, family, tried) ??
+		(pinned
+			? chooseRouteForRequest(db, pinned, tried, minContext)
+			: undefined) ??
+		chooseRouteForRequest(db, family, tried, minContext) ??
 		// Everything has been tried since the last answer: wrap around.
-		chooseRouteForRequest(db, family);
+		chooseRouteForRequest(db, family, undefined, minContext);
 	if (route) return { parkedFallback: false, route };
 
 	// Nothing healthy can answer this row at all. The row holds only providers
 	// that offer the model, so there is no alternative the park is protecting:
 	// trying the head again is better than leaving the call pointed at the stub.
 	const lastChance =
-		chooseRouteIgnoringParks(db, family, tried) ??
-		chooseRouteIgnoringParks(db, family);
+		chooseRouteIgnoringParks(db, family, tried, minContext) ??
+		chooseRouteIgnoringParks(db, family, undefined, minContext);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 
@@ -528,6 +535,7 @@ export async function registerHooks({
 		// conversation failure will be charged to.
 		if (side) return;
 
+		noteServed(family.key, route);
 		markAccountUsed(db, route.providerID, route.account.alias);
 		track(
 			event.sessionID,
@@ -615,6 +623,7 @@ export async function registerHooks({
 						? "nothing healthy could answer; trying it anyway"
 						: undefined,
 				});
+				noteServed(family.key, route);
 				markAccountUsed(db, route.providerID, route.account.alias);
 			}
 			const tracked = {
