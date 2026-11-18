@@ -15,7 +15,7 @@ import {
 	modelUnavailable,
 	noteModelUnavailable,
 } from "../server/model-availability";
-import { sessionTokens } from "../server/route-memory";
+import { noteServed, sessionTokens } from "../server/route-memory";
 import { chooseRoute } from "../server/routing";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
@@ -253,6 +253,27 @@ describe("a row nothing can serve", () => {
 		await registry["model.request"](event);
 
 		expect(event.headers.authorization).toBe("Bearer sk-1");
+		expect(synthetic).toHaveLength(0);
+	});
+
+	test("the last target that answered serves a row nothing else can route", async () => {
+		const { db, registry, synthetic } = await harness();
+
+		// Every target is marked as refusing this model, and the balancer's own
+		// bookkeeping is what says so. The session was working on `p2` a moment
+		// ago, so that is where the request goes rather than nowhere.
+		noteModelUnavailable(db, "p1", "alpha-1");
+		noteModelUnavailable(db, "p2", "alpha-1");
+		noteServed(db, "alpha-1", {
+			alias: "a",
+			modelID: "alpha-1",
+			providerID: "p2",
+		});
+
+		const event = row("last-good");
+		await registry["model.request"](event);
+
+		expect(event.headers.authorization).toBe("Bearer sk-2");
 		expect(synthetic).toHaveLength(0);
 	});
 

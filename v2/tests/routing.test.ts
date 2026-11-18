@@ -12,7 +12,13 @@ import { isFreeModel } from "../core/models";
 import { migrate } from "../core/schema";
 import { invalidateCatalog, loadCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
-import { chooseRoute, hasAlternativeRoute } from "../server/routing";
+import { noteServed } from "../server/route-memory";
+import {
+	chooseLastServed,
+	chooseRoute,
+	chooseRouteAtAnyCost,
+	hasAlternativeRoute,
+} from "../server/routing";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -303,5 +309,95 @@ describe("free-only credentials", () => {
 		expect(next?.providerID).toBe("p1");
 		expect(next?.account.alias).toBe("b");
 		expect(next?.modelID).toBe("deepseek-v4.1-flash");
+	});
+});
+
+describe("the target that last answered", () => {
+	test("it answers a row nothing else can route", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		noteServed(db, family.key, {
+			alias: "a",
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p2",
+		});
+
+		// Everything about the row is a prediction; this is the one fact in it.
+		const route = chooseLastServed(db, family);
+		expect(route?.providerID).toBe("p2");
+		expect(route?.account.alias).toBe("a");
+	});
+
+	test("a row that has never answered has nothing to fall back to", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+
+		expect(chooseLastServed(db, family)).toBeUndefined();
+	});
+
+	test("the credential that answered is preferred over another on the same provider", async () => {
+		const db = freshDb();
+		saveAccount(db, "p2", "b", { key: "k3", type: "api" });
+		const family = await familyFor(db, ordinary);
+		noteServed(db, family.key, {
+			alias: "b",
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p2",
+		});
+
+		expect(chooseLastServed(db, family)?.account.alias).toBe("b");
+	});
+
+	test("a spent credential falls through to the provider's other key", async () => {
+		const db = freshDb();
+		saveAccount(db, "p2", "b", { key: "k3", type: "api" });
+		const family = await familyFor(db, ordinary);
+		noteServed(db, family.key, {
+			alias: "b",
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p2",
+		});
+
+		// The walk already tried `b`; the same model on the same provider with a
+		// different key is still an attempt worth making.
+		expect(chooseLastServed(db, family, new Set(["p2/b"]))?.account.alias).toBe(
+			"a",
+		);
+	});
+
+	test("a target already tried in this walk is not offered again", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		noteServed(db, family.key, {
+			alias: "a",
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p2",
+		});
+
+		expect(chooseLastServed(db, family, new Set(["p2/a"]))).toBeUndefined();
+	});
+
+	test("a disabled provider is not a fallback", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		noteServed(db, family.key, {
+			alias: "a",
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p2",
+		});
+		setAccountEnabled(db, "p2", "a", false);
+
+		expect(chooseLastServed(db, family)).toBeUndefined();
+	});
+
+	test("a row with nothing enabled and nothing served sends nowhere", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		setAccountEnabled(db, "p1", "a", false);
+		setAccountEnabled(db, "p2", "a", false);
+
+		// The last resort still needs a key: sending a request with no credential
+		// would fail as an authentication error nobody can act on.
+		expect(chooseRouteAtAnyCost(db, family)).toBeUndefined();
 	});
 });

@@ -46,6 +46,7 @@ import {
 import {
 	type ChosenRoute,
 	chooseLargestTarget,
+	chooseLastServed,
 	chooseRouteAtAnyCost,
 	chooseRouteForRequest,
 	chooseRouteIgnoringParks,
@@ -942,12 +943,19 @@ function chooseStickyRoute(input: {
 		// might still fit, and its refusal names the real limit when nothing does.
 		chooseLargestTarget(db, family, tried) ??
 		chooseLargestTarget(db, family) ??
-		// Every target is marked as refusing this model, which is the balancer's
-		// own guess rather than this request's answer. Leaving the call pointed at
-		// the stub sends it to a host name that does not resolve, and the session
-		// sees a network failure it cannot act on. Trying a real target is the
-		// only way to find out whether the guess still holds: it either answers or
-		// the provider refuses it in its own words.
+		// The row is unroutable by every rule the balancer has. The one fact left
+		// is which target last answered it, and a session that was working a
+		// minute ago should keep working on the model it was on rather than stop
+		// because the plugin's own bookkeeping went bad. If that credential really
+		// is spent, the provider will say so in its own words.
+		chooseLastServed(db, family, tried) ??
+		chooseLastServed(db, family) ??
+		// Nothing has ever answered this row in this store, so there is no last
+		// good target to fall back to. Every target is marked as refusing this
+		// model, which is the balancer's own guess rather than this request's
+		// answer, and leaving the call pointed at the stub sends it to a host name
+		// that does not resolve. Trying a real target is the only way to find out
+		// whether the guess still holds.
 		chooseRouteAtAnyCost(db, family, tried) ??
 		chooseRouteAtAnyCost(db, family);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;

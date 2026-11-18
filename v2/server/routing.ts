@@ -10,6 +10,7 @@ import {
 	sortRoutes,
 } from "./connectors";
 import { modelUnavailable } from "./model-availability";
+import { servedFor } from "./route-memory";
 import {
 	enabledAccounts,
 	enabledAccountsInOrder,
@@ -164,6 +165,55 @@ export function chooseRouteIgnoringParks(
 	return family.stored
 		? walkStoredChain(db, family, exclude, true, minContext)
 		: walkCredentialOrder(db, family, exclude, true, minContext);
+}
+
+/**
+ * The last target that actually answered this row, when it can still be tried.
+ *
+ * This is the fail-open answer. Everything else in routing is a prediction about
+ * which target *should* serve next — a chain order, a park, a refusal mark, a
+ * window comparison — and every one of those can be wrong or stale. The one
+ * fact the balancer has is which target last produced an answer, so when nothing
+ * else can be chosen that is what a request should go to: a session keeps
+ * working on the model it was already running instead of stopping because the
+ * plugin's own bookkeeping went bad.
+ *
+ * It is a target, not a promise. The credential may have run out between then
+ * and now, in which case the provider says so in its own words — which is still
+ * better than never sending the request at all.
+ */
+export function chooseLastServed(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+): ChosenRoute | undefined {
+	const served = servedFor(db, family.key);
+	if (!served) return undefined;
+	const routes = family.stored
+		? resolveChain(db, family)
+		: sortRoutes(family.targets, db);
+	// The row may hold the same provider under two ids (a paid and a free
+	// spelling); the note names the one that answered, so prefer it and fall back
+	// to the provider alone.
+	const route =
+		routes.find(
+			(entry) =>
+				entry.providerID === served.providerID &&
+				entry.modelID === served.modelID,
+		) ?? routes.find((entry) => entry.providerID === served.providerID);
+	if (!route) return undefined;
+	// The credential that answered last, when it is still enabled and not already
+	// spent in this walk; otherwise another credential of the same provider,
+	// because the target is the same model and any key left is worth an attempt.
+	const accounts = enabledAccounts(db, route.providerID).filter(
+		(entry) => !exclude.has(accountKey(entry.providerID, entry.alias)),
+	);
+	const account =
+		accounts.find((entry) => entry.alias === served.alias) ?? accounts[0];
+	if (!account) return undefined;
+	const target =
+		route.free === false && account.freeOnly ? freeVariantOf(route) : route;
+	return target ? { ...target, account } : undefined;
 }
 
 /**
