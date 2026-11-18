@@ -151,6 +151,7 @@ export async function registerBalancerRpc({
 					modelID: entry.modelID,
 					providerID: entry.providerID,
 					variant: entry.variant ?? "",
+					working: Boolean(entry.working),
 				})),
 			};
 		},

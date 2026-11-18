@@ -81,6 +81,11 @@ export type InUseEntry = {
 	providerID: string;
 	/** The thinking level the request asked for, empty when it asked for none. */
 	variant: string;
+	/**
+	 * True while a request to this target is still open. The timestamp alone
+	 * cannot say that: a slow answer would sit at "3m ago" for the whole wait.
+	 */
+	working: boolean;
 };
 export type InUse = { entries: InUseEntry[] };
 export type Provider = {

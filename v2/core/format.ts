@@ -121,8 +121,11 @@ export function credentialDetail(input: {
 	if (note) return note;
 	const entry = servingEntry(input.serving, input.providerID, input.alias);
 	if (!entry) return undefined;
-	const ago = formatAgo(entry.at, now);
+	// A request still open is the row working, not idling: the timestamp is when
+	// it last answered, which for a slow model is the whole of the wait.
 	const line = servingText(entry);
+	if (entry.working) return `${line} · working`;
+	const ago = formatAgo(entry.at, now);
 	return ago ? `${line} · ${ago}` : line;
 }
 

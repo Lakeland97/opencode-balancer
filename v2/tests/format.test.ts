@@ -36,6 +36,7 @@ function served(overrides: Partial<InUseEntry> = {}): InUseEntry {
 		modelID: "deepseek-v4.1-flash",
 		providerID: "open-design",
 		variant: "high",
+		working: false,
 		...overrides,
 	};
 }
@@ -117,6 +118,20 @@ describe("credential detail", () => {
 				serving: [served()],
 			}),
 		).toBe("build · open-design/deepseek-v4.1-flash (high) · 2m ago");
+	});
+	test("a request still open says so instead of how long ago it answered", () => {
+		// A three-minute answer would otherwise read "3m ago" for the whole
+		// three minutes, which looks like an idle row rather than a busy one.
+		expect(
+			credentialDetail({
+				account: account(),
+				alias: "account-1",
+				now,
+				providerID: "open-design",
+				resets: "resets",
+				serving: [served({ working: true })],
+			}),
+		).toBe("build · open-design/deepseek-v4.1-flash (high) · working");
 	});
 	test("a credential that is neither parked nor serving has nothing to say", () => {
 		expect(

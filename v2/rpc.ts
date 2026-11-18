@@ -193,6 +193,8 @@ export const balancerDefinition = {
 								providerID: str,
 								/** The thinking level that request asked for, or empty. */
 								variant: str,
+								/** True while a request to this target is still open. */
+								working: bool,
 							},
 							[
 								"providerID",
@@ -204,6 +206,7 @@ export const balancerDefinition = {
 								"applied",
 								"variant",
 								"at",
+								"working",
 							],
 						),
 						type: "array",

@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, test } from "bun:test";
 
 import { migrate } from "../core/schema";
 import {
+	noteAnswered,
+	noteIdle,
 	noteServed,
 	noteSessionTokens,
 	resetRouteMemory,
@@ -175,5 +177,80 @@ describe("two stores in one process", () => {
 
 		expect(sessionTokens(second, "session-a")).toBeUndefined();
 		expect(sessionTokens(first, "session-a")).toBe(12_000);
+	});
+});
+
+describe("whether a row is working", () => {
+	test("a request on its way marks the row, and the answer stamps the clock", () => {
+		const db = freshDb();
+		const asked = 1_000_000;
+		const answered = asked + 3 * MINUTE;
+
+		noteServed(db, KEY, { ...route, working: true }, asked);
+		expect(servedFor(db, KEY, asked + 1)?.working).toBe(true);
+		// The clock still says when it was asked, because that is when the
+		// request went out; the flag is what says it is not idle.
+		expect(servedFor(db, KEY, asked + 1)?.at).toBe(asked);
+
+		noteAnswered(db, KEY, answered);
+		expect(servedFor(db, KEY, answered + 1)?.working).toBe(false);
+		// A three-minute answer must not leave the panel saying "3m ago" for the
+		// whole three minutes: the clock is when the row last answered.
+		expect(servedFor(db, KEY, answered + 1)?.at).toBe(answered);
+	});
+
+	test("the answer is what the panel's clock moves on", () => {
+		const db = freshDb();
+		const asked = 1_000_000;
+
+		noteServed(db, KEY, route, asked);
+		noteAnswered(db, KEY, asked + 90_000);
+		expect(storedAt(db)).toBe(asked + 90_000);
+	});
+
+	test("a note for a row with no mark is not invented by an answer", () => {
+		const db = freshDb();
+
+		noteAnswered(db, KEY, 1_000_000);
+		expect(servedFor(db, KEY, 1_000_001)).toBeUndefined();
+	});
+
+	test("a request hook's note keeps the working mark the answer will clear", () => {
+		const db = freshDb();
+		const at = 1_000_000;
+
+		noteServed(db, KEY, { ...route, working: true }, at);
+		// The HTTP hook stamps the same target a few milliseconds later without
+		// naming the flag; dropping it there would make the panel say the row had
+		// gone idle while its request was still open.
+		noteServed(db, KEY, route, at + 5);
+		expect(servedFor(db, KEY, at + 6)?.working).toBe(true);
+	});
+});
+
+describe("a row nothing answered", () => {
+	test("a walk that produced no answer stops claiming to be working", () => {
+		const db = freshDb();
+		const asked = 1_000_000;
+
+		noteServed(db, KEY, { ...route, working: true }, asked);
+		noteIdle(db, KEY, asked + 1);
+
+		const entry = servedFor(db, KEY, asked + 2);
+		expect(entry?.working).toBe(false);
+		// A refusal is not an answer, so the clock stays where the last real
+		// answer left it.
+		expect(entry?.at).toBe(asked);
+	});
+
+	test("idling a row that was already idle changes nothing", () => {
+		const db = freshDb();
+		const at = 1_000_000;
+
+		noteServed(db, KEY, route, at);
+		noteIdle(db, KEY, at + 1);
+		expect(storedAt(db)).toBe(at);
+		// A note never marked working stays unmarked: idling it writes nothing.
+		expect(servedFor(db, KEY, at + 2)?.working).toBeUndefined();
 	});
 });

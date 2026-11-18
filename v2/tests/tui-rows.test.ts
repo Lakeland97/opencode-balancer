@@ -48,6 +48,7 @@ function serving(overrides: Partial<InUseEntry> = {}): InUseEntry {
 		modelID: "deepseek-v4.1-flash",
 		providerID: "open-design",
 		variant: "high",
+		working: false,
 		...overrides,
 	};
 }
@@ -141,6 +142,11 @@ describe("serving lines", () => {
 		expect(servingLine(serving({ at: now - 120_000 }), now).text).toBe(
 			"build · open-design/deepseek-v4.1-flash (high) · 2m ago",
 		);
+	});
+	test("says a row is working while its request is open", () => {
+		expect(
+			servingLine(serving({ at: now - 180_000, working: true }), now).text,
+		).toBe("build · open-design/deepseek-v4.1-flash (high) · working");
 	});
 	test("shows the level actually applied", () => {
 		expect(servingLine(serving({ applied: "medium" }), now).text).toContain(

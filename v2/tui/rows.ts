@@ -13,7 +13,10 @@ import type { Account, Chain, InUseEntry, Provider } from "../types";
  */
 export function servingLine(entry: InUseEntry, now: number = Date.now()) {
 	const ago = formatAgo(entry.at, now);
-	const text = ago ? `${servingText(entry)} · ${ago}` : servingText(entry);
+	// A request still open is the row working, not idling: saying how long ago it
+	// last answered during a slow generation reads as an idle model.
+	const when = entry.working ? "working" : ago;
+	const text = when ? `${servingText(entry)} · ${when}` : servingText(entry);
 	const note =
 		entry.variant && entry.variant !== entry.applied
 			? entry.applied

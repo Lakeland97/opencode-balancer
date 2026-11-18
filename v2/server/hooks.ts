@@ -35,6 +35,8 @@ import {
 import {
 	forgetServed,
 	forgetSessionTokens,
+	noteAnswered,
+	noteIdle,
 	noteServed,
 	noteSessionRow,
 	noteSessionTokens,
@@ -313,9 +315,11 @@ async function failoverResponse(input: {
 		restore(sessionKey(sessionID, original.providerID), before.provider);
 		// The panel's note is a claim about what is serving. A walk that produced
 		// no answer served nothing, so the note goes back to the target whose
-		// refusal the session is about to read.
-		if (before.served) noteServed(db, family.key, before.served);
-		else forgetServed(db, family.key);
+		// refusal the session is about to read — and stops claiming to be working
+		// on a request that has already finished.
+		if (before.served) {
+			noteServed(db, family.key, { ...before.served, working: false });
+		} else forgetServed(db, family.key);
 		return undefined;
 	};
 
@@ -367,6 +371,7 @@ async function failoverResponse(input: {
 					modelID: route.modelID,
 					providerID: route.providerID,
 					variant: pending.variant,
+					working: true,
 				});
 			}
 			markAccountUsed(db, route.providerID, route.account.alias);
@@ -1088,6 +1093,10 @@ export async function registerHooks({
 			modelID: route.modelID,
 			providerID: route.providerID,
 			variant: event.model.variant,
+			// The request is on its way; the answer clears this. It is what lets
+			// the panel say a row is working rather than counting how long ago it
+			// last answered, which for a slow model is the whole of the wait.
+			working: true,
 		});
 		markAccountUsed(db, route.providerID, route.account.alias);
 		track(
@@ -1230,6 +1239,7 @@ export async function registerHooks({
 					modelID: route.modelID,
 					providerID: route.providerID,
 					variant: event.model.variant,
+					working: true,
 				});
 				markAccountUsed(db, route.providerID, route.account.alias);
 			}
@@ -1316,9 +1326,16 @@ export async function registerHooks({
 			// this target and a later failure may try the others again.
 			if (tracked.familyKey) {
 				trailsByRow.delete(tracked.familyKey);
+				// The clock the panel shows is "when this row last answered", so an
+				// answer is what stamps it. A slow model used to leave the panel
+				// saying "3m ago" for the whole three minutes it was generating.
+				noteAnswered(db, tracked.familyKey);
 			}
 			return;
 		}
+		// A refusal is not an answer: nothing is working on this row any more, and
+		// the clock must not move as if something had answered.
+		if (tracked.familyKey) noteIdle(db, tracked.familyKey);
 		const reported = `HTTP ${event.response.status}${
 			event.response.statusText ? ` ${event.response.statusText}` : ""
 		}`;
@@ -1394,12 +1411,19 @@ export async function registerHooks({
 					event.response = replacement;
 					if (replacement.ok) {
 						trailsByRow.delete(tracked.familyKey);
+						// The answer is the event the panel's clock is about, and it
+						// came from the target that answered rather than the one that
+						// was asked first.
+						noteAnswered(db, tracked.familyKey);
 						return;
 					}
 					// Every target refused in words another would repeat. That is
-					// the conversation's problem and the session must see it.
+					// the conversation's problem and the session must see it, but
+					// nothing is still working on this row.
+					noteIdle(db, tracked.familyKey);
 					return;
 				}
+				noteIdle(db, tracked.familyKey);
 			}
 		}
 

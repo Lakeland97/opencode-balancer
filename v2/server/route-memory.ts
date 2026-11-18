@@ -35,6 +35,15 @@ type Served = {
 	providerID: string;
 	/** The thinking level the request asked for, when it asked for one. */
 	variant?: string;
+	/**
+	 * True between sending a request to this target and hearing anything back.
+	 *
+	 * The timestamp alone cannot answer "is it working right now": a request
+	 * that takes three minutes to answer would sit at "3m ago" for all three,
+	 * which reads as idle. This says the call is still open, so the panel can
+	 * say so, and the clock starts from the answer rather than from the send.
+	 */
+	working?: boolean;
 };
 type Measured = { at: number; value: number };
 /**
@@ -149,8 +158,50 @@ function sameServed(left: Served | undefined, right: Served) {
 		left.modelID === right.modelID &&
 		left.providerID === right.providerID &&
 		left.applied === right.applied &&
-		left.variant === right.variant
+		left.variant === right.variant &&
+		left.working === right.working
 	);
+}
+
+/**
+ * Record that a request this row already sent has come back.
+ *
+ * The note's clock is "when this row last answered", not "when it was last
+ * asked", and those differ by however long the model took. A three-minute
+ * answer used to leave the panel saying "3m ago" for the whole three minutes,
+ * which reads as an idle row. Stamping the answer is what makes the number mean
+ * what it says, and it clears the working mark in the same write.
+ */
+export function noteAnswered(
+	db: Database,
+	familyKey: string,
+	at: number = Date.now(),
+) {
+	// Read through the store, not the cache: the plugin is reloaded on every
+	// edit, so the instance that answers a request is often not the one that
+	// sent it, and its cache has never seen this row.
+	const entry = servedFor(db, familyKey, at);
+	if (!entry) return;
+	noteServed(db, familyKey, { ...entry, working: false }, at);
+}
+
+/**
+ * Say that nothing is working on this row any more.
+ *
+ * Every attempt marks its target as working before it is sent, so a walk that
+ * ends without an answer — every target refused, or nothing left to try — would
+ * otherwise leave the panel claiming a request that finished minutes ago is
+ * still running. The clock stays where it was: a walk that produced no answer
+ * has no answer to stamp.
+ */
+export function noteIdle(
+	db: Database,
+	familyKey: string,
+	at: number = Date.now(),
+) {
+	const entry = servedFor(db, familyKey, at);
+	if (!entry?.working) return;
+	noteServed(db, familyKey, { ...entry, working: false }, entry.at);
 }
 
 export function noteServed(
@@ -163,9 +214,17 @@ export function noteServed(
 		modelID: string;
 		providerID: string;
 		variant?: string;
+		/**
+		 * Whether a request to this target is still open. Omitted leaves the
+		 * previous value alone, so a note written by the request hook does not
+		 * erase the "working" mark the answer is about to clear.
+		 */
+		working?: boolean;
 	},
 	at: number = Date.now(),
 ) {
+	const { served } = storeFor(db);
+	const before = served.get(familyKey);
 	const entry: Served = {
 		agent: route.agent,
 		alias: route.alias,
@@ -174,16 +233,17 @@ export function noteServed(
 		modelID: route.modelID,
 		providerID: route.providerID,
 		variant: route.variant,
+		working: route.working ?? before?.working,
 	};
-	const { served } = storeFor(db);
-	const before = served.get(familyKey);
 	// The hook pair stamps the same target twice a few milliseconds apart, and a
 	// chatty row would otherwise write on every request. The stored note is a
 	// clock though: skipping the write outright froze it at the first request, so
 	// `servedFor` eventually judged a row that was still serving stale and
 	// deleted it, and `in use` could not come back for that row in this process.
-	// Keeping the stored copy within `SERVED_REFRESH_MS` is enough for it to
-	// outlive the TTL while a request costs at most one write a minute.
+	//
+	// The cache still takes the new timestamp every time — it is what the panel
+	// reads in the process that served the request — and only the store write is
+	// coalesced, so the clock a *reloaded* panel sees is at most this far behind.
 	if (sameServed(before, entry) && at - (before?.at ?? 0) < SERVED_REFRESH_MS) {
 		served.set(familyKey, entry);
 		return;
