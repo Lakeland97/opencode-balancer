@@ -439,7 +439,12 @@ function chooseStickyRoute(input: {
 	// trying the head again is better than leaving the call pointed at the stub.
 	const lastChance =
 		chooseRouteIgnoringParks(db, family, tried, minContext) ??
-		chooseRouteIgnoringParks(db, family, undefined, minContext);
+		chooseRouteIgnoringParks(db, family, undefined, minContext) ??
+		// Every target's window is too small for this conversation. Compacting is
+		// the real answer, and leaving the call pointed at the stub cannot even
+		// say so; the provider's own refusal at least names the size problem.
+		chooseRouteIgnoringParks(db, family, tried) ??
+		chooseRouteIgnoringParks(db, family);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 
