@@ -54,6 +54,34 @@ function workingCtx() {
 	} as never;
 }
 
+function variantModel(providerID: string, modelID: string, name: string) {
+	return { ...connectorModel(providerID), modelID, name };
+}
+
+function variantCtx() {
+	return {
+		model: {
+			list: async () => ({
+				data: [
+					variantModel("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+					variantModel("p1", "deepseek-v4.1-eco", "DeepSeek V4.1 Eco"),
+					variantModel("p1", "deepseek-v4.1-cloud", "DeepSeek V4.1 Cloud"),
+					variantModel("p2", "deepseek-v4.1-eco", "DeepSeek V4.1 Eco"),
+					variantModel("p2", "deepseek-v4.1-cloud", "DeepSeek V4.1 Cloud"),
+				],
+			}),
+		},
+		provider: {
+			list: async () => ({
+				data: [
+					{ id: "p1", name: "Provider One" },
+					{ id: "p2", name: "Provider Two" },
+				],
+			}),
+		},
+	} as never;
+}
+
 function chainFixture() {
 	return {
 		familyKey: KEY,
@@ -296,5 +324,58 @@ describe("review parity cases", () => {
 		});
 		expect(limit).toContain("Usage:");
 		expect(readLimit(db)).toBeUndefined();
+	});
+});
+
+describe("model queries that name variants", () => {
+	function accounts(db: Database) {
+		saveAccount(db, "p1", "a", apiAuth("k1"));
+		saveAccount(db, "p2", "a", apiAuth("k2"));
+	}
+
+	test("a partial row query lists the rows instead of taking the first", async () => {
+		const db = freshDb();
+		accounts(db);
+		const out = await runCommand({
+			ctx: variantCtx(),
+			db,
+			raw: "chain deepseek",
+		});
+		expect(out).toContain("matches 3 rows");
+		expect(out).toContain("deepseek-v4.1-flash");
+		expect(out).toContain("deepseek-v4.1-eco");
+		expect(out).toContain("deepseek-v4.1-cloud");
+		expect(out).toContain("Use the exact key.");
+	});
+
+	test("an add query that names the family lists the variants", async () => {
+		const db = freshDb();
+		accounts(db);
+		const out = await runCommand({
+			ctx: variantCtx(),
+			db,
+			raw: "chain deepseek-v4.1-flash add p2 deepseek 4.1",
+		});
+		expect(out).toContain("matches 2 p2 models");
+		expect(out).toContain("deepseek-v4.1-eco");
+		expect(out).toContain("deepseek-v4.1-cloud");
+		expect(out).toContain("Use the exact id.");
+		expect(getStoredChain(db, "deepseek-v4.1-flash")).toBeUndefined();
+	});
+
+	test("naming the variant adds exactly that model", async () => {
+		const db = freshDb();
+		accounts(db);
+		const out = await runCommand({
+			ctx: variantCtx(),
+			db,
+			raw: "chain deepseek-v4.1-flash add p2 deepseek 4.1 eco",
+		});
+		expect(out).toContain("Added p2 deepseek-v4.1-eco.");
+		expect(
+			getStoredChain(db, "deepseek-v4.1-flash")?.targets.map(
+				(target) => `${target.providerID}:${target.modelID}`,
+			),
+		).toEqual(["p1:deepseek-v4.1-flash", "p2:deepseek-v4.1-eco"]);
 	});
 });

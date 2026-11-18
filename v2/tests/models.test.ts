@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+	ambiguousModels,
 	groupByBrand,
 	matchModel,
 	modelBrand,
@@ -68,6 +69,35 @@ describe("model matching", () => {
 		];
 		const match = matchModel("Thing", twins);
 		expect(match?.ties.length).toBe(2);
+	});
+});
+
+describe("model matching by the question people type", () => {
+	const variants = [
+		{ modelID: "deepseek/deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+		{ modelID: "deepseek/deepseek-v4.1-eco", name: "DeepSeek V4.1 Eco" },
+		{ modelID: "deepseek/deepseek-v4.1-cloud", name: "DeepSeek V4.1 Cloud" },
+	];
+
+	test("a spaced query without the v finds every variant", () => {
+		const match = matchModel("deepseek 4.1", variants);
+		expect(match?.ties.map((model) => model.modelID).sort()).toEqual(
+			variants.map((model) => model.modelID).sort(),
+		);
+	});
+
+	test("naming the variant resolves it instead of the family", () => {
+		const match = matchModel("deepseek 4.1 eco", variants);
+		expect(match?.model.modelID).toBe("deepseek/deepseek-v4.1-eco");
+	});
+
+	test("a partial query is ambiguous, not silently the first row", () => {
+		expect(ambiguousModels(matchModel("deepseek 4.1", variants))).toHaveLength(
+			3,
+		);
+		expect(
+			ambiguousModels(matchModel("deepseek 4.1 eco", variants)),
+		).toHaveLength(0);
 	});
 });
 

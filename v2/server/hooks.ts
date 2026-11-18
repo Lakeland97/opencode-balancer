@@ -119,6 +119,12 @@ function track(sessionID: string, tracked: Tracked, familyKey?: string) {
 type BoundRoute = { readonly at: number; readonly route: ChosenRoute };
 const boundRoutes = new Map<string, BoundRoute>();
 const PRIMARY_KIND = "primary";
+// A bound route belongs to one in-flight model request, and a slow model can
+// run longer than routing memory is trusted for. Refreshed on every HTTP
+// attempt and cleared on failover, so this only bounds entries left behind by
+// sessions that went away.
+const BOUND_ROUTE_TTL_MS = 60 * 60_000;
+const BOUND_ROUTE_SWEEP_AT = 256;
 
 /**
  * Title and one-off generation run beside the conversation. They must use its
@@ -133,7 +139,9 @@ function boundKey(sessionID: string, familyKey: string, kind: string) {
 
 function boundRoute(sessionID: string, familyKey: string, kind: string) {
 	const value = boundRoutes.get(boundKey(sessionID, familyKey, kind));
-	return value && now() - value.at <= STALE_AFTER_MS ? value.route : undefined;
+	return value && now() - value.at <= BOUND_ROUTE_TTL_MS
+		? value.route
+		: undefined;
 }
 
 function bindRoute(
@@ -142,6 +150,12 @@ function bindRoute(
 	kind: string,
 	route: ChosenRoute,
 ) {
+	if (boundRoutes.size >= BOUND_ROUTE_SWEEP_AT) {
+		const cutoff = now() - BOUND_ROUTE_TTL_MS;
+		for (const [key, value] of boundRoutes) {
+			if (value.at < cutoff) boundRoutes.delete(key);
+		}
+	}
 	boundRoutes.set(boundKey(sessionID, familyKey, kind), {
 		at: now(),
 		route,

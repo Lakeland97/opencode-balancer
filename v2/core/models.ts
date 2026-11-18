@@ -34,9 +34,45 @@ export function modelFamily(value: string): string {
 	return normalizeModel(value).replace(/-\d{4,8}$/, "");
 }
 
+/**
+ * The words a model name is made of, with the `v` providers put in front of a
+ * version folded in: `v4.1` and `4.1` are the same word, so a person who types
+ * the version without the letter is not asking for a different model.
+ */
+function modelWords(value: string): string[] {
+	return modelFamily(value)
+		.split("-")
+		.filter(Boolean)
+		.map((word) => word.replace(/^v(?=\d)/, ""));
+}
+
+function sameWords(left: readonly string[], right: readonly string[]): boolean {
+	return (
+		left.length === right.length &&
+		left.every((word, index) => word === right[index])
+	);
+}
+
+/**
+ * Whether one word list begins the other. This is what lets `deepseek 4.1`
+ * find `deepseek-v4.1-flash`, `-eco` and `-cloud` together: the query names
+ * the family, and every variant is a tie the caller can report instead of
+ * silently choosing.
+ */
+function startsWithWords(
+	words: readonly string[],
+	prefix: readonly string[],
+): boolean {
+	return (
+		prefix.length > 0 &&
+		prefix.length <= words.length &&
+		prefix.every((word, index) => word === words[index])
+	);
+}
+
 export type ModelMatch<T extends ModelCandidate> = {
 	model: T;
-	/** 4 id exact, 3 name exact, 2 id family, 1 name family. */
+	/** 4 id exact (including `v`/separator variants), 3 name exact, 2 id family, 1 name family or a family prefix. */
 	score: number;
 	/** Every candidate tied at the winning score, including the winner. */
 	ties: readonly T[];
@@ -45,12 +81,25 @@ export type ModelMatch<T extends ModelCandidate> = {
 function score(query: string, candidate: ModelCandidate): number {
 	const normalized = normalizeModel(query);
 	const family = modelFamily(query);
+	const words = modelWords(query);
 	if (normalizeModel(candidate.modelID) === normalized) return 4;
+	// The same identity with the provider's `v` and separators removed:
+	// `deepseek 4.1 eco` is `deepseek-v4.1-eco`, not a weaker guess.
+	if (sameWords(modelWords(candidate.modelID), words)) return 4;
 	if (candidate.name && normalizeModel(candidate.name) === normalized) {
+		return 3;
+	}
+	if (candidate.name && sameWords(modelWords(candidate.name), words)) {
 		return 3;
 	}
 	if (modelFamily(candidate.modelID) === family) return 2;
 	if (candidate.name && modelFamily(candidate.name) === family) return 1;
+	// A person asking for `deepseek 4.1` means the family, not one of its
+	// variants; every variant is a tie and the caller reports them.
+	if (startsWithWords(modelWords(candidate.modelID), words)) return 1;
+	if (candidate.name && startsWithWords(modelWords(candidate.name), words)) {
+		return 1;
+	}
 	return 0;
 }
 
@@ -80,6 +129,18 @@ export function matchModel<T extends ModelCandidate>(
 	return winner
 		? { model: winner.model, score: winner.score, ties }
 		: undefined;
+}
+
+/**
+ * The candidates a query could mean when it did not name one exactly. A caller
+ * that is about to route or store something must show these instead of taking
+ * the first: `deepseek 4.1` describes three different models with three
+ * different behaviours and prices.
+ */
+export function ambiguousModels<T extends ModelCandidate>(
+	match: ModelMatch<T> | undefined,
+): readonly T[] {
+	return match && match.score < 4 && match.ties.length > 1 ? match.ties : [];
 }
 
 type CostTier = { input?: number; output?: number };

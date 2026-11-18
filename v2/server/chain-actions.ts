@@ -10,7 +10,11 @@ import {
 	saveChain,
 } from "../core/chains";
 import { readModelLimit } from "../core/context";
-import { matchModel } from "../core/models";
+import {
+	ambiguousModels,
+	type ModelCandidate,
+	matchModel,
+} from "../core/models";
 import {
 	type FamilyRoute,
 	invalidateCatalog,
@@ -26,12 +30,34 @@ export type ActionResult =
 	| { ok: true; message: string }
 	| { ok: false; message: string };
 
+export type RowResolution =
+	| { kind: "row"; family: ModelFamily }
+	| { kind: "ambiguous"; ties: readonly ModelFamily[] };
+
+/** A query that named the family but not the variant: list, never guess. */
+function ambiguousModel(
+	query: string,
+	providerID: string,
+	ties: readonly ModelCandidate[],
+): ActionResult {
+	return {
+		message: [
+			`"${query}" matches ${ties.length} ${providerID} models:`,
+			...ties.map(
+				(model) => `  ${model.modelID}  (${model.name ?? model.modelID})`,
+			),
+			"Use the exact id.",
+		].join("\n"),
+		ok: false,
+	};
+}
+
 /** Resolve what the user typed to a row, by key or by the picker's label. */
 export async function findRow(
 	ctx: Context,
 	db: Database,
 	query: string,
-): Promise<ModelFamily | undefined> {
+): Promise<RowResolution | undefined> {
 	const catalog = await loadCatalog(ctx, db);
 	const match = matchModel(
 		query,
@@ -40,9 +66,17 @@ export async function findRow(
 			name: family.name,
 		})),
 	);
-	return match
-		? catalog.families.find((family) => family.key === match.model.modelID)
-		: undefined;
+	if (!match) return undefined;
+
+	const byKey = new Map(catalog.families.map((family) => [family.key, family]));
+	const ties = ambiguousModels(match).flatMap((entry) => {
+		const family = byKey.get(entry.modelID);
+		return family ? [family] : [];
+	});
+	if (ties.length > 0) return { kind: "ambiguous", ties };
+
+	const family = byKey.get(match.model.modelID);
+	return family ? { family, kind: "row" } : undefined;
 }
 
 /** Resolve a stored or automatic row by its exact key. */
@@ -112,6 +146,8 @@ export async function addTarget(
 			name: model.name ?? model.modelID,
 		})),
 	);
+	const ties = ambiguousModels(match);
+	if (ties.length > 0) return ambiguousModel(query, providerID, ties);
 	const record = match
 		? candidates.find((model) => model.modelID === match.model.modelID)
 		: undefined;
@@ -168,6 +204,8 @@ export async function createChain(
 			name: model.name ?? model.modelID,
 		})),
 	);
+	const ties = ambiguousModels(match);
+	if (ties.length > 0) return ambiguousModel(query, providerID, ties);
 	const record = match
 		? candidates.find((model) => model.modelID === match.model.modelID)
 		: undefined;

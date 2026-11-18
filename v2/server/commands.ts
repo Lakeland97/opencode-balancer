@@ -534,8 +534,16 @@ export async function runCommand({
 		if (!query) {
 			return "Usage: /balancer chain <model> [add|remove|up|down|reset] …";
 		}
-		const family = await findRow(ctx, db, query);
-		if (!family) return `No row matches "${query}".`;
+		const resolved = await findRow(ctx, db, query);
+		if (!resolved) return `No row matches "${query}".`;
+		if (resolved.kind === "ambiguous") {
+			return [
+				`"${query}" matches ${resolved.ties.length} rows:`,
+				...resolved.ties.map((family) => `  ${family.key}  (${family.name})`),
+				"Use the exact key.",
+			].join("\n");
+		}
+		const family = resolved.family;
 
 		const [verb, providerID, ...modelWords] = rest;
 

@@ -37,6 +37,14 @@ const REFUSAL_TEXT =
 const ABORT_TEXT =
 	/aborted by the user|user (?:abort|interrupt|cancel)|request (?:was )?cancel?led|operation was aborted/i;
 
+/**
+ * A stream the host or network cut for taking too long. The host sometimes
+ * words this as an abort ("The operation was aborted due to timeout"), so it is
+ * checked before the user-abort pattern: a model that is merely slow is the
+ * account's availability, and another target may answer it.
+ */
+const TIMEOUT_TEXT = /timed?\s*out|timeout|deadline exceeded|etimedout/i;
+
 /** A failure that names the request or the model as unusable anywhere. */
 const INVALID_REQUEST_TEXT =
 	/model_not_found|model unavailable|model not found|invalid[-_ ]?request|invalid prompt|validation ?exception|unsupported (?:model|operation|parameter)|does not support|no such model/i;
@@ -106,6 +114,10 @@ export function isRetryableFailure(input: {
 	// What the conversation caused, and what another account would refuse in the
 	// same words: neither is this account's fault.
 	if (OVERFLOW_TEXT.test(text) || REFUSAL_TEXT.test(text)) return false;
+	// A slow provider is an availability problem, even when the host describes
+	// the cut stream as an abort. Checked before ABORT_TEXT so a timeout that
+	// borrows that wording still fails over.
+	if (TIMEOUT_TEXT.test(text)) return true;
 	if (ABORT_TEXT.test(text) || INVALID_REQUEST_TEXT.test(text)) return false;
 
 	// What this account's own state says: spent, unauthenticated, throttled.

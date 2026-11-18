@@ -460,6 +460,54 @@ describe("two models in one session", () => {
 		});
 	}
 
+	test("a timeout worded as an abort moves to the next account", async () => {
+		const { registry } = await twoModels();
+
+		const first = row("timeout-abort", "alpha-1");
+		await registry["model.request"](first);
+		expect(first.headers.authorization).toBe("Bearer sk-1");
+
+		// What a stream cut for taking too long can look like: the host says
+		// "aborted", which used to be read as the user stopping the turn.
+		const timeout = Object.assign(
+			new Error("The operation was aborted due to timeout"),
+			{ name: "TimeoutError" },
+		);
+		await registry.retry({
+			...retryEvent("timeout-abort", { delay: 1_000, retry: false }),
+			error: timeout,
+			model: { id: "alpha-1", providerID: "balancer" },
+		});
+
+		const next = row("timeout-abort", "alpha-1");
+		await registry["model.request"](next);
+		expect(next.headers.authorization).toBe("Bearer sk-2");
+	});
+
+	test("a slow request keeps its account past the trail's freshness window", async () => {
+		const start = Date.now();
+		try {
+			const { db, registry } = await twoModels();
+
+			const first = { ...row("slow-bound", "alpha-1"), request: newRequest() };
+			await registry["model.request"](first);
+			await registry["http.request"](first);
+			expect(first.request.headers.get("authorization")).toBe("Bearer sk-1");
+
+			// The attempt is still running six minutes later. The account is
+			// parked meanwhile, so only the route bound to this request can
+			// keep its retry on `p1` instead of selecting a new account.
+			markRateLimited(db, "p1", "a", 10 * 60_000);
+			setSystemTime(start + 6 * 60_000);
+
+			const retry = { ...row("slow-bound", "alpha-1"), request: newRequest() };
+			await registry["http.request"](retry);
+			expect(retry.request.headers.get("authorization")).toBe("Bearer sk-1");
+		} finally {
+			setSystemTime();
+		}
+	});
+
 	test("each model keeps its own balance, so a switch does not reset one", async () => {
 		const start = Date.now();
 		const { registry } = await twoModels();
