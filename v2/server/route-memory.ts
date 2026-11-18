@@ -192,6 +192,21 @@ export function noteServed(
 	writeRow(db, `${SERVED_PREFIX}${familyKey}`, JSON.stringify(entry));
 }
 
+/**
+ * The note that is truest right now: the cache and the store can each be newer.
+ *
+ * The plugin is reloaded on every edit, and a reload builds a second store
+ * object over the same file. Each keeps its own cache, so "this run wrote it,
+ * therefore the cache wins" is wrong the moment two instances share a file: the
+ * panel then names whichever target *that* instance last remembered, which need
+ * not be the one that answered. The timestamps settle it.
+ */
+function newestOf(cached: Served | undefined, stored: Served | undefined) {
+	if (!cached) return stored;
+	if (!stored) return cached;
+	return stored.at > cached.at ? stored : cached;
+}
+
 /** The target this row last served with, or undefined when that is stale. */
 export function servedFor(
 	db: Database,
@@ -200,7 +215,7 @@ export function servedFor(
 ): Served | undefined {
 	const key = `${SERVED_PREFIX}${familyKey}`;
 	const { served } = storeFor(db);
-	const entry = served.get(familyKey) ?? readJSON<Served>(db, key);
+	const entry = newestOf(served.get(familyKey), readJSON<Served>(db, key));
 	if (!entry) return undefined;
 	if (at - entry.at > SERVED_TTL_MS) {
 		served.delete(familyKey);
@@ -209,6 +224,19 @@ export function servedFor(
 	}
 	served.set(familyKey, entry);
 	return entry;
+}
+
+/**
+ * Drop a row's note outright.
+ *
+ * A walk that produced no answer served nothing, so a note it wrote must not
+ * outlive it: the panel would otherwise name a target the session never got an
+ * answer from, and the next request would be charged to it.
+ */
+export function forgetServed(db: Database, familyKey: string) {
+	const { served } = storeFor(db);
+	served.delete(familyKey);
+	deleteRow(db, `${SERVED_PREFIX}${familyKey}`);
 }
 
 /**
@@ -242,9 +270,12 @@ export function servedEntries(
 	} catch {
 		// The cache below is still worth reporting.
 	}
-	// A note written in this run is newer than the stored one until the store is
-	// refreshed, so the cache wins when it has something to say.
-	for (const [familyKey, entry] of served) rows.set(familyKey, entry);
+	// A note written in this run can be older than one another instance wrote to
+	// the same file — the plugin is reloaded on every edit, and each instance
+	// keeps its own cache. The timestamps settle which one is true.
+	for (const [familyKey, entry] of served) {
+		rows.set(familyKey, newestOf(entry, rows.get(familyKey)) ?? entry);
+	}
 
 	const live: Array<Served & { familyKey: string }> = [];
 	for (const [familyKey, entry] of rows) {

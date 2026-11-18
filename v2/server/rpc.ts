@@ -145,6 +145,7 @@ export async function registerBalancerRpc({
 					agent: entry.agent ?? "",
 					alias: entry.alias ?? "",
 					applied: entry.applied ?? "",
+					at: entry.at,
 					familyKey: entry.familyKey,
 					label: byKey.get(entry.familyKey)?.label ?? entry.familyKey,
 					modelID: entry.modelID,

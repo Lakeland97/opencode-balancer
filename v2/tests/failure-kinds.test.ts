@@ -1,7 +1,12 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import { getAccount, readLimitedUntil, saveAccount } from "../core/accounts";
+import {
+	getAccount,
+	readLimitedUntil,
+	saveAccount,
+	setAccountEnabled,
+} from "../core/accounts";
 import { setBalancingEnabled } from "../core/priority";
 import { migrate } from "../core/schema";
 import { invalidateCatalog, loadCatalog } from "../server/connectors";
@@ -232,30 +237,47 @@ describe("the prompt on the wire", () => {
 });
 
 describe("a row nothing can serve", () => {
-	test("the conversation is told why, instead of a transport failure", async () => {
+	test("a row whose every target is marked still sends to one, so the answer is real", async () => {
 		const { db, registry, synthetic } = await harness();
 
 		// Every target has refused this exact model — the shape a plan refusal or
-		// a price gate leaves behind. The credentials are fine; the model is not.
+		// a price gate leaves behind. Those marks are the balancer's guess about
+		// the world, not the provider's answer to this request, and leaving the
+		// call pointed at the stub made it fail as an unreachable host. The row
+		// therefore sends to a real target anyway: the call either answers or the
+		// provider refuses it in its own words.
 		noteModelUnavailable(db, "p1", "alpha-1");
 		noteModelUnavailable(db, "p2", "alpha-1");
+
+		const event = row("marked");
+		await registry["model.request"](event);
+
+		expect(event.headers.authorization).toBe("Bearer sk-1");
+		expect(synthetic).toHaveLength(0);
+	});
+
+	test("with no credential at all the conversation is told why", async () => {
+		const { db, registry, synthetic } = await harness();
+		setAccountEnabled(db, "p1", "a", false);
+		setAccountEnabled(db, "p2", "a", false);
 
 		const event = row("unroutable");
 		await registry["model.request"](event);
 
-		// The call is left alone — the host fails it as an ordinary model error,
-		// not a thrown plugin error — and the reason is in the session.
+		// Nothing can be attempted, so the call is left alone — the host fails it
+		// as an ordinary model error, not a thrown plugin error — and the reason
+		// is in the session.
 		expect(event.headers).toEqual({});
 		expect(synthetic).toHaveLength(1);
 		expect(synthetic[0].sessionID).toBe("unroutable");
 		expect(synthetic[0].text).toContain("nothing can serve alpha-1");
-		expect(synthetic[0].text).toContain("refused by the provider");
+		expect(synthetic[0].text).toContain("no enabled credential");
 	});
 
 	test("one message per attempt, so a retry does not fill the transcript", async () => {
 		const { db, registry, synthetic } = await harness();
-		noteModelUnavailable(db, "p1", "alpha-1");
-		noteModelUnavailable(db, "p2", "alpha-1");
+		setAccountEnabled(db, "p1", "a", false);
+		setAccountEnabled(db, "p2", "a", false);
 
 		await registry["model.request"](row("twice"));
 		await registry["model.request"](row("twice"));

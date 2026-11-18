@@ -33,17 +33,20 @@ import {
 	retryAfterMs,
 } from "./request-state";
 import {
+	forgetServed,
 	forgetSessionTokens,
 	noteServed,
 	noteSessionRow,
 	noteSessionTokens,
 	servedEntries,
+	servedFor,
 	sessionRows,
 	sessionTokens,
 } from "./route-memory";
 import {
 	type ChosenRoute,
 	chooseLargestTarget,
+	chooseRouteAtAnyCost,
 	chooseRouteForRequest,
 	chooseRouteIgnoringParks,
 	describeUnroutable,
@@ -285,8 +288,33 @@ async function failoverResponse(input: {
 	// A walk that ends with nothing to show must leave the row where it was: the
 	// session is about to be told about the original refusal, and a title call or
 	// the next request must not be pointed at a target this walk merely tried.
+	//
+	// The tracked slots go back too. Every attempt below rewrites them so a
+	// failure reported mid-walk is charged to the target that answered it, and
+	// leaving them rewritten once the walk gives up made the *next* hook charge
+	// the original provider's words to whichever target happened to be tried
+	// last — which is how a healthy provider ended up wearing another one's
+	// error message in the panel.
+	const before = {
+		model: bySession.get(modelKey(sessionID, family.key)),
+		provider: bySession.get(sessionKey(sessionID, original.providerID)),
+		routed: bySession.get(sessionKey(sessionID, ROUTED)),
+		served: servedFor(db, family.key),
+	};
+	const restore = (key: string, value: Tracked | undefined) => {
+		if (value) bySession.set(key, value);
+		else bySession.delete(key);
+	};
 	const abandon = () => {
 		bindRoute(sessionID, family.key, kind, original);
+		restore(modelKey(sessionID, family.key), before.model);
+		restore(sessionKey(sessionID, ROUTED), before.routed);
+		restore(sessionKey(sessionID, original.providerID), before.provider);
+		// The panel's note is a claim about what is serving. A walk that produced
+		// no answer served nothing, so the note goes back to the target whose
+		// refusal the session is about to read.
+		if (before.served) noteServed(db, family.key, before.served);
+		else forgetServed(db, family.key);
 		return undefined;
 	};
 
@@ -913,7 +941,15 @@ function chooseStickyRoute(input: {
 		// failure reads as the account's. The widest target is the only one that
 		// might still fit, and its refusal names the real limit when nothing does.
 		chooseLargestTarget(db, family, tried) ??
-		chooseLargestTarget(db, family);
+		chooseLargestTarget(db, family) ??
+		// Every target is marked as refusing this model, which is the balancer's
+		// own guess rather than this request's answer. Leaving the call pointed at
+		// the stub sends it to a host name that does not resolve, and the session
+		// sees a network failure it cannot act on. Trying a real target is the
+		// only way to find out whether the guess still holds: it either answers or
+		// the provider refuses it in its own words.
+		chooseRouteAtAnyCost(db, family, tried) ??
+		chooseRouteAtAnyCost(db, family);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 

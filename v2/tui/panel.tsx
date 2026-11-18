@@ -15,7 +15,7 @@ import {
 import { copy } from "../copy";
 import { mergeChainGroups, mergeChainRows } from "../core/chain-view";
 import { bufferTokens, cutFor, formatTokens } from "../core/context";
-import { formatAttempt, routeMarkers } from "../core/format";
+import { credentialDetail, formatAttempt, routeMarkers } from "../core/format";
 import { Balancer } from "../rpc";
 import type {
 	Account,
@@ -47,8 +47,6 @@ import {
 	allCollapsed,
 	groupedChains,
 	providerEntries,
-	rowNote,
-	servingLine,
 	visibleChains,
 } from "./rows";
 
@@ -201,6 +199,9 @@ export function BalancerPanel(props: {
 
 	// The thin slice's one control. Later sections append in render order.
 	const [openNote, setOpenNote] = createSignal("");
+	// Which chain target shows the id it is sent instead of the name it is
+	// called, as `row:provider`. One at a time, like a note.
+	const [openId, setOpenId] = createSignal("");
 	const [modelsOpen, setModelsOpen] = createSignal(false);
 	const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
 	const [collapsedGroups, setCollapsedGroups] = createSignal<
@@ -501,7 +502,15 @@ export function BalancerPanel(props: {
 					),
 				id: `${key}:enable`,
 			});
-			if (rowNote(account, copy.resets)) {
+			if (
+				credentialDetail({
+					account,
+					alias: entry.alias,
+					providerID: entry.providerID,
+					resets: copy.resets,
+					serving: inUse(),
+				})
+			) {
 				list.push({
 					activate: () => toggleNote(key),
 					id: `${key}:note`,
@@ -576,6 +585,11 @@ export function BalancerPanel(props: {
 					if (isChainCollapsed(chain.key)) continue;
 					for (const target of chain.targets) {
 						const rowKey = `${chain.key}:${target.providerID}`;
+						list.push({
+							activate: () => setOpenId(openId() === rowKey ? "" : rowKey),
+							id: `${rowKey}:name`,
+							rowKey,
+						});
 						list.push({
 							grab: { key: chain.key, kind: "target" },
 							id: `${rowKey}:grip`,
@@ -779,11 +793,35 @@ export function BalancerPanel(props: {
 	const itemID = (id: string) => `balancer-item-${itemIndex(id)}`;
 	const focused = (id: string) => itemIndex(id) === cursor().index;
 	const mark = (id: string) => (focused(id) ? "›" : " ");
+	/**
+	 * The window the conversation is actually being sent into right now.
+	 *
+	 * Every balancer row is declared at 1M to the host, but each request lands in
+	 * one target's real window. The row's own figure is the tightest of its
+	 * targets, which is right for "where could this land"; for a conversation that
+	 * is already being served, the serving target's window is the one that
+	 * matters. Reading the row minimum there reported a cut of 168k while a 1M
+	 * model was answering.
+	 */
+	const servedContext = () => {
+		const windows = inUse()
+			.map((entry) => {
+				const row = chains().find((chain) => chain.key === entry.familyKey);
+				const target = row?.targets.find(
+					(entryTarget) => entryTarget.providerID === entry.providerID,
+				);
+				return target?.context ?? row?.context ?? 0;
+			})
+			.filter((value) => value > 0);
+		return windows.length > 0 ? Math.min(...windows) : undefined;
+	};
+
 	const cut = () =>
 		cutFor(
 			contextLimit().value,
 			contextBuffer().value,
 			contextBuffer().enforce,
+			servedContext(),
 		);
 
 	return (
@@ -838,35 +876,22 @@ export function BalancerPanel(props: {
 				}`}</text>
 			</box>
 			{/*
-			 * The one place the panel speaks: an error when there is one,
-			 * otherwise the model each row is being served on right now. The
-			 * TUI has no hover, so the note that a differing level was asked
-			 * for rides dim beside the line instead of in a title.
+			 * Nothing here for errors or for what is being served: the first
+			 * has no place on a panel that otherwise only reports, and the
+			 * second belongs on the credential's own row below.
 			 */}
-			<Show
-				fallback={
-					<Show when={inUse().length > 0}>
-						<For each={inUse()}>
-							{(entry) => {
-								const line = () => servingLine(entry);
-								return (
-									<text attributes={TextAttributes.DIM}>{`${line().text}${
-										line().note ? `  ${line().note}` : ""
-									}`}</text>
-								);
-							}}
-						</For>
-					</Show>
-				}
-				when={message()}
-			>
-				{(text) => <text style={{ fg: "red" }}>{text()}</text>}
-			</Show>
 			<text>{copy.providers}</text>
 			<For each={providerEntries(accounts(), priority())}>
 				{(row) => {
 					const key = providerKey(row.entry.providerID, row.entry.alias);
-					const note = () => rowNote(row.account, copy.resets);
+					const note = () =>
+						credentialDetail({
+							account: row.account,
+							alias: row.entry.alias,
+							providerID: row.entry.providerID,
+							resets: copy.resets,
+							serving: inUse(),
+						});
 					const markers = () =>
 						row.account
 							? routeMarkers({
@@ -984,17 +1009,19 @@ export function BalancerPanel(props: {
 															items()[cursor().index]?.rowKey === rowKey;
 														return (
 															<box style={{ flexDirection: "row", gap: 2 }}>
-																<text>{`   ${index() + 1}. ${
-																	target.providerID
-																} · ${target.modelID}${
-																	target.resolved !== target.modelID
-																		? ` → ${target.resolved}`
-																		: ""
-																}${
-																	target.state !== "available"
-																		? ` [${target.state}]`
-																		: ""
-																}${moving() ? `  ${copy.moving}` : ""}`}</text>
+																<box id={itemID(`${rowKey}:name`)}>
+																	<text>{`${mark(`${rowKey}:name`)}   ${
+																		index() + 1
+																	}. ${target.providerID} · ${
+																		openId() === rowKey
+																			? target.resolved
+																			: target.name || target.resolved
+																	}${
+																		target.state !== "available"
+																			? ` [${target.state}]`
+																			: ""
+																	}${moving() ? `  ${copy.moving}` : ""}`}</text>
+																</box>
 																<box id={itemID(`${rowKey}:grip`)}>
 																	<text>{`${mark(`${rowKey}:grip`)}⠿`}</text>
 																</box>

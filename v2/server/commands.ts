@@ -551,11 +551,12 @@ export async function runCommand({
 			const row = (await listChainRows(ctx, db)).find(
 				(entry) => entry.key === family.key,
 			);
-			const lines = (row?.targets ?? []).map((target, index) => {
-				const resolved =
-					target.resolved !== target.modelID ? ` → ${target.resolved}` : "";
-				return `  ${index + 1}. ${target.providerID}  ${target.modelID}${resolved}  [${target.state}]`;
-			});
+			const lines = (row?.targets ?? []).map(
+				(target, index) =>
+					`  ${index + 1}. ${target.providerID}  ${
+						target.name || target.resolved
+					}  [${target.state}]`,
+			);
 			return [
 				`${family.name} (${family.key}) — ${family.stored ? "custom order" : "automatic order"} — ${row?.limit ? `limit ${row.limit}` : "global"}`,
 				...lines,

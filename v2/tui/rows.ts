@@ -1,4 +1,4 @@
-import { credentialNote } from "../core/format";
+import { credentialNote, formatAgo, servingText } from "../core/format";
 import { groupByBrand } from "../core/models";
 import type { Account, Chain, InUseEntry, Provider } from "../types";
 
@@ -11,10 +11,9 @@ import type { Account, Chain, InUseEntry, Provider } from "../types";
  * one the connector applied; a request that asked for a different one is worth
  * saying out loud rather than dropping, so it rides in `note` beside the line.
  */
-export function servingLine(entry: InUseEntry) {
-	const text = `${entry.agent || "?"} · ${entry.providerID}/${entry.modelID}${
-		entry.applied ? ` (${entry.applied})` : ""
-	}`;
+export function servingLine(entry: InUseEntry, now: number = Date.now()) {
+	const ago = formatAgo(entry.at, now);
+	const text = ago ? `${servingText(entry)} · ${ago}` : servingText(entry);
 	const note =
 		entry.variant && entry.variant !== entry.applied
 			? entry.applied

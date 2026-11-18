@@ -20,13 +20,21 @@ const pair = object({ alias: str, providerID: str }, ["providerID", "alias"]);
 const result = object({ message: str, ok: bool }, ["ok", "message"]);
 const chainTarget = object(
 	{
+		/**
+		 * The window this target reports, or 0 when it reports none. The row's own
+		 * `context` is the tightest of these, which is why the panel can say why a
+		 * row is cut where it is.
+		 */
+		context: num,
 		modelID: str,
+		/** The connector's own name for the model, empty when it published none. */
+		name: str,
 		providerID: str,
 		/** The model actually sent, once a free-only provider substitutes. */
 		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "resolved", "state"],
+	["providerID", "modelID", "name", "context", "resolved", "state"],
 );
 const chainRow = object(
 	{
@@ -174,6 +182,8 @@ export const balancerDefinition = {
 								alias: str,
 								/** The level actually applied on the connector, or empty. */
 								applied: str,
+								/** When this row last served, in ms. */
+								at: num,
 								/** The row's stable key, e.g. `deepseek-v4.1-flash`. */
 								familyKey: str,
 								/** The row's label as the picker shows it. */
@@ -193,6 +203,7 @@ export const balancerDefinition = {
 								"agent",
 								"applied",
 								"variant",
+								"at",
 							],
 						),
 						type: "array",

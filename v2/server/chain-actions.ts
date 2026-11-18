@@ -347,7 +347,7 @@ export function resetRow(db: Database, family: ModelFamily): boolean {
 }
 
 /**
- * The model a target will actually be sent to.
+ * The model a target will actually be sent to, and what to call it.
  *
  * `free` is a property of the credential now, so the row shows the free spelling
  * when the credential that would serve is told to spend nothing, and the id it
@@ -361,13 +361,28 @@ export function resetRow(db: Database, family: ModelFamily): boolean {
  * free spelling vanished the moment the key was parked, which is how the panel
  * stopped telling the user that a free model was the one in play.
  */
-function resolvedModelID(db: Database, target: FamilyRoute): string {
-	if (target.free !== false) return target.modelID;
+function resolvedTarget(db: Database, target: FamilyRoute) {
+	const same = {
+		context: target.context ?? 0,
+		id: target.modelID,
+		name: target.name ?? target.modelID,
+	};
+	if (target.free !== false) return same;
 	for (const account of enabledAccounts(db, target.providerID)) {
-		if (!account.freeOnly) return target.modelID;
-		if (target.freeVariant) return target.freeVariant.modelID;
+		if (!account.freeOnly) return same;
+		const free = target.freeVariant;
+		if (!free) return same;
+		// The free spelling is what is sent, so it is also what the row calls
+		// this target. Joining the two with an arrow made the line read as
+		// "DeepSeek V4.1 Flash → deepseek-v4.1-flash-free", which names the same
+		// thing twice and leaves the reader to work out which one answers.
+		return {
+			context: free.context ?? same.context,
+			id: free.modelID,
+			name: free.name ?? free.modelID,
+		};
 	}
-	return target.modelID;
+	return same;
 }
 
 function targetState(
@@ -423,6 +438,10 @@ export type ChainRow = {
 	targets: Array<{
 		providerID: string;
 		modelID: string;
+		/** The connector's own name for the model, which tells a row's targets apart. */
+		name: string;
+		/** The window this target reports, or 0 when it reports none. */
+		context: number;
 		resolved: string;
 		state: string;
 	}>;
@@ -455,12 +474,22 @@ export async function listChainRows(
 			limit: readModelLimit(db, family.key) ?? "",
 			package: family.package,
 			stored: Boolean(family.stored),
-			targets: targets.map((target) => ({
-				modelID: target.modelID,
-				providerID: target.providerID,
-				resolved: resolvedModelID(db, target),
-				state: targetState(db, target, family.key),
-			})),
+			targets: targets.map((target) => {
+				const resolved = resolvedTarget(db, target);
+				// `modelID` stays the id the row was configured with and `resolved`
+				// the one actually sent, because the two answer different
+				// questions. The name follows what is sent: a free-only credential
+				// means the free spelling answers, so that is the model the row
+				// names. Printing both read as the same model twice.
+				return {
+					context: resolved.context,
+					modelID: target.modelID,
+					name: resolved.name,
+					providerID: target.providerID,
+					resolved: resolved.id,
+					state: targetState(db, target, family.key),
+				};
+			}),
 		};
 	});
 }

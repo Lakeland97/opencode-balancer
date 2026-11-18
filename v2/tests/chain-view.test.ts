@@ -7,7 +7,12 @@ const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
 function chain(
 	key: string,
-	targets: { modelID?: string; providerID: string; state?: string }[],
+	targets: {
+		context?: number;
+		modelID?: string;
+		providerID: string;
+		state?: string;
+	}[],
 ): Chain {
 	return {
 		context: 200_000,
@@ -17,7 +22,9 @@ function chain(
 		package: PACKAGE,
 		stored: false,
 		targets: targets.map((target) => ({
+			context: target.context ?? 0,
 			modelID: target.modelID ?? key,
+			name: target.modelID ?? key,
 			providerID: target.providerID,
 			resolved: target.modelID ?? key,
 			state: target.state ?? "available",

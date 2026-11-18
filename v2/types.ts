@@ -36,7 +36,11 @@ export type RebalanceState = {
 
 export type Target = {
 	modelID: string;
+	/** The connector's own name for the model, which tells a row's targets apart. */
+	name: string;
 	providerID: string;
+	/** The window this target reports, or 0 when it reports none. */
+	context: number;
 	/** What is actually sent, once a free-only provider substitutes. */
 	resolved: string;
 	state: string;
@@ -64,6 +68,8 @@ export type InUseEntry = {
 	agent: string;
 	/** The level actually applied on the connector, empty when there is none. */
 	applied: string;
+	/** When this row last served, in ms; a stale row is dropped by the server. */
+	at: number;
 	familyKey: string;
 	label: string;
 	/**

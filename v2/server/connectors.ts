@@ -35,6 +35,16 @@ type ModelRecord = Awaited<
 export type FamilyRoute = {
 	providerID: string;
 	modelID: string;
+	/**
+	 * The connector's own display name for this model, when it published one.
+	 *
+	 * Ids repeat across a row — six providers spell the same weights
+	 * `deepseek-v4.1-flash` — while the names say what each actually is:
+	 * "DeepSeek V4.1 Flash 1017", "… Fast", "… Free". The panel lists the name so
+	 * the rows can be told apart; the id stays beside it because that is what
+	 * the provider is actually asked for.
+	 */
+	name?: string;
 	/** The provider's API root, already normalised without a trailing slash. */
 	baseURL: string;
 	package: string;
@@ -52,6 +62,8 @@ export type FamilyRoute = {
 		baseURL: string;
 		context?: number;
 		modelID: string;
+		/** The provider's own name for that free spelling, when it published one. */
+		name?: string;
 		output?: number;
 	};
 };
@@ -359,11 +371,13 @@ export async function loadCatalog(
 							baseURL: stripTrailingSlash(sibling.settings.baseURL),
 							context: sibling.limit?.context,
 							modelID: sibling.modelID,
+							name: sibling.name ?? sibling.modelID,
 							output: sibling.limit?.output,
 						},
 					}
 				: {}),
 			modelID: model.modelID,
+			name: model.name ?? model.modelID,
 			output: model.limit?.output,
 			package: pkg,
 			providerID,
@@ -450,6 +464,7 @@ export async function loadCatalog(
 					baseURL: stripTrailingSlash(baseURL),
 					context: entry.context ?? current.context,
 					modelID: entry.id,
+					name: entry.name ?? current.name ?? entry.id,
 					output: entry.output ?? current.output,
 				};
 				groups.set(key, group);
@@ -461,6 +476,7 @@ export async function loadCatalog(
 				context: entry.context,
 				free: /(^|[/:_-])free$/i.test(entry.id),
 				modelID: entry.id,
+				name: entry.name ?? entry.id,
 				output: entry.output,
 				package: pkg,
 				providerID,
@@ -528,11 +544,13 @@ export async function loadCatalog(
 								baseURL: stripTrailingSlash(sibling.settings.baseURL),
 								context: sibling.limit?.context,
 								modelID: sibling.modelID,
+								name: sibling.name ?? sibling.modelID,
 								output: sibling.limit?.output,
 							},
 						}
 					: {}),
 				modelID: target.modelID,
+				name: record?.name ?? target.modelID,
 				output: record?.limit?.output,
 				package: chain.package,
 				providerID: target.providerID,

@@ -22,6 +22,10 @@ function sameTarget(left: Target, right: Target) {
 	return (
 		left.providerID === right.providerID &&
 		left.modelID === right.modelID &&
+		// The name and window are shown on the row, so a connector that renamed
+		// a model or reports a different window has to re-render.
+		left.name === right.name &&
+		left.context === right.context &&
 		left.resolved === right.resolved &&
 		left.state === right.state
 	);

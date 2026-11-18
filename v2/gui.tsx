@@ -27,7 +27,7 @@ import {
 	formatTokens,
 	MAX_PERCENT,
 } from "./core/context";
-import { credentialNote, formatAttempt, routeMarkers } from "./core/format";
+import { credentialDetail, formatAttempt, routeMarkers } from "./core/format";
 import { groupByBrand } from "./core/models";
 import {
 	DEFAULT_REBALANCE_MS,
@@ -175,6 +175,11 @@ export default Plugin.define({
 		// Which credential's note is open, as `provider/alias`: one at a time, so
 		// the panel cannot fill with expanded messages.
 		const [openNote, setOpenNote] = createSignal("");
+		// Which chain target is showing its id instead of its name, as
+		// `row:provider`. The name is what a person reads for; the id is what the
+		// provider is actually sent, and a click swaps between them rather than
+		// printing both beside each other.
+		const [openId, setOpenId] = createSignal("");
 		const [addProvider, setAddProvider] = createSignal("");
 		const [addModels, setAddModels] = createSignal<Models["models"]>([]);
 		const [collapsed, setCollapsed] = createSignal<Record<string, boolean>>({});
@@ -304,12 +309,24 @@ export default Plugin.define({
 		 * readout that stops at the limit would promise room the serving model
 		 * does not have, which is exactly the overflow the buffer exists to
 		 * prevent.
+		 *
+		 * The row's own figure is the tightest of its targets, because the next
+		 * request may land on any of them. When one target is serving, that is the
+		 * window the conversation actually has until it moves: reading the row's
+		 * minimum there cut a 1M model at a 200k sibling's window and reported
+		 * 168k for a conversation nowhere near its limit.
 		 */
 		const currentRowContext = () => {
 			const model = ctx.screen.current()?.composer.model();
 			if (model?.providerID !== "balancer") return undefined;
 			const row = chains().find((chain) => chain.key === model.modelID);
-			return row && row.context > 0 ? row.context : undefined;
+			if (!row) return undefined;
+			const serving = inUse().find((entry) => entry.familyKey === row.key);
+			const target = serving
+				? row.targets.find((entry) => entry.providerID === serving.providerID)
+				: undefined;
+			if (target && target.context > 0) return target.context;
+			return row.context > 0 ? row.context : undefined;
 		};
 
 		const cutTokens = () =>
@@ -724,24 +741,18 @@ export default Plugin.define({
 				entry,
 			}));
 
-		// The refill the endpoint named, when it named one. A park with no words,
-		// or words with no time in them, has nothing to say, so this stays
-		// undefined rather than inventing a moment.
-		const rollover = (account?: Account) =>
-			account?.limited && account.limitedUntil > 0
-				? account.limitedUntil
-				: undefined;
-
-		// What the control line says, left of the switches: the refill the
-		// endpoint named and the provider's own words when it refused. The marker
-		// above clears on the next attempt, so this reports the last attempt
-		// rather than predicting the next one.
-		const rowNote = (account?: Account) =>
-			credentialNote({
-				limited: Boolean(account?.limited),
-				limitedUntil: rollover(account),
-				reason: account?.limitedReason,
+		// What the control line says, left of the switches: what this credential
+		// last refused, or failing that the model it is serving and when. The
+		// panel has no status line of its own, so this box is the only place a
+		// credential says it is the one in use.
+		const rowNote = (entry: Provider, account?: Account) =>
+			credentialDetail({
+				account,
+				alias: entry.alias,
+				now: Date.now(),
+				providerID: entry.providerID,
 				resets: ctx.t("resets"),
+				serving: inUse(),
 			});
 
 		const View = () => {
@@ -953,53 +964,6 @@ export default Plugin.define({
 						</span>
 					</div>
 
-					{/* The one place the panel speaks: an error when there is one,
-					    otherwise the model each row is being served on right now.
-					    Several lines mean the load is split — different models, or
-					    one model that moved after a provider was limited. */}
-					<Show
-						fallback={
-							<Show when={inUse().length > 0}>
-								<div
-									style={{
-										display: "flex",
-										"flex-direction": "column",
-										"font-family": "ui-monospace, monospace",
-										"font-size": "11px",
-										gap: "2px",
-										opacity: 0.7,
-									}}
-								>
-									<For each={inUse()}>
-										{(entry) => (
-											<span
-												title={[
-													`${entry.label} → ${entry.providerID}/${entry.alias || "?"}`,
-													`model ${entry.modelID}`,
-													entry.variant
-														? entry.variant === entry.applied || !entry.applied
-															? `level ${entry.variant}`
-															: `level ${entry.variant}, applied as ${entry.applied}`
-														: "",
-													entry.agent ? `agent ${entry.agent}` : "",
-												]
-													.filter(Boolean)
-													.join(" · ")}
-											>
-												{entry.agent || "?"} · {entry.providerID}/
-												{entry.modelID}
-												{entry.applied ? ` (${entry.applied})` : ""}
-											</span>
-										)}
-									</For>
-								</div>
-							</Show>
-						}
-						when={message()}
-					>
-						<div style={{ opacity: 0.7 }}>{message()}</div>
-					</Show>
-
 					<div style={divider} />
 
 					<div style={row}>
@@ -1062,7 +1026,7 @@ export default Plugin.define({
 									</span>
 								</label>
 								<div style={controlLine}>
-									<Show when={rowNote(item.account)}>
+									<Show when={rowNote(item.entry, item.account)}>
 										{(note) => {
 											const key = `${item.entry.providerID}/${item.entry.alias}`;
 											const open = () => openNote() === key;
@@ -1082,8 +1046,8 @@ export default Plugin.define({
 													tabIndex={0}
 													title={
 														open()
-															? "hide the message"
-															: "show the whole message and when this credential was last tried"
+															? "hide the detail"
+															: "show the whole line and when this credential was last tried"
 													}
 												>
 													<span style={detailLine(open())}>
@@ -1379,25 +1343,30 @@ export default Plugin.define({
 																			)}
 																		>
 																			<span
+																				onClick={() => {
+																					const key = `${chain.key}:${target.providerID}`;
+																					setOpenId(
+																						openId() === key ? "" : key,
+																					);
+																				}}
 																				style={{
+																					cursor: "pointer",
 																					flex: "1 1 140px",
 																					"min-width": 0,
 																					"overflow-wrap": "anywhere",
 																				}}
+																				title={
+																					openId() ===
+																					`${chain.key}:${target.providerID}`
+																						? "show the model's name"
+																						: "show the id this provider is sent"
+																				}
 																			>
 																				{index() + 1}. {target.providerID} ·{" "}
-																				{target.modelID}
-																				<Show
-																					when={
-																						target.resolved &&
-																						target.resolved !== target.modelID
-																					}
-																				>
-																					<span style={{ opacity: 0.6 }}>
-																						{" "}
-																						→ {target.resolved}
-																					</span>
-																				</Show>
+																				{openId() ===
+																				`${chain.key}:${target.providerID}`
+																					? target.resolved
+																					: target.name || target.resolved}
 																				{/* The target the balancer would send the
 																				    next request to — the model currently
 																				    selected for this row. Only one target

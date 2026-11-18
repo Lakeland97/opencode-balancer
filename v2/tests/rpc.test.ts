@@ -370,6 +370,57 @@ describe("chain rpc", () => {
 		expect(row?.targets.length).toBe(1);
 	});
 
+	test("a custom row keeps the connector's own name for each target", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		const rpc = (await registerBalancerRpc({
+			ctx: workingCtx([
+				model(
+					"p1",
+					"deepseek-v4.1-flash",
+					1_000_000,
+					PACKAGE,
+					"DeepSeek V4.1 Flash 1017",
+				),
+				model(
+					"p3",
+					"deepseek-v4.1-flash",
+					1_000_000,
+					PACKAGE,
+					"DeepSeek V4.1 Flash",
+				),
+			]),
+			db,
+		})) as unknown as Record<string, (input: unknown) => Promise<unknown>>;
+		const created = (await rpc.chainCreate({
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p1",
+		})) as { key?: string };
+		await rpc.chainAdd({
+			key: String(created.key),
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p3",
+		});
+		invalidateCatalog();
+
+		const listed = (await rpc.chains({})) as {
+			rows: {
+				key: string;
+				targets: { name: string; providerID: string }[];
+			}[];
+		};
+		const row = listed.rows.find(
+			(entry) => entry.key === "deepseek-v4.1-flash",
+		);
+		// A stored chain is built from the ids in the store, but the row still
+		// has to say what each provider calls that model: the ids repeat across
+		// a row and the names are what tell them apart.
+		expect(row?.targets.map((target) => target.name)).toEqual([
+			"DeepSeek V4.1 Flash 1017",
+			"DeepSeek V4.1 Flash",
+		]);
+	});
+
 	test("a free-only credential shows the model it will actually use", async () => {
 		const db = freshDb();
 		saveAccount(db, "p3", "a", { key: "k3", type: "api" });

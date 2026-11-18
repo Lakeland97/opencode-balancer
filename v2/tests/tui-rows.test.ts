@@ -40,6 +40,9 @@ function serving(overrides: Partial<InUseEntry> = {}): InUseEntry {
 		agent: "build",
 		alias: "account-1",
 		applied: "high",
+		// Unset by default so the text assertions below read as the line alone;
+		// the tests that care about the moment set it.
+		at: 0,
 		familyKey: "deepseek",
 		label: "DeepSeek Pro",
 		modelID: "deepseek-v4.1-flash",
@@ -58,7 +61,9 @@ function chain(key: string, stored: boolean, targets: number): Chain {
 		package: PACKAGE,
 		stored,
 		targets: Array.from({ length: targets }, (_, index) => ({
+			context: 0,
 			modelID: key,
+			name: key,
 			providerID: `p${index + 1}`,
 			resolved: key,
 			state: "available",
@@ -126,28 +131,34 @@ describe("derived rows", () => {
 });
 
 describe("serving lines", () => {
+	const now = new Date(2026, 10, 15, 12, 0).getTime();
 	test("names the connector's model, not the row label", () => {
-		const line = servingLine(serving());
+		const line = servingLine(serving(), now);
 		expect(line.text).toBe("build · open-design/deepseek-v4.1-flash (high)");
 		expect(line.text).not.toContain("DeepSeek Pro");
 	});
+	test("adds when the row last served", () => {
+		expect(servingLine(serving({ at: now - 120_000 }), now).text).toBe(
+			"build · open-design/deepseek-v4.1-flash (high) · 2m ago",
+		);
+	});
 	test("shows the level actually applied", () => {
-		expect(servingLine(serving({ applied: "medium" })).text).toContain(
+		expect(servingLine(serving({ applied: "medium" }), now).text).toContain(
 			"(medium)",
 		);
 	});
 	test("falls back to ? for a missing agent and drops an absent level", () => {
-		expect(servingLine(serving({ agent: "", applied: "" })).text).toBe(
+		expect(servingLine(serving({ agent: "", applied: "" }), now).text).toBe(
 			"? · open-design/deepseek-v4.1-flash",
 		);
 	});
 	test("keeps a level the request asked for but did not get", () => {
-		const line = servingLine(serving({ applied: "low", variant: "high" }));
+		const line = servingLine(serving({ applied: "low", variant: "high" }), now);
 		expect(line.text).toBe("build · open-design/deepseek-v4.1-flash (low)");
 		expect(line.note).toContain("high");
 		expect(line.note).toContain("low");
 	});
 	test("says nothing extra when the asked level is the applied one", () => {
-		expect(servingLine(serving()).note).toBe("");
+		expect(servingLine(serving(), now).note).toBe("");
 	});
 });

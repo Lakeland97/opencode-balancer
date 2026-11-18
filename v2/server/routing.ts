@@ -30,6 +30,7 @@ function freeVariantOf(route: FamilyRoute): FamilyRoute | undefined {
 		context: variant.context,
 		free: true,
 		modelID: variant.modelID,
+		name: variant.name ?? variant.modelID,
 		output: variant.output,
 	};
 }
@@ -193,6 +194,41 @@ export function chooseLargestTarget(
 			if (!target) continue;
 			if (modelUnavailable(db, target.providerID, target.modelID)) continue;
 			return { ...target, account };
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The last target this row can reach at all, for a request that must not be left
+ * pointed at the stub.
+ *
+ * `chooseRouteIgnoringParks` still respects the two marks that say "this exact
+ * pair cannot work": a model the provider no longer offers, and a pair it has
+ * already refused. When every target carries one, there is nothing left to
+ * choose from, and the call would go to `balancer.invalid` — a host name that
+ * does not resolve, which reaches the session as an unexplainable network
+ * failure.
+ *
+ * At that point an attempt is the only thing that can produce an answer, and it
+ * is also the only thing that can produce a refusal in the provider's own words.
+ * So this ignores the marks and every park, and returns the row's first target
+ * that has an enabled credential, that credential attached.
+ */
+export function chooseRouteAtAnyCost(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+): ChosenRoute | undefined {
+	const routes = family.stored
+		? resolveChain(db, family)
+		: sortRoutes(family.targets, db);
+	for (const route of routes) {
+		for (const account of enabledAccounts(db, route.providerID)) {
+			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
+			const target =
+				route.free === false && account.freeOnly ? freeVariantOf(route) : route;
+			if (target) return { ...target, account };
 		}
 	}
 	return undefined;
