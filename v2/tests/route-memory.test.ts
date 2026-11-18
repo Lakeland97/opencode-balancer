@@ -4,8 +4,11 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { migrate } from "../core/schema";
 import {
 	noteServed,
+	noteSessionTokens,
 	resetRouteMemory,
+	servedEntries,
 	servedFor,
+	sessionTokens,
 } from "../server/route-memory";
 
 const KEY = "deepseek-v4.1-flash";
@@ -144,5 +147,33 @@ describe("a row's last served note", () => {
 		noteServed(db, KEY, route, start);
 		expect(servedFor(db, KEY, start + 11 * MINUTE)).toBeUndefined();
 		expect(storedAt(db)).toBeUndefined();
+	});
+});
+
+describe("two stores in one process", () => {
+	test("a note written for one store is not read back from another", () => {
+		const first = freshDb();
+		const second = freshDb();
+		const at = 1_000_000;
+
+		noteServed(first, KEY, route, at);
+
+		// The panel asks one database what is in use. Answering from another's
+		// memory is how a test's own route made a second, untouched account list
+		// report a credential it had never sent anything to.
+		expect(servedFor(second, KEY, at + 1)).toBeUndefined();
+		expect(servedEntries(second, at + 1)).toEqual([]);
+		// And the store that owns the note still has it.
+		expect(servedFor(first, KEY, at + 1)?.providerID).toBe("p1");
+	});
+
+	test("a conversation size belongs to its own store", () => {
+		const first = freshDb();
+		const second = freshDb();
+
+		noteSessionTokens(first, "session-a", 12_000);
+
+		expect(sessionTokens(second, "session-a")).toBeUndefined();
+		expect(sessionTokens(first, "session-a")).toBe(12_000);
 	});
 });

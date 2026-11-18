@@ -73,9 +73,40 @@ const SERVED_PREFIX = "served:";
 const TOKENS_PREFIX = "session_tokens:";
 const ROWS_PREFIX = "session_rows:";
 
-const servedCache = new Map<string, Served>();
-const tokensCache = new Map<string, Measured>();
-const rowsCache = new Map<string, SessionRow[]>();
+/**
+ * The caches are per store, not per process.
+ *
+ * A process can hold more than one database — a test builds a fresh one per
+ * case, and the TUI and the server can each open the file — and a cache shared
+ * across them answered one store's question with another's note. That is how an
+ * "in use" mark from one in-memory database made a second one report a
+ * credential it had never routed to.
+ */
+type Store = {
+	rows: Map<string, SessionRow[]>;
+	served: Map<string, Served>;
+	tokens: Map<string, Measured>;
+};
+
+const stores = new WeakMap<Database, Store>();
+
+/**
+ * Every store this process has built.
+ *
+ * `resetRouteMemory` is the one operation that has no database to name — it
+ * exists so a test that reuses a file starts clean — so it has to reach all of
+ * them. Real work always names its store.
+ */
+const everyStore: Store[] = [];
+
+function storeFor(db: Database): Store {
+	const existing = stores.get(db);
+	if (existing) return existing;
+	const store = { rows: new Map(), served: new Map(), tokens: new Map() };
+	stores.set(db, store);
+	everyStore.push(store);
+	return store;
+}
 
 function readJSON<T>(db: Database, key: string): T | undefined {
 	try {
@@ -144,7 +175,8 @@ export function noteServed(
 		providerID: route.providerID,
 		variant: route.variant,
 	};
-	const before = servedCache.get(familyKey);
+	const { served } = storeFor(db);
+	const before = served.get(familyKey);
 	// The hook pair stamps the same target twice a few milliseconds apart, and a
 	// chatty row would otherwise write on every request. The stored note is a
 	// clock though: skipping the write outright froze it at the first request, so
@@ -153,10 +185,10 @@ export function noteServed(
 	// Keeping the stored copy within `SERVED_REFRESH_MS` is enough for it to
 	// outlive the TTL while a request costs at most one write a minute.
 	if (sameServed(before, entry) && at - (before?.at ?? 0) < SERVED_REFRESH_MS) {
-		servedCache.set(familyKey, entry);
+		served.set(familyKey, entry);
 		return;
 	}
-	servedCache.set(familyKey, entry);
+	served.set(familyKey, entry);
 	writeRow(db, `${SERVED_PREFIX}${familyKey}`, JSON.stringify(entry));
 }
 
@@ -167,14 +199,15 @@ export function servedFor(
 	at: number = Date.now(),
 ): Served | undefined {
 	const key = `${SERVED_PREFIX}${familyKey}`;
-	const entry = servedCache.get(familyKey) ?? readJSON<Served>(db, key);
+	const { served } = storeFor(db);
+	const entry = served.get(familyKey) ?? readJSON<Served>(db, key);
 	if (!entry) return undefined;
 	if (at - entry.at > SERVED_TTL_MS) {
-		servedCache.delete(familyKey);
+		served.delete(familyKey);
 		deleteRow(db, key);
 		return undefined;
 	}
-	servedCache.set(familyKey, entry);
+	served.set(familyKey, entry);
 	return entry;
 }
 
@@ -192,6 +225,7 @@ export function servedEntries(
 	at: number = Date.now(),
 ): Array<Served & { familyKey: string }> {
 	const rows = new Map<string, Served>();
+	const { served } = storeFor(db);
 	try {
 		const stored = db
 			.query<{ key: string; value: string }, [string]>(
@@ -210,12 +244,12 @@ export function servedEntries(
 	}
 	// A note written in this run is newer than the stored one until the store is
 	// refreshed, so the cache wins when it has something to say.
-	for (const [familyKey, entry] of servedCache) rows.set(familyKey, entry);
+	for (const [familyKey, entry] of served) rows.set(familyKey, entry);
 
 	const live: Array<Served & { familyKey: string }> = [];
 	for (const [familyKey, entry] of rows) {
 		if (at - entry.at > SERVED_TTL_MS) {
-			servedCache.delete(familyKey);
+			served.delete(familyKey);
 			deleteRow(db, `${SERVED_PREFIX}${familyKey}`);
 			continue;
 		}
@@ -237,12 +271,13 @@ export function noteSessionTokens(
 ) {
 	if (!Number.isFinite(value) || value <= 0) return;
 	const entry: Measured = { at, value: Math.round(value) };
-	const before = tokensCache.get(sessionID);
+	const { tokens } = storeFor(db);
+	const before = tokens.get(sessionID);
 	if (before && before.value === entry.value) {
-		tokensCache.set(sessionID, entry);
+		tokens.set(sessionID, entry);
 		return;
 	}
-	tokensCache.set(sessionID, entry);
+	tokens.set(sessionID, entry);
 	writeRow(db, `${TOKENS_PREFIX}${sessionID}`, JSON.stringify(entry));
 }
 
@@ -252,16 +287,17 @@ export function sessionTokens(
 	_at: number = Date.now(),
 ): number | undefined {
 	const key = `${TOKENS_PREFIX}${sessionID}`;
-	const entry = tokensCache.get(sessionID) ?? readJSON<Measured>(db, key);
+	const { tokens } = storeFor(db);
+	const entry = tokens.get(sessionID) ?? readJSON<Measured>(db, key);
 	if (!entry) return undefined;
 	// The figure has no clock: it describes what the conversation holds, and it
 	// is cleared by compaction or replaced by the next step that ends.
-	tokensCache.set(sessionID, entry);
+	tokens.set(sessionID, entry);
 	return entry.value;
 }
 
 export function forgetSessionTokens(db: Database, sessionID: string) {
-	tokensCache.delete(sessionID);
+	storeFor(db).tokens.delete(sessionID);
 	deleteRow(db, `${TOKENS_PREFIX}${sessionID}`);
 }
 
@@ -280,13 +316,14 @@ export function noteSessionRow(
 	at: number = Date.now(),
 ) {
 	const key = `${ROWS_PREFIX}${sessionID}`;
-	const existing = rowsCache.get(sessionID) ?? readJSON<SessionRow[]>(db, key);
+	const { rows } = storeFor(db);
+	const existing = rows.get(sessionID) ?? readJSON<SessionRow[]>(db, key);
 	const next = (existing ?? []).filter(
 		(entry) => entry.familyKey !== row.familyKey,
 	);
 	const entry: SessionRow = { ...row, at };
 	next.push(entry);
-	rowsCache.set(sessionID, next);
+	rows.set(sessionID, next);
 	writeRow(db, key, JSON.stringify(next));
 }
 
@@ -298,19 +335,20 @@ export function sessionRows(
 	ttlMs: number = SERVED_TTL_MS,
 ): SessionRow[] {
 	const key = `${ROWS_PREFIX}${sessionID}`;
-	const stored = rowsCache.get(sessionID) ?? readJSON<SessionRow[]>(db, key);
+	const { rows } = storeFor(db);
+	const stored = rows.get(sessionID) ?? readJSON<SessionRow[]>(db, key);
 	if (!stored) return [];
 	const live = stored.filter((entry) => at - (entry.at ?? 0) <= ttlMs);
 	if (live.length === stored.length) {
-		rowsCache.set(sessionID, stored);
+		rows.set(sessionID, stored);
 		return live;
 	}
 	if (live.length === 0) {
-		rowsCache.delete(sessionID);
+		rows.delete(sessionID);
 		deleteRow(db, key);
 		return [];
 	}
-	rowsCache.set(sessionID, live);
+	rows.set(sessionID, live);
 	writeRow(db, key, JSON.stringify(live));
 	return live;
 }
@@ -321,7 +359,9 @@ export function sessionRows(
  * already starts empty.
  */
 export function resetRouteMemory() {
-	servedCache.clear();
-	tokensCache.clear();
-	rowsCache.clear();
+	for (const store of everyStore) {
+		store.rows.clear();
+		store.served.clear();
+		store.tokens.clear();
+	}
 }
