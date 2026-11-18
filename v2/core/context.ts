@@ -486,6 +486,7 @@ export function cutFor(
 	limitText: string,
 	bufferText: string,
 	enforcement: string,
+	realContext?: number,
 ): number {
 	const limit = parseLimit(limitText);
 	if (!limit.ok) return 0;
@@ -494,6 +495,10 @@ export function cutFor(
 		buffer: room.ok ? room.size : undefined,
 		bufferEnforcement: enforcement === "necessary" ? "necessary" : "always",
 		globalLimit: limit.size,
+		// The model being read for. A window below the limit is the outer bound
+		// the cut can land on, so a number that ignored it would promise room the
+		// model does not have.
+		realContext,
 	});
 }
 

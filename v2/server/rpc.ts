@@ -13,7 +13,9 @@ import { getBalancingEnabled } from "../core/priority";
 import { getRebalanceAuto, readRebalance } from "../core/rebalance";
 import { Balancer } from "../rpc";
 import { listChainRows } from "./chain-actions";
+import { nextRebalanceAt } from "./hooks";
 import { clearLog, readLog } from "./log";
+import { servedEntries } from "./route-memory";
 import {
 	writeBalancing,
 	writeBufferEnforcement,
@@ -67,7 +69,10 @@ export async function registerBalancerRpc({
 		},
 
 		chainModels: async (input) => {
-			const { providerID } = input as { providerID: string };
+			const { providerID, package: wire } = input as {
+				providerID: string;
+				package?: string;
+			};
 			const list = await ctx.model.list();
 			return {
 				models: list.data
@@ -76,7 +81,11 @@ export async function registerBalancerRpc({
 							model.providerID === providerID &&
 							(!model.type || model.type === "chat") &&
 							model.enabled !== false &&
-							typeof model.settings?.baseURL === "string",
+							typeof model.settings?.baseURL === "string" &&
+							// A row speaks one wire format; a model from another
+							// would be refused when it was added, so it must not be
+							// offered in the first place.
+							(wire === undefined || (model.package ?? "") === wire),
 					)
 					.map((model) => ({
 						modelID: model.modelID,
@@ -124,15 +133,42 @@ export async function registerBalancerRpc({
 
 		contextLimit: async () => ({ value: readLimit(db) ?? "" }),
 
+		// Which rows are being served right now, and by what. Read from the same
+		// notes the chain rows use, so the panel and this answer cannot disagree;
+		// more than one row at once is normal when a model split across providers
+		// after a limit.
+		inUse: async () => {
+			const rows = await listChainRows(ctx, db);
+			const byKey = new Map(rows.map((row) => [row.key, row]));
+			return {
+				entries: servedEntries(db).map((entry) => ({
+					agent: entry.agent ?? "",
+					alias: entry.alias ?? "",
+					applied: entry.applied ?? "",
+					familyKey: entry.familyKey,
+					label: byKey.get(entry.familyKey)?.label ?? entry.familyKey,
+					modelID: entry.modelID,
+					providerID: entry.providerID,
+					variant: entry.variant ?? "",
+				})),
+			};
+		},
+
 		list: async (input) => {
 			const { providerID } = (input ?? {}) as { providerID?: string };
 			const accounts = providerID
 				? listAccounts(db, providerID)
 				: listAccounts(db);
-			// Exactly one account is "in use": the one that served the most
-			// recent request. A limited or disabled account is never also
-			// reported as the active default, which reads as a contradiction.
+			// Several credentials can be in use at once: each model row is served
+			// by whichever target answered it, so two rows on two providers are
+			// two credentials doing work. The global most-recent credential is
+			// the fallback for a provider none of the row notes names.
 			const used = mostRecentlyUsed(db);
+			const serving = new Set(
+				servedEntries(db).map(
+					(entry) => `${entry.providerID}\u0000${entry.alias ?? ""}`,
+				),
+			);
 			return {
 				accounts: accounts.map((account) => {
 					// A park is cleared by the next attempt, so any park at all
@@ -151,8 +187,9 @@ export async function registerBalancerRpc({
 						failures: account.failures,
 						inUse:
 							!account.disabled &&
-							used?.providerID === account.providerID &&
-							used.alias === account.alias,
+							(serving.has(`${account.providerID}\u0000${account.alias}`) ||
+								(used?.providerID === account.providerID &&
+									used.alias === account.alias)),
 						lastUsedAt: account.lastUsedAt ?? 0,
 						limited,
 						limitedReason: limited
@@ -219,6 +256,10 @@ export async function registerBalancerRpc({
 			// it after. The length is reported even when the switch is off, so the
 			// field keeps showing what turning the switch back on would restore.
 			auto: getRebalanceAuto(db),
+			// When the client's balance next lapses, in ms, or 0 when nothing is
+			// counting down. The panel shows it as "(in 4h 12m)", which is the
+			// question the field is actually asking.
+			nextAt: nextRebalanceAt(db) ?? 0,
 			// As typed, empty when it has never been set: the field's placeholder
 			// then shows the built-in default rather than pretending it was typed.
 			value: readRebalance(db) ?? "",

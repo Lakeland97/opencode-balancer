@@ -200,6 +200,74 @@ describe("catalog rows", () => {
 		expect(family?.targets[0]?.freeVariant?.context).toBe(200_000);
 	});
 
+	test("two spellings of one version share a row", async () => {
+		const db = freshDb();
+		const catalog = await loadCatalog(
+			ctxWith([
+				model("p1", "claude-fable-5-2", "Claude Fable 5.2"),
+				// cline-pass and open-design spell it with a dot; the picker showed
+				// both as `Claude Fable 5.2`, and the model could not fail over
+				// between the two halves of itself.
+				model("p2", "anthropic/claude-fable-5.2", "Claude Fable 5.2"),
+			]),
+			db,
+		);
+
+		const rows = catalog.families.filter((family) =>
+			family.name.startsWith("Claude Fable 5.2"),
+		);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.targets.map((route) => route.providerID).sort()).toEqual([
+			"p1",
+			"p2",
+		]);
+	});
+
+	test("a label shared across id spellings is one row", async () => {
+		const db = freshDb();
+		const catalog = await loadCatalog(
+			ctxWith([
+				// The same model, one provider pinning the version the other
+				// leaves off. Both call it `Muse Wonder`, so two rows gave the
+				// picker two identical entries and neither could fail over.
+				model("p1", "meta/muse-wonder-1.0", "Muse Wonder"),
+				model("p2", "muse-wonder", "Muse Wonder"),
+			]),
+			db,
+		);
+
+		const rows = catalog.families.filter((family) =>
+			family.name.startsWith("Muse Wonder"),
+		);
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.targets.map((route) => route.providerID).sort()).toEqual([
+			"p1",
+			"p2",
+		]);
+	});
+
+	test("a price marker is never merged away by a matching label", async () => {
+		const db = freshDb();
+		const catalog = await loadCatalog(
+			ctxWith([
+				// `hy3-paid` and `hy3` may well be the same weights, but one says
+				// it bills and the other does not. Merging them would let a free
+				// row spend, so they stay apart and are told apart by their labels
+				// instead of both reading `Hy3`.
+				model("p1", "hy3", "Hy3"),
+				model("p2", "tencent/hy3-paid", "Hy3"),
+			]),
+			db,
+		);
+
+		const rows = catalog.families.filter((family) =>
+			family.name.startsWith("Hy3"),
+		);
+		expect(rows).toHaveLength(2);
+		expect(new Set(rows.map((row) => row.name)).size).toBe(2);
+		expect(rows.map((row) => row.name).sort()).toEqual(["Hy3", "Hy3 (paid)"]);
+	});
+
 	test("a stored target keeps its own baseURL", async () => {
 		const db = freshDb();
 		saveChain(db, {
@@ -268,6 +336,67 @@ describe("provider registration", () => {
 		expect(Array.isArray(row?.cost)).toBe(true);
 	});
 
+	test("a row declares one thinking ladder merged from every target", async () => {
+		const db = freshDb();
+		const withVariants = (
+			providerID: string,
+			variants: { id: string; settings: Record<string, string> }[],
+		) => ({
+			...model(providerID, "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+				context: 200_000,
+			}),
+			variants,
+		});
+
+		let added: { id?: string; variants?: { id: string }[] }[] = [];
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						// The two shapes the real connectors return: three rungs
+						// with a middle, four with a `none` and a `max`.
+						withVariants("p1", [
+							{ id: "low", settings: { reasoningEffort: "low" } },
+							{ id: "medium", settings: { reasoningEffort: "medium" } },
+							{ id: "high", settings: { reasoningEffort: "high" } },
+						]),
+						withVariants("p2", [
+							{ id: "none", settings: { reasoningEffort: "none" } },
+							{ id: "low", settings: { reasoningEffort: "low" } },
+							{ id: "high", settings: { reasoningEffort: "high" } },
+							{ id: "max", settings: { reasoningEffort: "max" } },
+						]),
+					],
+				}),
+			},
+			provider: {
+				transform: async (
+					fn: (editor: { add: (value: { models: unknown[] }) => void }) => void,
+				) => {
+					fn({
+						add: (value) => {
+							added = value.models as typeof added;
+						},
+					});
+				},
+			},
+		} as never;
+
+		await registerBalancerProvider({ ctx, db });
+
+		const row = added.find((entry) => entry.id === "deepseek-v4.1-flash");
+		// A picker offering only one target's names would hide levels the other
+		// target has and offer ones it does not; the row offers the union, and
+		// routing translates per target.
+		expect(row?.variants?.map((variant) => variant.id)).toEqual([
+			"none",
+			"low",
+			"medium",
+			"high",
+			"max",
+		]);
+	});
+
 	test("every declared model claims the same 1M window", async () => {
 		const db = freshDb();
 		saveChain(db, {
@@ -299,11 +428,30 @@ describe("provider registration", () => {
 			output: 32_000,
 		});
 	});
+
+	test("a declared row always names its type and family", async () => {
+		const db = freshDb();
+		// A connector that leaves `type` and `family` off its record: the host
+		// keeps such a model out of the picker, which is how the open-design
+		// rows vanished while the provider was serving.
+		const bare = twoConnectors.map((entry) => {
+			const { type: _type, ...rest } = entry as Record<string, unknown>;
+			return { ...rest, family: undefined };
+		});
+		const host = hostingCtx(bare);
+		await registerBalancerProvider({ ctx: host.ctx, db });
+
+		const row = host.declared("deepseek-v4.1-flash");
+		expect(row?.type).toBe("chat");
+		expect(row?.family).toBe("deepseek-v4.1-flash");
+	});
 });
 
 type DeclaredModel = {
+	family?: string;
 	id: string;
 	limit?: { context: number; output?: number };
+	type?: string;
 };
 
 /** A host that keeps the provider transform and replays it on reload. */
@@ -331,6 +479,7 @@ function hostingCtx(data: unknown[]) {
 	} as never;
 	return {
 		ctx,
+		declared: (id: string) => models.find((entry) => entry.id === id),
 		declaredOf: (id: string) => models.find((entry) => entry.id === id)?.limit,
 	};
 }

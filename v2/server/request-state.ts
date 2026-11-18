@@ -50,6 +50,17 @@ const INVALID_REQUEST_TEXT =
 	/model_not_found|model unavailable|model not found|invalid[-_ ]?request|invalid prompt|validation ?exception|unsupported (?:model|operation|parameter)|does not support|no such model/i;
 
 /**
+ * What a provider says when the credential is healthy but the *model* is not on
+ * the plan it holds, or the request kind is not offered for it. Every other
+ * model on that provider still works, so this must neither park the credential
+ * nor be reported as the account's failure.
+ */
+const MODEL_REFUSAL_TEXT =
+	/tier_[a-z_]+|not[-_ ]entitled|model[-_ ]not[-_ ]found|model[-_ ]not[-_ ]available|model not found|model unavailable|no such model|invalid model|unknown model|model (?:is )?not supported|unsupported model|does not support (?:this|the) (?:model|request|endpoint|api)/i;
+
+/** Text that means the user stopped the turn by hand. */
+
+/**
  * What a provider says when it has stopped serving this account. The host turns
  * several of these into a typed error with no HTTP status at all — OpenCode Go's
  * "monthly usage limit reached" and "Insufficient balance" are the ones that
@@ -69,7 +80,7 @@ const RETRYABLE_TEXT =
 const RETRYABLE_TAG =
 	/quota|rate.?limit|authentication|providerinternal|unknownprovider|transport|timeout/i;
 
-/** Everything the error says about itself, as one haystack. */
+/** Every word a failure says about itself, as one haystack. */
 function errorText(error: unknown): string {
 	if (!error || typeof error !== "object") return "";
 	const value = error as {
@@ -88,6 +99,64 @@ function errorText(error: unknown): string {
 	]
 		.filter((part): part is string => typeof part === "string" && part !== "")
 		.join(" ");
+}
+
+/**
+ * Whether this failure is the request merely taking too long.
+ *
+ * A timeout says nothing about the account: the same key answers the next call.
+ * Parking on it took a healthy provider out of rotation for a minute and made a
+ * slow model look limited, so the park is skipped and only this row's trail
+ * moves on. A timeout outranks the user-abort wording, because the host describes
+ * a stream it cut for taking too long as an abort.
+ */
+export function isTimeoutFailure(input: {
+	status?: number;
+	error?: unknown;
+}): boolean {
+	const text = errorText(input.error);
+	if (text === "") return false;
+	if (OVERFLOW_TEXT.test(text) || REFUSAL_TEXT.test(text)) return false;
+	return TIMEOUT_TEXT.test(text);
+}
+
+/**
+ * Whether this failure is the conversation outgrowing the model's window.
+ *
+ * Distinct from every other refusal because no target can answer it: the same
+ * text is what a provider says when the prompt is larger than it can hold. The
+ * only answer is a smaller conversation, so the caller compacts rather than
+ * failing over or blaming the account.
+ */
+export function isOverflowFailure(input: {
+	status?: number;
+	error?: unknown;
+}): boolean {
+	const text = errorText(input.error);
+	return text !== "" && OVERFLOW_TEXT.test(text);
+}
+
+/**
+ * Whether this failure is about the model rather than the account.
+ *
+ * A plan that does not include the model, a model the provider has retired, or a
+ * request kind it does not offer for it: all of those refuse every credential of
+ * that provider in the same words, and none of them says the key is spent. The
+ * caller marks the `(provider, model)` pair instead of parking the account —
+ * parking a healthy key over one model's entitlement is what took a whole
+ * provider out of rotation while its other models were working.
+ */
+export function isModelRefusal(input: {
+	status?: number;
+	error?: unknown;
+}): boolean {
+	const text = errorText(input.error);
+	if (text === "") return false;
+	// A conversation that outgrew the window, or content the provider objects to,
+	// is not a statement about the model's availability.
+	if (OVERFLOW_TEXT.test(text) || REFUSAL_TEXT.test(text)) return false;
+	if (TIMEOUT_TEXT.test(text) || ABORT_TEXT.test(text)) return false;
+	return MODEL_REFUSAL_TEXT.test(text);
 }
 
 /**

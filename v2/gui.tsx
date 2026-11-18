@@ -11,8 +11,16 @@ import {
 	Plugin,
 	TitlebarItem,
 } from "@opencode/plugin/gui";
-import { createSignal, For, onCleanup, onMount, Show } from "solid-js";
+import {
+	createMemo,
+	createSignal,
+	For,
+	onCleanup,
+	onMount,
+	Show,
+} from "solid-js";
 import { copy } from "./copy";
+import { mergeChainGroups, mergeChainRows } from "./core/chain-view";
 import {
 	bufferTokens,
 	cutFor,
@@ -21,7 +29,11 @@ import {
 } from "./core/context";
 import { credentialNote, formatAttempt, routeMarkers } from "./core/format";
 import { groupByBrand } from "./core/models";
-import { DEFAULT_REBALANCE_MS, formatDuration } from "./core/rebalance";
+import {
+	DEFAULT_REBALANCE_MS,
+	formatDuration,
+	formatRemaining,
+} from "./core/rebalance";
 import { Balancer } from "./rpc";
 import type {
 	Account,
@@ -29,6 +41,8 @@ import type {
 	Chain,
 	Chains,
 	ContextState,
+	InUse,
+	InUseEntry,
 	Listed,
 	LogEntry,
 	Models,
@@ -66,6 +80,30 @@ function builtAt() {
 		: "dev";
 }
 
+/**
+ * Whether two provider reads are the same list.
+ *
+ * The panel polls this list every couple of seconds so a credential imported or
+ * rotated while it is open shows up without a click. Re-rendering an unchanged
+ * list would restart every row on the poll, so the poll only writes when
+ * something actually differs.
+ */
+function sameProviders(left: readonly Provider[], right: readonly Provider[]) {
+	if (left.length !== right.length) return false;
+	return left.every((entry, index) => {
+		const other = right[index];
+		return (
+			other !== undefined &&
+			entry.alias === other.alias &&
+			entry.enabled === other.enabled &&
+			entry.freeOnly === other.freeOnly &&
+			entry.name === other.name &&
+			entry.position === other.position &&
+			entry.providerID === other.providerID
+		);
+	});
+}
+
 export default Plugin.define({
 	i18n: {
 		en: { ...copy },
@@ -91,9 +129,47 @@ export default Plugin.define({
 		const [rebalance, setRebalance] = createSignal("");
 		const [rebalanceAuto, setRebalanceAuto] = createSignal(true);
 		const [rebalanceDraft, setRebalanceDraft] = createSignal("");
+		// When the client's balance next lapses, in ms; 0 when nothing is
+		// counting down. Read from the server, which is where the trails live.
+		const [rebalanceNextAt, setRebalanceNextAt] = createSignal(0);
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
+		// A row's limit as it is being typed. Kept apart from the row because the
+		// panel re-reads rows on a timer: the poll must be able to refresh targets
+		// and markers without reaching into a field somebody is typing in.
+		const [limitDrafts, setLimitDrafts] = createSignal<Record<string, string>>(
+			{},
+		);
+
+		/**
+		 * Fold freshly read rows into what is on screen.
+		 *
+		 * A whole replacement would drop a limit mid-edit, which is why the limit
+		 * lives in its own draft; everything else on a row is the server's to
+		 * decide. Rows are matched by key, so one that appeared or vanished since
+		 * the last read is picked up instead of leaving the panel showing a
+		 * snapshot taken while the catalogue was still being assembled.
+		 */
+		const mergeChains = (rows: Chain[]) => {
+			const drafts = limitDrafts();
+			const merged =
+				Object.keys(drafts).length === 0
+					? rows
+					: rows.map((row) =>
+							drafts[row.key] === undefined
+								? row
+								: { ...row, limit: drafts[row.key] },
+						);
+			// Kept by identity where nothing changed: a poll that rebuilt every
+			// row closed the model picker the moment it was opened, because the
+			// `<select>` left the document under the pointer.
+			setChains(mergeChainRows(chains(), merged));
+		};
 		const [providers, setProviders] = createSignal<Provider[]>([]);
+		// What is being served right now, one entry per row. More than one is
+		// normal: a model split across providers, or two conversations on
+		// different models, both show here rather than as a single "in use".
+		const [inUse, setInUse] = createSignal<InUseEntry[]>([]);
 		// The row whose add form is open, plus what the user has picked in it.
 		const [adding, setAdding] = createSignal("");
 		// Which credential's note is open, as `provider/alias`: one at a time, so
@@ -123,7 +199,7 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order, settings, room, idle, log] =
+				const [status, list, rows, order, settings, room, idle, log, serving] =
 					await Promise.all([
 						rpc.status({}),
 						rpc.list({}),
@@ -133,11 +209,16 @@ export default Plugin.define({
 						rpc.contextBuffer({}),
 						rpc.rebalance({}),
 						rpc.log({}),
+						rpc.inUse({}),
 					]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
-				setChains([...(rows as Chains).rows]);
+				// A full read must not rebuild a row that says the same thing: the
+				// add form and the pickers live inside rows.
+				setChains(mergeChainRows(chains(), [...(rows as Chains).rows]));
+				setInUse([...(serving as InUse).entries]);
+				setLimitDrafts({});
 				setProviders([...(order as Providers).entries]);
 				setGlobalLimit((settings as ContextState).value);
 				setGlobalLimitDraft((settings as ContextState).value);
@@ -151,6 +232,7 @@ export default Plugin.define({
 				setRebalance((idle as RebalanceState).value);
 				setRebalanceAuto((idle as RebalanceState).auto);
 				setRebalanceDraft((idle as RebalanceState).value);
+				setRebalanceNextAt((idle as RebalanceState).nextAt);
 				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
@@ -158,14 +240,38 @@ export default Plugin.define({
 		};
 
 		// "in use" is the account the router is pointed at right now, and the log
-		// grows as requests move and fail over. Only those two are re-read, so a
-		// poll cannot overwrite a field being typed into.
+		// grows as requests move and fail over.
+		//
+		// The rows are re-read too, merged rather than replaced: they are what says
+		// which model served and where, and a panel mounted while the catalogue was
+		// still being built otherwise shows its first snapshot until somebody
+		// clicks. The merge exists so a poll cannot clobber a field being typed
+		// into: the limit belongs to its own draft, and every other field here
+		// comes from the server.
 		const refreshInUse = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [list, log] = await Promise.all([rpc.list({}), rpc.log({})]);
+				const [list, log, rows, order, serving, idle] = await Promise.all([
+					rpc.list({}),
+					rpc.log({}),
+					rpc.chains({}),
+					rpc.priority({}),
+					rpc.inUse({}),
+					rpc.rebalance({}),
+				]);
 				setAccounts([...(list as Listed).accounts]);
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
+				mergeChains((rows as Chains).rows);
+				setInUse([...(serving as InUse).entries]);
+				setRebalanceNextAt((idle as RebalanceState).nextAt);
+				// The provider list is where a credential appears, and a sync that
+				// imports one runs after the panel mounted. Reading it only on the
+				// full refresh left a new provider invisible until somebody
+				// clicked, and a credential the host had rotated invisible until
+				// then too. The comparison keeps a two-second poll from
+				// re-rendering a list that has not changed.
+				const entries = [...(order as Providers).entries];
+				if (!sameProviders(providers(), entries)) setProviders(entries);
 			} catch {
 				// A poll that fails leaves the last good answer on screen.
 			}
@@ -189,10 +295,33 @@ export default Plugin.define({
 			void run(() => rpc().setContextLimit({ value: globalLimitDraft() }));
 		};
 
-		const cutTokens = () =>
-			cutFor(globalLimitDraft(), bufferDraft(), bufferEnforce());
+		/**
+		 * The real window of the model the routed session is on, when that model
+		 * is a balancer row.
+		 *
+		 * Every row declares 1M to the host so the balancer can compact on its own
+		 * schedule, but the request still lands in a provider's real window. A cut
+		 * readout that stops at the limit would promise room the serving model
+		 * does not have, which is exactly the overflow the buffer exists to
+		 * prevent.
+		 */
+		const currentRowContext = () => {
+			const model = ctx.screen.current()?.composer.model();
+			if (model?.providerID !== "balancer") return undefined;
+			const row = chains().find((chain) => chain.key === model.modelID);
+			return row && row.context > 0 ? row.context : undefined;
+		};
 
-		const storedCut = () => cutFor(globalLimit(), buffer(), bufferEnforce());
+		const cutTokens = () =>
+			cutFor(
+				globalLimitDraft(),
+				bufferDraft(),
+				bufferEnforce(),
+				currentRowContext(),
+			);
+
+		const storedCut = () =>
+			cutFor(globalLimit(), buffer(), bufferEnforce(), currentRowContext());
 
 		const commitBuffer = () => {
 			if (bufferDraft() === buffer()) return;
@@ -211,25 +340,32 @@ export default Plugin.define({
 		};
 
 		// The picker's model list comes from the server, which only offers models
-		// the provider can actually route.
-		const chooseProvider = async (providerID: string) => {
+		// the provider can actually route — and, when the row's wire format is
+		// known, only the ones that format can carry.
+		const chooseProvider = async (providerID: string, wire?: string) => {
 			setAddProvider(providerID);
 			setAddModels([]);
 			if (!providerID) return;
 			try {
-				const reply = (await rpc().chainModels({ providerID })) as Models;
+				const reply = (await rpc().chainModels({
+					package: wire,
+					providerID,
+				})) as Models;
 				setAddModels(sortByName(reply.models));
 			} catch (error) {
 				setMessage(describe(error));
 			}
 		};
 
-		const chooseCreateProvider = async (providerID: string) => {
+		const chooseCreateProvider = async (providerID: string, wire?: string) => {
 			setCreateProvider(providerID);
 			setCreateModels([]);
 			if (!providerID) return;
 			try {
-				const reply = (await rpc().chainModels({ providerID })) as Models;
+				const reply = (await rpc().chainModels({
+					package: wire,
+					providerID,
+				})) as Models;
 				setCreateModels(sortByName(reply.models));
 			} catch (error) {
 				setMessage(describe(error));
@@ -288,7 +424,14 @@ export default Plugin.define({
 
 		// Rows gather under the brand their label starts with, so Claude and
 		// DeepSeek rows sit together instead of interleaving alphabetically.
-		const groupedChains = () => groupByBrand(visibleChains());
+		// Brand headers are new objects on every read; handing back the previous
+		// ones when nothing moved keeps the rows inside them in the document,
+		// which is what an open picker needs.
+		let lastGroups: Array<{ brand?: string; rows: Chain[] }> = [];
+		const groupedChains = createMemo(() => {
+			lastGroups = mergeChainGroups(lastGroups, groupByBrand(visibleChains()));
+			return lastGroups;
+		});
 
 		const isGroupCollapsed = (name: string) =>
 			collapsedGroups()[name] !== false;
@@ -681,6 +824,18 @@ export default Plugin.define({
 							title="how long a session may sit idle before its failover trail is dropped: 90m, 5h, 1d 2h; empty keeps the built-in 5h. 0 turns the switch off, and any length typed here turns it back on."
 							value={rebalanceDraft()}
 						/>
+						{/* When the balance actually lapses, which is the question the
+						    field is asking: the idle window measured from the last
+						    routed request. Nothing counting down means no request
+						    has been routed yet, or the switch is off. */}
+						<Show when={rebalanceNextAt() > Date.now()}>
+							<span
+								style={{ opacity: 0.7 }}
+								title="how long until the balance starts over from the head of the order, measured from the last routed request"
+							>
+								{`(in ${formatRemaining(rebalanceNextAt() - Date.now())})`}
+							</span>
+						</Show>
 					</div>
 
 					<div style={divider} />
@@ -749,7 +904,7 @@ export default Plugin.define({
 							>
 								<span
 									style={{ opacity: 0.7 }}
-									title="where the cut actually lands: the limit, less the buffer where the buffer is enforced. A model whose real window is smaller is cut below this, and one whose window is unknown is measured against the declared 1M."
+									title="where the cut actually lands: the limit, less the buffer where the buffer is enforced. Measured against the tightest window this row's targets report, so a model below the limit is cut at what it can actually hold; a row whose window is unknown is measured against the declared 1M."
 								>
 									{ctx.t("at")}
 								</span>
@@ -798,7 +953,50 @@ export default Plugin.define({
 						</span>
 					</div>
 
-					<Show when={message()}>
+					{/* The one place the panel speaks: an error when there is one,
+					    otherwise the model each row is being served on right now.
+					    Several lines mean the load is split — different models, or
+					    one model that moved after a provider was limited. */}
+					<Show
+						fallback={
+							<Show when={inUse().length > 0}>
+								<div
+									style={{
+										display: "flex",
+										"flex-direction": "column",
+										"font-family": "ui-monospace, monospace",
+										"font-size": "11px",
+										gap: "2px",
+										opacity: 0.7,
+									}}
+								>
+									<For each={inUse()}>
+										{(entry) => (
+											<span
+												title={[
+													`${entry.label} → ${entry.providerID}/${entry.alias || "?"}`,
+													`model ${entry.modelID}`,
+													entry.variant
+														? entry.variant === entry.applied || !entry.applied
+															? `level ${entry.variant}`
+															: `level ${entry.variant}, applied as ${entry.applied}`
+														: "",
+													entry.agent ? `agent ${entry.agent}` : "",
+												]
+													.filter(Boolean)
+													.join(" · ")}
+											>
+												{entry.agent || "?"} · {entry.providerID}/
+												{entry.modelID}
+												{entry.applied ? ` (${entry.applied})` : ""}
+											</span>
+										)}
+									</For>
+								</div>
+							</Show>
+						}
+						when={message()}
+					>
 						<div style={{ opacity: 0.7 }}>{message()}</div>
 					</Show>
 
@@ -1139,6 +1337,12 @@ export default Plugin.define({
 																		}),
 																	);
 																}}
+																onInput={(event) => {
+																	setLimitDrafts({
+																		...limitDrafts(),
+																		[chain.key]: event.currentTarget.value,
+																	});
+																}}
 																onKeyDown={(event) => {
 																	if (event.key === "Enter")
 																		event.currentTarget.blur();
@@ -1146,7 +1350,7 @@ export default Plugin.define({
 																placeholder={ctx.t("globalShare")}
 																style={{ width: "5em" }}
 																title={`this model's own limit: a size in thousands — 200 is two hundred thousand — or a share of its real window, 1% to ${MAX_PERCENT}%; empty follows the global limit`}
-																value={chain.limit}
+																value={limitDrafts()[chain.key] ?? chain.limit}
 															/>
 															<Show when={chain.stored}>
 																<button
@@ -1284,6 +1488,7 @@ export default Plugin.define({
 																					onChange={(event) =>
 																						void chooseProvider(
 																							event.currentTarget.value,
+																							chain.package,
 																						)
 																					}
 																					style={select}

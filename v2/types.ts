@@ -27,7 +27,12 @@ export type Listed = { accounts: Account[] };
 export type Reply = { ok: boolean; message: string };
 export type ContextState = { value: string };
 export type BufferState = { enforce: string; value: string };
-export type RebalanceState = { auto: boolean; value: string };
+export type RebalanceState = {
+	auto: boolean;
+	/** When the client's balance next lapses, in ms; 0 when nothing is counting down. */
+	nextAt: number;
+	value: string;
+};
 
 export type Target = {
 	modelID: string;
@@ -40,12 +45,38 @@ export type Chain = {
 	key: string;
 	label: string;
 	package: string;
+	/** The tightest real window this row's targets report; 0 when none does. */
+	context: number;
 	/** This model's own limit as typed, empty when it follows the global. */
 	limit: string;
 	stored: boolean;
 	targets: Target[];
 };
 export type Chains = { rows: Chain[] };
+/**
+ * One row currently being served: which provider, which model, and at what
+ * thinking level. More than one at a time is normal — a conversation split
+ * across models because a provider was unavailable shows as several entries.
+ */
+export type InUseEntry = {
+	alias: string;
+	/** The agent that made the call, e.g. `build`. Empty when it was not told. */
+	agent: string;
+	/** The level actually applied on the connector, empty when there is none. */
+	applied: string;
+	familyKey: string;
+	label: string;
+	/**
+	 * The connector's own model id — what was really called. Not the row's label
+	 * and not the id the host named: a routed row is a name this plugin invented,
+	 * and the provider only ever sees this one.
+	 */
+	modelID: string;
+	providerID: string;
+	/** The thinking level the request asked for, empty when it asked for none. */
+	variant: string;
+};
+export type InUse = { entries: InUseEntry[] };
 export type Provider = {
 	/** The credential's own name within the provider. */
 	alias: string;

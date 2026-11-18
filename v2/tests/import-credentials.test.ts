@@ -127,6 +127,39 @@ describe("importing OpenCode's credentials", () => {
 		expect(listAccounts(db, "opencode-go")).toHaveLength(1);
 	});
 
+	test("a replaced credential keeps its name instead of being numbered", async () => {
+		const db = freshDb();
+		const listing = (id: string) => ({
+			integrations: [
+				{
+					connections: [
+						{ id, label: "Open-Design", method: "key", type: "credential" },
+					],
+					id: "open-design",
+				},
+			],
+			resolved: { [id]: { key: `sk-${id}`, type: "key" } },
+		});
+
+		await syncAccounts(fakeContext(listing("cred_1")), db);
+		expect(listAccounts(db, "open-design").map((entry) => entry.alias)).toEqual(
+			["open-design"],
+		);
+
+		// The host rotates the credential: a new id, the same name. Importing
+		// before pruning saw the old row still holding that name and numbered the
+		// replacement, so the panel lost every marker keyed by the alias.
+		const result = await syncAccounts(fakeContext(listing("cred_2")), db);
+
+		expect(result).toEqual({ imported: 1, pruned: 1 });
+		expect(listAccounts(db, "open-design").map((entry) => entry.alias)).toEqual(
+			["open-design"],
+		);
+		expect(getAccount(db, "open-design", "open-design")?.auth).toEqual(
+			key("sk-cred_2"),
+		);
+	});
+
 	test("an environment connection is not an account", async () => {
 		const db = freshDb();
 		const ctx = fakeContext({
@@ -360,6 +393,49 @@ describe("importing OpenCode's credentials", () => {
 });
 
 describe("providers configured with their own key", () => {
+	test("a provider the config still declares keeps its credential when the host's list lags", async () => {
+		const db = freshDb();
+		const listing = fakeContext({
+			integrations: [
+				{
+					connections: [
+						{ id: "cred_1", label: "SayGM", method: "key", type: "credential" },
+					],
+					id: "saygm",
+				},
+			],
+			resolved: { cred_1: { key: "sk-saygm", type: "key" } },
+		});
+		await syncAccounts(listing, db);
+		expect(listAccounts(db, "saygm").map((entry) => entry.alias)).toEqual([
+			"saygm",
+		]);
+
+		// The provider needs only an environment variable to exist, which this
+		// process cannot turn into a key. The host resolves it later.
+		writeFileSync(
+			join(configHome, "opencode.json"),
+			JSON.stringify({
+				providers: {
+					saygm: {
+						env: ["SAYGM_API_KEY", "GM_API_KEY"],
+						name: "SayGM",
+						settings: { baseURL: "https://api.saygm.com/v1" },
+					},
+				},
+			}),
+		);
+
+		// A load is exactly when the host's credential list is incomplete. An
+		// empty listing here must not be read as "the key is gone".
+		const result = await syncAccounts(fakeContext({ integrations: [] }), db);
+
+		expect(result.pruned).toBe(0);
+		expect(listAccounts(db, "saygm").map((entry) => entry.alias)).toEqual([
+			"saygm",
+		]);
+	});
+
 	test("the key beside the provider name becomes an account, and leaves with it", async () => {
 		writeFileSync(
 			join(configHome, "opencode.json"),

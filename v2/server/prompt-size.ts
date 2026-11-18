@@ -63,6 +63,33 @@ function messageList(body: unknown): unknown[] {
 	return Array.isArray(messages) ? messages : [];
 }
 
+/**
+ * How large the prompt in this request is, in tokens.
+ *
+ * Routing has to know this before it picks a target: the host is told every
+ * balancer model holds 1M tokens, so it never trims the conversation itself, and
+ * a resumed session whose size the balancer never measured would be handed to a
+ * target that cannot hold it. The body being sent is the ground truth for the
+ * request in front of us, which is exactly what the choice needs.
+ *
+ * `content-length` answers without touching the stream; a transfer-encoded body
+ * is read instead. The ratio is the same rough 4 characters per token the host's
+ * own estimator uses, so the figure is comparable with every other size here.
+ */
+export async function promptTokensFrom(
+	request: Request,
+): Promise<number | undefined> {
+	const declared = Number(request.headers.get("content-length"));
+	if (Number.isFinite(declared) && declared > 0) {
+		return Math.round(declared / CHARS_PER_TOKEN);
+	}
+	try {
+		return Math.round((await request.clone().text()).length / CHARS_PER_TOKEN);
+	} catch {
+		return undefined;
+	}
+}
+
 /** A message's text, whether it is a string or the usual array of parts. */
 function messageText(content: unknown): string {
 	if (typeof content === "string") return content;

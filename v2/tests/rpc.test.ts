@@ -155,6 +155,7 @@ describe("chain rpc", () => {
 		const listed = (await rpc.chains({})) as {
 			rows: {
 				key: string;
+				context: number;
 				limit: string;
 				targets: unknown[];
 			}[];
@@ -163,9 +164,11 @@ describe("chain rpc", () => {
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(row).toBeDefined();
-		// The window is the same 1M declaration whatever the row holds, so a
-		// row has no window of its own to report; only the limits matter.
-		expect(row && "context" in row).toBe(false);
+		// The row declares 1M to the host so it can compact on its own schedule,
+		// but it reports the tightest window its targets actually hold: the panel
+		// clamps its cut readout to that, so a number promising more room than the
+		// serving model has is never shown.
+		expect(row?.context).toBe(1_000_000);
 		expect(row && "trip" in row).toBe(false);
 		expect(row?.targets.length).toBe(1);
 		// The limit belongs to the row, not to a credential.
@@ -177,12 +180,15 @@ describe("chain rpc", () => {
 			providerID: "p2",
 		});
 		const after = (await rpc.chains({})) as {
-			rows: { key: string; targets: unknown[] }[];
+			rows: { key: string; context: number; targets: unknown[] }[];
 		};
 		const mixed = after.rows.find(
 			(entry) => entry.key === "deepseek-v4.1-flash",
 		);
 		expect(mixed?.targets.length).toBe(2);
+		// A second target with a smaller window tightens what the row can be sent
+		// into, so the reported window follows the narrowest one, not the first.
+		expect(mixed?.context).toBe(200_000);
 	});
 
 	test("chainAdd appends a target and refuses a foreign wire format", async () => {
@@ -459,6 +465,43 @@ describe("chain rpc", () => {
 			"mimo-v2.6-flash",
 		]);
 	});
+
+	test("chainModels offers only the wire format the row speaks", async () => {
+		const db = freshDb();
+		const rpc = await handlers(db, [
+			...connectors,
+			// commandcode really does declare one model twice, once per wire
+			// format. A row in the default format must not be offered the other,
+			// because adding it would be refused after the choice was made.
+			model("p2", "claude-fable-5-1", 200_000, PACKAGE, "Claude Fable 5.1"),
+			model(
+				"p2",
+				"claude-fable-5-1",
+				200_000,
+				"@opencode/ai/providers/anthropic-compatible",
+				"Claude Fable 5.1",
+			),
+		]);
+
+		const own = (await rpc.chainModels({
+			package: PACKAGE,
+			providerID: "p2",
+		})) as { models: { modelID: string }[] };
+		expect(own.models.map((entry) => entry.modelID).sort()).toEqual([
+			"claude-fable-5-1",
+			"mimo-v2.6-flash",
+		]);
+
+		// The same provider read for the other format returns that format's
+		// spelling of the same id and nothing from this one.
+		const other = (await rpc.chainModels({
+			package: "@opencode/ai/providers/anthropic-compatible",
+			providerID: "p2",
+		})) as { models: { modelID: string }[] };
+		expect(other.models.map((entry) => entry.modelID)).toEqual([
+			"claude-fable-5-1",
+		]);
+	});
 });
 
 describe("log rpc", () => {
@@ -667,16 +710,16 @@ describe("rebalance rpc", () => {
 		const rpc = await handlers(freshDb());
 		// On until it is turned off, so an install that never touched the field
 		// keeps the behaviour it had before the switch existed.
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "" });
 
 		const set = (await rpc.setRebalance({ value: "2h" })) as { ok: boolean };
 		expect(set.ok).toBe(true);
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "2h" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "2h" });
 
 		// Clearing the field puts the built-in window back, so the panel's
 		// placeholder is what describes the behaviour again.
 		await rpc.setRebalance({ value: "" });
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "" });
 	});
 
 	test("the switch keeps the length, so turning it back on restores it", async () => {
@@ -691,7 +734,10 @@ describe("rebalance rpc", () => {
 		expect(off.message).toContain("change to the order");
 		// The length is still reported with the switch off: that is what the
 		// field shows and what turning the switch back on would restore.
-		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "90m" });
+		expect(await rpc.rebalance({})).toMatchObject({
+			auto: false,
+			value: "90m",
+		});
 
 		const on = (await rpc.setRebalanceAuto({ enabled: true })) as {
 			message: string;
@@ -699,20 +745,20 @@ describe("rebalance rpc", () => {
 		};
 		expect(on.ok).toBe(true);
 		expect(on.message).toContain("90m");
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "90m" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "90m" });
 	});
 
 	test("typing a length and the switch always agree, both ways", async () => {
 		const rpc = await handlers(freshDb());
 		await rpc.setRebalance({ value: "0" });
-		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "0" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: false, value: "0" });
 
 		// A positive length is the window being switched back on: the field and
 		// the switch must not be able to say different things about the same row.
 		for (const value of ["2h", "never", "off", "90m"]) {
 			await rpc.setRebalance({ value });
 			const shut = value === "never" || value === "off";
-			expect(await rpc.rebalance({})).toEqual({
+			expect(await rpc.rebalance({})).toMatchObject({
 				auto: !shut,
 				value,
 			});
@@ -731,7 +777,7 @@ describe("rebalance rpc", () => {
 		};
 		expect(on.ok).toBe(true);
 		expect(on.message).toContain("5h");
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "" });
 	});
 
 	test("what is not a duration is refused and changes nothing", async () => {
@@ -746,7 +792,7 @@ describe("rebalance rpc", () => {
 			expect(refused.ok).toBe(false);
 			expect(refused.message.length).toBeGreaterThan(0);
 		}
-		expect(await rpc.rebalance({})).toEqual({ auto: true, value: "90m" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: true, value: "90m" });
 	});
 
 	test("switching the window off says so, in words that match", async () => {
@@ -757,6 +803,6 @@ describe("rebalance rpc", () => {
 		};
 		expect(off.ok).toBe(true);
 		expect(off.message).toContain("change to the order");
-		expect(await rpc.rebalance({})).toEqual({ auto: false, value: "0" });
+		expect(await rpc.rebalance({})).toMatchObject({ auto: false, value: "0" });
 	});
 });

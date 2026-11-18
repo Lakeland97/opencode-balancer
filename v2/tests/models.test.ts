@@ -24,9 +24,30 @@ describe("model names", () => {
 	test("family drops a build tag but keeps a version", () => {
 		expect(modelFamily("deepseek-v4.1-flash-1017")).toBe("deepseek-v4.1-flash");
 		expect(modelFamily("DeepSeek V4.1 Flash 1017")).toBe("deepseek-v4.1-flash");
-		expect(modelFamily("claude-haiku-4-5-20251001")).toBe("claude-haiku-4-5");
+		expect(modelFamily("claude-haiku-4-5-20251001")).toBe("claude-haiku-4.5");
 		expect(modelFamily("glm-5.3")).toBe("glm-5.3");
-		expect(modelFamily("claude-opus-4-8")).toBe("claude-opus-4-8");
+		expect(modelFamily("claude-opus-4-8")).toBe("claude-opus-4.8");
+	});
+
+	test("a version spelled with a hyphen is the same version spelled with a dot", () => {
+		// commandcode and saygm write `claude-fable-5-2`; cline-pass and
+		// open-design write `claude-fable-5.2`. Two keys meant two picker rows
+		// with one label, and the same model could not fail over between them.
+		expect(modelFamily("claude-fable-5-2")).toBe(
+			modelFamily("claude-fable-5.2"),
+		);
+		expect(modelFamily("claude-opus-4-8")).toBe(
+			modelFamily("anthropic/claude-opus-4.8"),
+		);
+		expect(modelFamily("deepseek-v4-1-flash")).toBe("deepseek-v4.1-flash");
+	});
+
+	test("a trailing number that is not a version is left alone", () => {
+		// Folding `-3-70b` would invent a version out of a size, and `-8x7b`
+		// is a shape. Only digits on both sides of the separator fold.
+		expect(modelFamily("llama-3-70b")).toBe("llama-3-70b");
+		expect(modelFamily("mixtral-8x7b")).toBe("mixtral-8x7b");
+		expect(modelFamily("deepseek-r1")).toBe("deepseek-r1");
 	});
 });
 

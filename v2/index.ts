@@ -7,9 +7,8 @@ import { migrate } from "./core/schema";
 import { runCommand } from "./server/commands";
 import { registerCompaction } from "./server/compaction";
 import {
-	invalidateCatalog,
-	refreshBalancerProvider,
 	registerBalancerProvider,
+	syncDeclarations,
 } from "./server/connectors";
 import { registerHooks } from "./server/hooks";
 import { syncAccounts } from "./server/import-credentials";
@@ -79,8 +78,7 @@ export default Plugin.define({
 			// provider event would make the reload's own echo look like a change,
 			// and the two would keep waking each other up forever.
 			if (result.imported > 0 || result.pruned > 0) {
-				invalidateCatalog();
-				await refreshBalancerProvider({ ctx, db });
+				await syncDeclarations({ ctx, db });
 			}
 		};
 		void (async () => {

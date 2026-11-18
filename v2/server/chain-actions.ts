@@ -21,8 +21,9 @@ import {
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
+import { modelUnavailable } from "./model-availability";
 import { servedFor } from "./route-memory";
-import { enabledAccounts, selectHealthyAccount } from "./selection";
+import { enabledAccounts } from "./selection";
 
 const DEFAULT_CHAIN_PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -113,8 +114,17 @@ function store(
 }
 
 /**
- * Appends a target the user chose by hand. Only models the provider actually
- * routes and that speak the row's wire format are accepted.
+ * Appends a target the user chose by hand.
+ *
+ * A target only has to be new: the point of a chain is that each hop can be a
+ * different model, so the query is matched against everything the provider
+ * routes rather than only this row's family. A provider appears once per row,
+ * because that is the row's shape; a *different model* on that provider is a
+ * separate row, which is what creating one is for.
+ *
+ * The wire format is still checked. Routing rewrites the body's `model` field
+ * and nothing else, so a request shaped for one package must not reach a
+ * provider speaking another.
  */
 export async function addTarget(
 	ctx: Context,
@@ -154,6 +164,17 @@ export async function addTarget(
 	if (!record) {
 		return {
 			message: `No routable ${providerID} model matches "${query}".`,
+			ok: false,
+		};
+	}
+	if (
+		current.some(
+			(target) =>
+				target.providerID === providerID && target.modelID === record.modelID,
+		)
+	) {
+		return {
+			message: `${providerID} ${record.modelID} is already in this chain.`,
 			ok: false,
 		};
 	}
@@ -354,23 +375,48 @@ function targetState(
 	target: { providerID: string; modelID: string; available?: boolean },
 	familyKey: string,
 ): string {
+	// The model itself is gone from the connector, or a provider refused this
+	// exact pair (a price gate writes the same mark). Either way nothing can be
+	// sent here, whoever holds the key.
 	if (target.available === false) return "unavailable";
-	// No healthy credential means the provider is switched off entirely, or every
-	// one of its credentials is disabled, parked, or waiting on a cooldown.
-	if (!selectHealthyAccount(db, target.providerID)) return "unavailable";
+	if (modelUnavailable(db, target.providerID, target.modelID))
+		return "unavailable";
+
+	const accounts = enabledAccounts(db, target.providerID);
+	if (accounts.length === 0) return "unavailable";
+
 	// "In use" is the provider this row itself last served with. The most
 	// recently used credential is global, so a row could otherwise claim a
 	// provider that had served some other model while this row was elsewhere.
 	// A row with no note of its own has not served since the plugin started,
 	// which is better than pointing at whoever happened to answer last.
-	const served = servedFor(familyKey);
-	return served?.providerID === target.providerID ? "in use" : "available";
+	const inUse = servedFor(db, familyKey)?.providerID === target.providerID;
+
+	// The provider list says `limited` for as long as a park is recorded, because
+	// a park is cleared by the next attempt rather than by its own expiry. A row
+	// reading only the clock went back to `available` while the credential above
+	// it still said `limited`, which is the contradiction this vocabulary exists
+	// to remove. `ready` is the routing question; `parked` is what is reported.
+	const ready = accounts.some((account) => account.rateLimitedUntil == null);
+	const parked = accounts.some((account) => account.rateLimitedUntil != null);
+
+	const state = ready ? "available" : parked ? "limited" : "unavailable";
+	// A parked target that also served is both facts, spelled the way the
+	// credential rows spell them, rather than one word hiding the other.
+	if (inUse) return state === "available" ? "in use" : `in use, ${state}`;
+	return state;
 }
 
 export type ChainRow = {
 	key: string;
 	label: string;
 	package: string;
+	/**
+	 * The tightest window any target of this row reports, or 0 when none does.
+	 * The row declares 1M so it can compact on its own schedule; this is what the
+	 * request can actually be sent into.
+	 */
+	context: number;
 	/** This model's own limit as typed, or empty when it follows the global one. */
 	limit: string;
 	stored: boolean;
@@ -392,18 +438,29 @@ export async function listChainRows(
 	db: Database,
 ): Promise<ChainRow[]> {
 	const catalog = await loadCatalog(ctx, db);
-	return catalog.families.map((family) => ({
-		key: family.key,
-		label: family.name,
-		// One value per model: the credential serving it does not change it.
-		limit: readModelLimit(db, family.key) ?? "",
-		package: family.package,
-		stored: Boolean(family.stored),
-		targets: resolveChain(db, family).map((target) => ({
-			modelID: target.modelID,
-			providerID: target.providerID,
-			resolved: resolvedModelID(db, target),
-			state: targetState(db, target, family.key),
-		})),
-	}));
+	return catalog.families.map((family) => {
+		const targets = resolveChain(db, family);
+		const windows = targets
+			.map((target) => target.context)
+			.filter(
+				(value): value is number => typeof value === "number" && value > 0,
+			);
+		return {
+			// A row must fit every target it may be sent to, so the smallest
+			// window is the one that bounds the conversation.
+			context: windows.length > 0 ? Math.min(...windows) : 0,
+			key: family.key,
+			label: family.name,
+			// One value per model: the credential serving it does not change it.
+			limit: readModelLimit(db, family.key) ?? "",
+			package: family.package,
+			stored: Boolean(family.stored),
+			targets: targets.map((target) => ({
+				modelID: target.modelID,
+				providerID: target.providerID,
+				resolved: resolvedModelID(db, target),
+				state: targetState(db, target, family.key),
+			})),
+		};
+	});
 }

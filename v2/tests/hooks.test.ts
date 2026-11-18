@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { describe, expect, setSystemTime, test } from "bun:test";
+import { beforeEach, describe, expect, setSystemTime, test } from "bun:test";
 import type { Context } from "@opencode/plugin/promise/plugin";
 
 import {
@@ -38,6 +38,12 @@ function freshDb() {
 }
 
 const apiAuth = (key: string) => ({ key, type: "api" as const });
+
+// Routing memory is the client's and outlives a case, so each test starts from
+// an untouched order: one case's failover must not be the next one's start.
+beforeEach(() => {
+	forgetRoutingMemory();
+});
 
 async function setup() {
 	const db = freshDb();
@@ -358,7 +364,7 @@ describe("the session's target", () => {
 	}
 
 	test("a routed call records the row and the window it went through", async () => {
-		const { registry } = await routedSetup();
+		const { db, registry } = await routedSetup();
 		await registry["model.request"]({
 			agent: "build",
 			headers: {} as Record<string, string>,
@@ -370,7 +376,7 @@ describe("the session's target", () => {
 		// This is what the compaction watcher measures against: the row decides
 		// which per-model share applies, and the window is the ceiling the share
 		// is clamped by.
-		expect(balancerTargetsFor("routed-1")).toEqual([
+		expect(balancerTargetsFor(db, "routed-1")).toEqual([
 			{
 				context: 200_000,
 				familyKey: "deepseek-v4.1-flash",
@@ -380,8 +386,8 @@ describe("the session's target", () => {
 	});
 
 	test("a session that never routed here has nothing to compact", async () => {
-		await routedSetup();
-		expect(balancerTargetsFor("never-routed")).toEqual([]);
+		const { db } = await routedSetup();
+		expect(balancerTargetsFor(db, "never-routed")).toEqual([]);
 	});
 });
 
@@ -583,15 +589,13 @@ describe("two models in one session", () => {
 	test("an auxiliary call does not move the primary's failure to its own account", async () => {
 		const { db, registry } = await twoModels();
 
-		// The conversation is served by `p1` and its request is rejected.
+		// The conversation is served by `p1`, which is then parked: a typed error
+		// arrives later, and by then the host may have done housekeeping.
 		const primary = { ...row("aux-race", "alpha-1"), request: newRequest() };
 		await registry["model.request"](primary);
 		await registry["http.request"](primary);
 		expect(primary.headers.authorization).toBe("Bearer sk-1");
-		await registry["http.response"]({
-			...primary,
-			response: new Response(null, { status: 429 }),
-		});
+		markRateLimited(db, "p1", "a", 60_000, "insufficient balance");
 
 		// While `p1` is parked, the host titles the session. An auxiliary call
 		// must not rebalance the row: it stays on the credential the primary
@@ -612,7 +616,7 @@ describe("two models in one session", () => {
 	});
 
 	test("an auxiliary call does not decide where the conversation is cut", async () => {
-		const { registry } = await twoModels();
+		const { db, registry } = await twoModels();
 
 		// The conversation is on `alpha`, whose connector holds 200k.
 		await registry["model.request"](row("mixed-kinds", "alpha-1"));
@@ -624,17 +628,17 @@ describe("two models in one session", () => {
 			kind: "title",
 		});
 
-		expect(balancerTargetsFor("mixed-kinds")).toEqual([
+		expect(balancerTargetsFor(db, "mixed-kinds")).toEqual([
 			{ context: 200_000, familyKey: "alpha-1", providerID: "p1" },
 		]);
 	});
 
 	test("both models the conversation ran are on record, not just the last", async () => {
-		const { registry } = await twoModels();
+		const { db, registry } = await twoModels();
 		await registry["model.request"](row("two-rows", "alpha-1"));
 		await registry["model.request"](row("two-rows", "beta-1"));
 
-		const rows = balancerTargetsFor("two-rows");
+		const rows = balancerTargetsFor(db, "two-rows");
 		expect(rows.map((entry) => entry.familyKey).sort()).toEqual([
 			"alpha-1",
 			"beta-1",
@@ -826,6 +830,38 @@ describe("a balance that has gone stale", () => {
 		}
 	});
 
+	test("a failover moves every session on the row, because the balance is the client's", async () => {
+		const { registry } = await twoProviders();
+		await failOverFromTheHead(registry, "client-a");
+
+		// A second conversation, never routed before this moment. Kept per
+		// session, it would start at the head and spend the account the first
+		// conversation just found exhausted; the client already knows better.
+		const second = request("client-b");
+		await registry["model.request"](second);
+		expect(second.headers.authorization).toBe("Bearer sk-2");
+	});
+
+	test("a row's target after an answer is the target every session uses", async () => {
+		const { registry } = await twoProviders();
+		await failOverFromTheHead(registry, "answered-a");
+
+		// The answer lands on p2. The row is understood to be served there now, so
+		// a different conversation that has never asked is sent to the same target
+		// rather than starting from the head and re-testing p1.
+		const answered = { ...request("answered-a"), request: newRequest() };
+		await registry["model.request"](answered);
+		await registry["http.request"](answered);
+		await registry["http.response"]({
+			...answered,
+			response: new Response(null, { status: 200 }),
+		});
+
+		const other = request("answered-b");
+		await registry["model.request"](other);
+		expect(other.headers.authorization).toBe("Bearer sk-2");
+	});
+
 	test("a pick serves on the very next request", async () => {
 		const { ctx, db, registry } = await twoProviders();
 		await failOverFromTheHead(registry, "picked");
@@ -846,5 +882,231 @@ describe("a balance that has gone stale", () => {
 		const event = request("picked");
 		await registry["model.request"](event);
 		expect(event.headers.authorization).toBe("Bearer sk-1");
+	});
+});
+
+describe("a refusal the session never sees", () => {
+	/** Two providers offering one model, so a refusal has somewhere to go. */
+	async function offered() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const one = (providerID: string) => ({
+			enabled: true,
+			limit: { context: 200_000, output: 4096 },
+			modelID: "alpha-1",
+			name: "Alpha One",
+			package: PACKAGE,
+			providerID,
+			settings: { baseURL: `https://${providerID}.invalid/v1` },
+			type: "chat",
+		});
+		const ctx = {
+			model: { list: async () => ({ data: [one("p1"), one("p2")] }) },
+			rpc: {
+				register: async (
+					_definition: unknown,
+					registered: Record<string, unknown>,
+				) => ({
+					...registered,
+					events: { emit: async () => {} },
+				}),
+			},
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		saveAccount(db, "p2", "a", apiAuth("sk-2"));
+		setBalancingEnabled(db, true);
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
+	/** The stub every test below answers through, restored afterwards. */
+	function stubFetch(
+		answer: (request: Request) => Response | Promise<Response>,
+	) {
+		const original = globalThis.fetch;
+		const calls: Request[] = [];
+		globalThis.fetch = (async (input: Request | URL | string) => {
+			const request = input instanceof Request ? input : new Request(input);
+			calls.push(request.clone());
+			return answer(request);
+		}) as typeof fetch;
+		return {
+			calls,
+			restore() {
+				globalThis.fetch = original;
+			},
+		};
+	}
+
+	const answer = () =>
+		new Response(JSON.stringify({ ok: true }), {
+			headers: { "content-type": "application/json" },
+			status: 200,
+		});
+
+	/**
+	 * The request as the host hands it over: addressed to the row's own stub,
+	 * because the model hook already set `baseURL` to the connector it chose.
+	 */
+	const call = (sessionID: string) => ({
+		agent: "build",
+		headers: {} as Record<string, string>,
+		kind: "primary",
+		model: { id: "alpha-1", providerID: "balancer" },
+		request: new Request("https://balancer.invalid/v1/messages", {
+			body: JSON.stringify({ messages: [], model: "alpha-1" }),
+			headers: { "content-type": "application/json" },
+			method: "POST",
+		}),
+		sessionID,
+	});
+
+	/** Route the call, then answer it with the status given. */
+	async function refuse(
+		registry: Record<string, HookCallback>,
+		sessionID: string,
+		status: number,
+	) {
+		const event = {
+			...call(sessionID),
+			response: undefined as Response | undefined,
+		};
+		await registry["model.request"](event);
+		await registry["http.request"](event);
+		// The response hook replaces this on the same object, which is how the
+		// session is handed the answer it should see.
+		event.response = new Response(null, { status });
+		await registry["http.response"](event);
+		return event as typeof event & { response: Response };
+	}
+
+	test("a spent account's refusal is answered by the next target instead", async () => {
+		const { db, registry } = await offered();
+		const fetched = stubFetch(answer);
+		try {
+			// `p1` is spent. Before this, the 429 was handed to the host, which
+			// classified it as deterministic, put its words in the conversation and
+			// stopped the turn — with `p2` sitting healthy behind it.
+			const event = await refuse(registry, "inside-the-call", 429);
+
+			expect(event.response.status).toBe(200);
+			// The retry really went out, with the second credential and the second
+			// provider's own URL: nothing about it is the first attempt's. The
+			// catalogue probes each connector makes are not part of this call.
+			// The catalogue probes each connector makes are not part of this call.
+			const sent = fetched.calls.filter(
+				(request) => !request.url.endsWith("/models"),
+			);
+			expect(sent).toHaveLength(1);
+			expect(sent[0]?.headers.get("authorization")).toBe("Bearer sk-2");
+			expect(sent[0]?.url).toBe("https://p2.invalid/v1/messages");
+			// And the spent one is parked, so the next request does not try it again.
+			expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeDefined();
+		} finally {
+			fetched.restore();
+		}
+	});
+
+	test("the retried body names the target's own model id", async () => {
+		const { registry } = await offered();
+		const fetched = stubFetch(answer);
+		try {
+			const body = JSON.stringify({ messages: [], model: "alpha-1" });
+			const event = {
+				...call("own-id"),
+				request: new Request("https://balancer.invalid/v1/messages", {
+					body,
+					headers: { "content-type": "application/json" },
+					method: "POST",
+				}),
+			};
+			await registry["model.request"](event);
+			await registry["http.request"](event);
+			await registry["http.response"]({
+				...event,
+				response: new Response(null, { status: 429 }),
+			});
+
+			const sent = fetched.calls.find(
+				(request) => !request.url.endsWith("/models"),
+			);
+			expect(sent).toBeDefined();
+			const parsed = JSON.parse(await sent!.clone().text()) as {
+				model: string;
+			};
+			// The id in the retried body comes from the target, not from the
+			// request that failed.
+			expect(parsed.model).toBe("alpha-1");
+		} finally {
+			fetched.restore();
+		}
+	});
+
+	test("when every target refuses, the session sees a real refusal", async () => {
+		const { registry } = await offered();
+		const fetched = stubFetch(() => new Response(null, { status: 429 }));
+		try {
+			const event = await refuse(registry, "all-spent", 429);
+
+			// Both providers were tried inside the call, and both were spent. There
+			// is no honest answer left to give, so the session gets a provider's
+			// own refusal rather than a turn that pretends it succeeded.
+			expect(
+				fetched.calls.filter((request) => !request.url.endsWith("/models")),
+			).toHaveLength(1);
+			expect(event.response.status).toBe(429);
+		} finally {
+			fetched.restore();
+		}
+	});
+
+	test("a refusal another account would repeat is not retried", async () => {
+		const { registry } = await offered();
+		const fetched = stubFetch(answer);
+		try {
+			// 400 is the conversation's problem, not the account's: sending it to
+			// another provider would only buy the same answer more slowly.
+			const event = await refuse(registry, "bad-request", 400);
+
+			expect(
+				fetched.calls.filter((request) => !request.url.endsWith("/models")),
+			).toHaveLength(0);
+			expect(event.response.status).toBe(400);
+		} finally {
+			fetched.restore();
+		}
+	});
+
+	test("a retry that finds nothing leaves the row where it was", async () => {
+		const { db, registry } = await offered();
+		const fetched = stubFetch(() => {
+			throw new Error("connection reset");
+		});
+		try {
+			// `p2` cannot be reached either, so the walk ends with no answer at
+			// all. The session is about to read `p1`'s refusal, and the next
+			// request must still be pointed at `p1` rather than at the target the
+			// walk merely tried.
+			const event = await refuse(registry, "unreachable", 429);
+			expect(event.response.status).toBe(429);
+
+			// The refusal is what parked `p1`: a transport failure on the retry
+			// says nothing about the credential that was actually refused.
+			expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeDefined();
+			expect(getAccount(db, "p2", "a")?.rateLimitedUntil).toBeDefined();
+
+			const next = call("unreachable");
+			await registry["http.request"](next);
+			expect(next.request.headers.get("authorization")).toBe("Bearer sk-1");
+		} finally {
+			fetched.restore();
+		}
 	});
 });

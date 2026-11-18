@@ -6,6 +6,7 @@ import {
 	ensureActiveAlias,
 	getAccountBySourceID,
 	importAccount,
+	listAccounts,
 	pruneImportedAccounts,
 } from "../core/accounts";
 import { configDir } from "../core/path";
@@ -80,28 +81,63 @@ function readConfig(path: string): Record<string, unknown> | undefined {
 /** Providers whose key lives in the config rather than in OpenCode's store. */
 export function configuredProviders(): ConfiguredProvider[] {
 	const providers = new Map<string, ConfiguredProvider>();
-	// `opencode.json` wins when both spellings exist.
+	// `opencode.jsonc` is read first so `opencode.json` wins when both spellings
+	// exist.
 	for (const name of ["opencode.jsonc", "opencode.json"]) {
 		const document = readConfig(join(configDir(), name));
 		if (!document) continue;
-		for (const blockName of ["provider", "providers"]) {
-			const block = document[blockName];
-			if (!block || typeof block !== "object") continue;
-			for (const [id, raw] of Object.entries(block)) {
-				if (!raw || typeof raw !== "object") continue;
-				const entry = raw as Record<string, unknown>;
-				if (entry.disabled === true || entry.enabled === false) continue;
-				const key = keyFromEntry(entry);
-				if (!key) continue;
-				const label =
-					typeof entry.name === "string" && entry.name.trim() !== ""
-						? entry.name
-						: id;
-				providers.set(id, { id, key, label });
-			}
+		for (const [id, entry] of providerBlocks(document)) {
+			const key = keyFromEntry(entry);
+			if (!key) continue;
+			providers.set(id, { id, key, label: providerLabel(entry, id) });
 		}
 	}
 	return [...providers.values()];
+}
+
+/**
+ * Every provider the config declares, whether or not this process can read a key
+ * out of it.
+ *
+ * A block that names only an environment variable — `env: ["SAYGM_API_KEY"]` —
+ * is still the user saying "this provider exists". The key may be in the
+ * environment the host resolves rather than a literal here, and the host turns
+ * such a provider into a credential of its own a moment after startup. Treating
+ * that gap as "the provider is gone" is what made a plugin load prune its
+ * accounts and re-import them a second later, moving them to the end of the
+ * panel order.
+ */
+export function declaredProviderIDs(): string[] {
+	const ids = new Set<string>();
+	for (const name of ["opencode.jsonc", "opencode.json"]) {
+		const document = readConfig(join(configDir(), name));
+		if (!document) continue;
+		for (const id of providerBlocks(document).keys()) ids.add(id);
+	}
+	return [...ids];
+}
+
+function providerBlocks(document: Record<string, unknown>) {
+	const blocks = new Map<string, Record<string, unknown>>();
+	for (const blockName of ["provider", "providers"]) {
+		const block = document[blockName];
+		if (!block || typeof block !== "object") continue;
+		for (const [id, raw] of Object.entries(block)) {
+			if (!raw || typeof raw !== "object") continue;
+			const entry = raw as Record<string, unknown>;
+			if (entry.disabled === true || entry.enabled === false) continue;
+			// The later file (and the later spelling) wins, so it is fine to
+			// overwrite.
+			blocks.set(id, entry);
+		}
+	}
+	return blocks;
+}
+
+function providerLabel(entry: Record<string, unknown>, id: string) {
+	return typeof entry.name === "string" && entry.name.trim() !== ""
+		? entry.name
+		: id;
 }
 
 /**
@@ -138,14 +174,61 @@ export async function syncAccounts(
 	// Only providers with a credential are worth asking the host about, and the
 	// host has hundreds of integrations registered, most of them empty.
 	const withCredentials: string[] = [];
-	let imported = 0;
 
+	// What should survive is decided from the listing alone, before a single
+	// secret is fetched. Two things depend on it:
+	//
+	//   - A credential the host has replaced arrives with a new id while the old
+	//     id is still in the table. Importing first made `uniqueAlias` see the
+	//     provider's name already taken and number the replacement `name-2`;
+	//     pruning first frees the name, so the surviving credential keeps it.
+	//   - Nothing is lost by pruning first. A listed credential whose secret
+	//     cannot be fetched is still in `keep`, so it is never removed for a
+	//     transient failure — the account simply stays as it was.
 	for (const integration of integrations) {
 		let sawCredential = false;
 		for (const connection of integration.connections ?? []) {
 			if (connection.type !== "credential" || !connection.id) continue;
 			sawCredential = true;
 			keep.push(connection.id);
+		}
+		if (sawCredential) withCredentials.push(integration.id);
+	}
+
+	// A provider can hold its key in the config without a credential connection
+	// for the host to expose. Those count as present, so they survive the prune
+	// for the same reason; they are imported below, but never in addition to a
+	// real credential for the same provider, which can rotate and is
+	// authoritative.
+	//
+	// The host's credential list is not always complete at the moment a sync runs
+	// — a plugin load is exactly when it is rebuilding, and a provider configured
+	// in `opencode.json` appears a moment later as a credential of its own. For a
+	// provider the config still declares, that gap is not evidence its
+	// credentials are gone: everything it already had stays. Without this, a
+	// reload deleted these providers' accounts and the next sync imported them
+	// again at the end of the order, so the panel lost them and the routing order
+	// moved under the user.
+	const configured = configuredProviders();
+	for (const providerID of declaredProviderIDs()) {
+		if (providerID === "balancer") continue;
+		if (withCredentials.includes(providerID)) continue;
+		for (const account of listAccounts(db, providerID)) {
+			if (account.sourceID) keep.push(account.sourceID);
+		}
+	}
+	for (const provider of configured) {
+		if (provider.id === "balancer") continue;
+		if (withCredentials.includes(provider.id)) continue;
+		keep.push(`config:${provider.id}`);
+	}
+
+	const pruned = pruneImportedAccounts(db, keep);
+	let imported = 0;
+
+	for (const integration of integrations) {
+		for (const connection of integration.connections ?? []) {
+			if (connection.type !== "credential" || !connection.id) continue;
 
 			let value: unknown;
 			try {
@@ -171,17 +254,13 @@ export async function syncAccounts(
 			// which rebuilt the provider on every event and refreshed forever.
 			if (!existing) imported += 1;
 		}
-		if (sawCredential) withCredentials.push(integration.id);
 	}
 
-	// A provider can hold its key in the config without a credential connection
-	// for the host to expose. Import those too, but never in addition to a real
-	// credential for the same provider: that one can rotate and is authoritative.
-	for (const provider of configuredProviders()) {
+	// The config-keyed accounts, now that the prune has made room for them.
+	for (const provider of configured) {
 		if (provider.id === "balancer") continue;
 		if (withCredentials.includes(provider.id)) continue;
 		const sourceID = `config:${provider.id}`;
-		keep.push(sourceID);
 		const auth = credentialToAuth({ key: provider.key, type: "key" });
 		if (!auth) continue;
 		const existing = getAccountBySourceID(db, provider.id, sourceID);
@@ -193,8 +272,6 @@ export async function syncAccounts(
 		});
 		if (!existing) imported += 1;
 	}
-
-	const pruned = pruneImportedAccounts(db, keep);
 
 	// Where the balancer has no live choice of its own, follow the credential
 	// OpenCode itself is pointed at, so the two agree out of the box.

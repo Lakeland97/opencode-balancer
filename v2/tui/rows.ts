@@ -1,6 +1,28 @@
 import { credentialNote } from "../core/format";
 import { groupByBrand } from "../core/models";
-import type { Account, Chain, Provider } from "../types";
+import type { Account, Chain, InUseEntry, Provider } from "../types";
+
+/**
+ * One row that is being served right now, as the panel says it.
+ *
+ * The model shown is the connector's own id, not the row label: a routed row is
+ * a name this plugin invented and the provider never sees it, so the label
+ * would tell the user nothing about what was actually called. The level is the
+ * one the connector applied; a request that asked for a different one is worth
+ * saying out loud rather than dropping, so it rides in `note` beside the line.
+ */
+export function servingLine(entry: InUseEntry) {
+	const text = `${entry.agent || "?"} · ${entry.providerID}/${entry.modelID}${
+		entry.applied ? ` (${entry.applied})` : ""
+	}`;
+	const note =
+		entry.variant && entry.variant !== entry.applied
+			? entry.applied
+				? `asked ${entry.variant}, applied ${entry.applied}`
+				: `asked ${entry.variant}`
+			: "";
+	return { note, text };
+}
 
 /**
  * The providers section is one row per credential, in the balancer's order:

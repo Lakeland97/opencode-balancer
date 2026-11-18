@@ -3,9 +3,10 @@ import {
 	allCollapsed,
 	providerEntries,
 	rowNote,
+	servingLine,
 	visibleChains,
 } from "../tui/rows";
-import type { Account, Chain, Provider } from "../types";
+import type { Account, Chain, InUseEntry, Provider } from "../types";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -34,8 +35,23 @@ function provider(providerID: string): Provider {
 	};
 }
 
+function serving(overrides: Partial<InUseEntry> = {}): InUseEntry {
+	return {
+		agent: "build",
+		alias: "account-1",
+		applied: "high",
+		familyKey: "deepseek",
+		label: "DeepSeek Pro",
+		modelID: "deepseek-v4.1-flash",
+		providerID: "open-design",
+		variant: "high",
+		...overrides,
+	};
+}
+
 function chain(key: string, stored: boolean, targets: number): Chain {
 	return {
+		context: 0,
 		key,
 		label: key,
 		limit: "",
@@ -106,5 +122,32 @@ describe("derived rows", () => {
 			"resets",
 		);
 		expect(note).toBe("quota");
+	});
+});
+
+describe("serving lines", () => {
+	test("names the connector's model, not the row label", () => {
+		const line = servingLine(serving());
+		expect(line.text).toBe("build · open-design/deepseek-v4.1-flash (high)");
+		expect(line.text).not.toContain("DeepSeek Pro");
+	});
+	test("shows the level actually applied", () => {
+		expect(servingLine(serving({ applied: "medium" })).text).toContain(
+			"(medium)",
+		);
+	});
+	test("falls back to ? for a missing agent and drops an absent level", () => {
+		expect(servingLine(serving({ agent: "", applied: "" })).text).toBe(
+			"? · open-design/deepseek-v4.1-flash",
+		);
+	});
+	test("keeps a level the request asked for but did not get", () => {
+		const line = servingLine(serving({ applied: "low", variant: "high" }));
+		expect(line.text).toBe("build · open-design/deepseek-v4.1-flash (low)");
+		expect(line.note).toContain("high");
+		expect(line.note).toContain("low");
+	});
+	test("says nothing extra when the asked level is the applied one", () => {
+		expect(servingLine(serving()).note).toBe("");
 	});
 });

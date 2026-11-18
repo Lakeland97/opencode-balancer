@@ -64,6 +64,35 @@ export function formatDuration(ms: number): string {
 	return `${Math.round(ms / 86_400_000)}d`;
 }
 
+/**
+ * The window as hours and minutes, for the note beside the field.
+ *
+ * `formatDuration` is for editing: it wants one unit, so `90m` stays `90m`
+ * rather than becoming `1.5h`. This is for reading, and reads the way a person
+ * says it — `1h 30m`, `5h`, `45m` — so the field's value and the window it is
+ * actually applied as can be compared at a glance.
+ */
+export function formatSpan(ms: number): string {
+	if (ms <= 0) return "never";
+	const hours = Math.floor(ms / 3_600_000);
+	const minutes = Math.round((ms % 3_600_000) / 60_000);
+	const whole = minutes === 60 ? hours + 1 : hours;
+	const rest = minutes === 60 ? 0 : minutes;
+	if (whole === 0) return `${rest}m`;
+	return rest === 0 ? `${whole}h` : `${whole}h ${rest}m`;
+}
+
+/**
+ * How long until the balance lapses, read the way the note says it: `(in 4h
+ * 12m)`. A remainder under a minute is said as `<1m` rather than `0m`, because
+ * the note means "about to happen", not "already happened".
+ */
+export function formatRemaining(ms: number): string {
+	if (!Number.isFinite(ms) || ms <= 0) return "";
+	if (ms < 60_000) return "<1m";
+	return formatSpan(ms);
+}
+
 /** The window as typed, or undefined when it has never been set. */
 export function readRebalance(db: Database): string | undefined {
 	return db
@@ -108,8 +137,18 @@ export function setRebalanceAuto(db: Database, enabled: boolean): void {
  * to an accidental "never": a typo must not pin a session to one trail for good.
  */
 export function rebalanceAfterMs(db: Database): number {
-	if (!getRebalanceAuto(db)) return 0;
-	const text = readRebalance(db);
+	return rebalanceWindowMs(getRebalanceAuto(db), readRebalance(db));
+}
+
+/**
+ * The window those two settings add up to, without a database in hand.
+ *
+ * The panel shows the number beside the field, so it needs the same answer the
+ * router will use — including the switch being off and a value it could not
+ * parse — rather than re-deriving it and drifting from the server.
+ */
+export function rebalanceWindowMs(auto: boolean, text: string | undefined) {
+	if (!auto) return 0;
 	if (text === undefined) return DEFAULT_REBALANCE_MS;
 	const parsed = parseDuration(text);
 	return parsed.ok && parsed.ms !== undefined

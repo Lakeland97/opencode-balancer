@@ -293,7 +293,7 @@ describe("review parity cases", () => {
 		saveAccount(db, "p1", "a", apiAuth("k1"));
 		saveAccount(db, "p1", "b", apiAuth("k2"));
 		markAccountUsed(db, "p1", "b");
-		noteServed(KEY, { modelID: KEY, providerID: "p1" });
+		noteServed(db, KEY, { modelID: KEY, providerID: "p1" });
 		const out = await runCommand({
 			ctx: workingCtx(),
 			db,
@@ -315,7 +315,7 @@ describe("review parity cases", () => {
 		} as never;
 
 		// This row served through p2 ...
-		noteServed(KEY, { modelID: KEY, providerID: "p2" });
+		noteServed(db, KEY, { modelID: KEY, providerID: "p2" });
 		// ... while an unrelated request used p1 last. The row must not adopt
 		// p1's provider just because its credential is the global newest.
 		markAccountUsed(db, "p1", "a");

@@ -30,6 +30,13 @@ const chainTarget = object(
 );
 const chainRow = object(
 	{
+		/**
+		 * The smallest window any target of this row reports, or 0 when none
+		 * reports one. The row declares 1M to the host, but this is what the
+		 * conversation can actually be sent into, so a readout that clamps a cut
+		 * to it is describing the request and not the declaration.
+		 */
+		context: num,
 		key: str,
 		label: str,
 		/**
@@ -43,7 +50,7 @@ const chainRow = object(
 		stored: bool,
 		targets: { items: chainTarget, type: "array" },
 	},
-	["key", "label", "package", "limit", "stored", "targets"],
+	["key", "label", "package", "limit", "stored", "targets", "context"],
 );
 const logEntry = object(
 	{
@@ -105,7 +112,7 @@ export const balancerDefinition = {
 			]),
 		},
 		chainModels: {
-			input: object({ providerID: str }, ["providerID"]),
+			input: object({ package: str, providerID: str }, ["providerID"]),
 			output: object(
 				{
 					models: {
@@ -153,6 +160,46 @@ export const balancerDefinition = {
 			// compacts at, as the user typed it; empty means the built-in value.
 			// A model may override it with a limit of its own.
 			output: object({ value: str }, ["value"]),
+		},
+		inUse: {
+			input: empty,
+			output: object(
+				{
+					entries: {
+						items: object(
+							{
+								/** The agent that made the call, e.g. `build`. */
+								agent: str,
+								/** The credential serving this row, when it is known. */
+								alias: str,
+								/** The level actually applied on the connector, or empty. */
+								applied: str,
+								/** The row's stable key, e.g. `deepseek-v4.1-flash`. */
+								familyKey: str,
+								/** The row's label as the picker shows it. */
+								label: str,
+								/** The connector's own model id, after any free swap. */
+								modelID: str,
+								providerID: str,
+								/** The thinking level that request asked for, or empty. */
+								variant: str,
+							},
+							[
+								"providerID",
+								"familyKey",
+								"label",
+								"modelID",
+								"alias",
+								"agent",
+								"applied",
+								"variant",
+							],
+						),
+						type: "array",
+					},
+				},
+				["entries"],
+			),
 		},
 		list: {
 			input: object({ providerID: str }),
@@ -210,9 +257,15 @@ export const balancerDefinition = {
 		},
 		rebalance: {
 			input: empty,
-			// Whether idleness drops a session's trail at all, and the length it
-			// would drop it after, as the user typed it; empty means the built-in.
-			output: object({ auto: bool, value: str }, ["auto", "value"]),
+			// Whether idleness drops a session's trail at all, the length it would
+			// drop it after as the user typed it (empty means the built-in), and
+			// when the client's balance next lapses (ms; 0 when nothing is
+			// counting down).
+			output: object({ auto: bool, nextAt: num, value: str }, [
+				"auto",
+				"nextAt",
+				"value",
+			]),
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),

@@ -13,6 +13,7 @@ import {
 	untrack,
 } from "solid-js";
 import { copy } from "../copy";
+import { mergeChainGroups, mergeChainRows } from "../core/chain-view";
 import { bufferTokens, cutFor, formatTokens } from "../core/context";
 import { formatAttempt, routeMarkers } from "../core/format";
 import { Balancer } from "../rpc";
@@ -22,6 +23,8 @@ import type {
 	Chain,
 	Chains,
 	ContextState,
+	InUse,
+	InUseEntry,
 	Listed,
 	LogEntry,
 	Provider,
@@ -45,6 +48,7 @@ import {
 	groupedChains,
 	providerEntries,
 	rowNote,
+	servingLine,
 	visibleChains,
 } from "./rows";
 
@@ -106,9 +110,14 @@ export function BalancerPanel(props: {
 	});
 	const [rebalance, setRebalance] = createSignal<RebalanceState>({
 		auto: false,
+		nextAt: 0,
 		value: "",
 	});
 	const [log, setLog] = createSignal<LogEntry[]>([]);
+	// What is being served right now, one entry per row. More than one is
+	// normal: a row split across providers, or two conversations on different
+	// models, both show rather than as a single "in use".
+	const [inUse, setInUse] = createSignal<InUseEntry[]>([]);
 	const [message, setMessage] = createSignal("");
 	const [dialogOpen, setDialogOpen] = createSignal(false);
 	// Every read gets a generation; only the newest may apply its result.
@@ -122,12 +131,14 @@ export function BalancerPanel(props: {
 	const refresh = async () => {
 		const generation = ++refreshGeneration;
 		try {
-			const [nextStatus, list, nextChains, nextPriority] = await Promise.all([
-				client.status({}),
-				client.list({}),
-				client.chains({}),
-				client.priority({}),
-			]);
+			const [nextStatus, list, nextChains, nextPriority, serving] =
+				await Promise.all([
+					client.status({}),
+					client.list({}),
+					client.chains({}),
+					client.priority({}),
+					client.inUse({}),
+				]);
 			const [limit, buffer, after, nextLog] = await Promise.all([
 				client.contextLimit({}),
 				client.contextBuffer({}),
@@ -137,8 +148,11 @@ export function BalancerPanel(props: {
 			if (generation !== refreshGeneration) return;
 			setStatus(nextStatus as Status);
 			setAccounts([...(list as Listed).accounts]);
-			setChains([...(nextChains as Chains).rows]);
+			// A poll that learned nothing must not rebuild a row: the add form and
+			// the pickers live inside rows.
+			setChains(mergeChainRows(chains(), [...(nextChains as Chains).rows]));
 			setPriority([...(nextPriority as Providers).entries]);
+			setInUse([...(serving as InUse).entries]);
 			setContextLimit(limit as ContextState);
 			setContextBuffer(buffer as BufferState);
 			setRebalance(after as RebalanceState);
@@ -280,6 +294,16 @@ export function BalancerPanel(props: {
 		if (!open) setCreating(false);
 	};
 
+	// Rows gather under the brand their label starts with. Brand headers are new
+	// objects on every read, so the previous ones are handed back when nothing
+	// moved: the rows inside them keep their identity, and a focused control in
+	// one of them is not rebuilt by a poll.
+	let lastGroups: ReturnType<typeof groupedChains> = [];
+	const groups = createMemo(() => {
+		lastGroups = mergeChainGroups(lastGroups, groupedChains(chains()));
+		return lastGroups;
+	});
+
 	const everythingCollapsed = () =>
 		allCollapsed({
 			chains: chains(),
@@ -297,12 +321,12 @@ export function BalancerPanel(props: {
 		}
 		const rows: Record<string, boolean> = {};
 		for (const chain of visibleChains(chains())) rows[chain.key] = true;
-		const groups: Record<string, boolean> = {};
-		for (const group of groupedChains(chains())) {
-			if (group.brand) groups[group.brand] = true;
+		const collapsedByBrand: Record<string, boolean> = {};
+		for (const group of groups()) {
+			if (group.brand) collapsedByBrand[group.brand] = true;
 		}
 		setCollapsed(rows);
-		setCollapsedGroups(groups);
+		setCollapsedGroups(collapsedByBrand);
 		setModelsOpen(false);
 		setCreating(false);
 	};
@@ -315,10 +339,10 @@ export function BalancerPanel(props: {
 		return [...names.entries()].map(([value, title]) => ({ title, value }));
 	};
 
-	const chooseModel = async (providerID: string) => {
+	const chooseModel = async (providerID: string, wire?: string) => {
 		let data: { models: { modelID: string; name: string }[] };
 		try {
-			data = (await client.chainModels({ providerID })) as {
+			data = (await client.chainModels({ package: wire, providerID })) as {
 				models: { modelID: string; name: string }[];
 			};
 		} catch (error) {
@@ -373,7 +397,7 @@ export function BalancerPanel(props: {
 		}
 		const providerID = await pick(copy.provider, choices);
 		if (providerID === undefined) return;
-		const modelID = await chooseModel(providerID);
+		const modelID = await chooseModel(providerID, chain.package);
 		if (modelID === undefined) return;
 		await run(() => client.chainAdd({ key: chain.key, modelID, providerID }));
 		setCollapsed((current) => ({ ...current, [chain.key]: false }));
@@ -525,7 +549,7 @@ export function BalancerPanel(props: {
 			id: "models:all",
 		});
 		if (modelsOpen()) {
-			for (const group of groupedChains(chains())) {
+			for (const group of groups()) {
 				if (group.brand) {
 					list.push({
 						activate: () => toggleGroup(group.brand ?? ""),
@@ -813,7 +837,29 @@ export function BalancerPanel(props: {
 					contextBuffer().enforce
 				}`}</text>
 			</box>
-			<Show when={message()}>
+			{/*
+			 * The one place the panel speaks: an error when there is one,
+			 * otherwise the model each row is being served on right now. The
+			 * TUI has no hover, so the note that a differing level was asked
+			 * for rides dim beside the line instead of in a title.
+			 */}
+			<Show
+				fallback={
+					<Show when={inUse().length > 0}>
+						<For each={inUse()}>
+							{(entry) => {
+								const line = () => servingLine(entry);
+								return (
+									<text attributes={TextAttributes.DIM}>{`${line().text}${
+										line().note ? `  ${line().note}` : ""
+									}`}</text>
+								);
+							}}
+						</For>
+					</Show>
+				}
+				when={message()}
+			>
 				{(text) => <text style={{ fg: "red" }}>{text()}</text>}
 			</Show>
 			<text>{copy.providers}</text>
@@ -891,7 +937,7 @@ export function BalancerPanel(props: {
 				</box>
 			</box>
 			<Show when={modelsOpen()}>
-				<For each={groupedChains(chains())}>
+				<For each={groups()}>
 					{(group) => (
 						<box style={{ flexDirection: "column" }}>
 							<Show when={group.brand}>

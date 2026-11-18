@@ -22,16 +22,38 @@ export function normalizeModel(value: string): string {
 }
 
 /**
+ * A version spelled with hyphens, spelled with dots.
+ *
+ * Providers disagree about the separator as well as about the tag: commandcode
+ * and saygm sell `claude-fable-5-2` where cline-pass and open-design sell
+ * `claude-fable-5.2`. Left alone those are two families, so the picker showed
+ * the same model twice and a request could not fail over between the two
+ * halves of it. A run of digits either side of a hyphen is a version, so it
+ * folds; digits followed by a letter are a size or a shape (`llama-3-70b`,
+ * `mixtral-8x7b`) and are left as written.
+ */
+function foldVersion(value: string): string {
+	let current = value;
+	// A three-part version folds one separator per pass.
+	for (let pass = 0; pass < 2; pass += 1) {
+		const next = current.replace(/(\d)-(\d+)(?=-|\.|$)/g, "$1.$2");
+		if (next === current) break;
+		current = next;
+	}
+	return current;
+}
+
+/**
  * The model without its trailing build tag.
  *
  * The same model is re-tagged per provider with a date or build number
  * (`deepseek-v4.1-flash-1017`, `claude-haiku-4-5-20251001`), and the picker
  * shows that tag as part of the name. Dropping a trailing run of 4-8 digits
  * lets the tagged and untagged forms match, while names that merely end in a
- * version (`glm-5.3`, `claude-opus-4-8`) keep their identity.
+ * version (`glm-5.3`, `claude-opus-4.8`) keep their identity.
  */
 export function modelFamily(value: string): string {
-	return normalizeModel(value).replace(/-\d{4,8}$/, "");
+	return foldVersion(normalizeModel(value).replace(/-\d{4,8}$/, ""));
 }
 
 /**

@@ -10,32 +10,49 @@ import { writeCompactPromptTokens } from "../core/context";
 import { appendEvent } from "../core/events";
 import { getBalancingEnabled } from "../core/priority";
 import { rebalanceAfterMs } from "../core/rebalance";
+import { formatRollover } from "../core/rollover";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
 import {
+	BALANCER_BASE_URL,
 	BALANCER_PROVIDER_ID,
 	loadCatalog,
 	type ModelFamily,
 	resolveChain,
 } from "./connectors";
 import { recordLog } from "./log";
-import { summaryPromptTokensFrom } from "./prompt-size";
+import { noteModelUnavailable } from "./model-availability";
+import { promptTokensFrom, summaryPromptTokensFrom } from "./prompt-size";
 import {
 	errorRetryAfterMs,
+	isModelRefusal,
+	isOverflowFailure,
 	isRetryableFailure,
+	isTimeoutFailure,
 	markRateLimited,
 	retryAfterMs,
 } from "./request-state";
-import { noteServed, sessionTokens } from "./route-memory";
+import {
+	forgetSessionTokens,
+	noteServed,
+	noteSessionRow,
+	noteSessionTokens,
+	servedEntries,
+	sessionRows,
+	sessionTokens,
+} from "./route-memory";
 import {
 	type ChosenRoute,
+	chooseLargestTarget,
 	chooseRouteForRequest,
 	chooseRouteIgnoringParks,
+	describeUnroutable,
 	hasAlternativeRoute,
 	rewriteModel,
 	routedURL,
 } from "./routing";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
+import { mapVariant, rewriteVariant } from "./variants";
 
 /**
  * The model row a session is running on, as the compaction watcher needs it:
@@ -53,6 +70,8 @@ type Tracked = {
 	at: number;
 	/** The row the call routed, and the window the connector that took it holds. */
 	familyKey?: string;
+	/** The connector's own id for the model, once a free variant has been swapped in. */
+	modelID?: string;
 	context?: number;
 };
 
@@ -75,6 +94,16 @@ const MAX_PARK_MS = 60 * 60_000;
 // generation. These run in the session but they are not the conversation, so
 // their model must not become the one the conversation is measured against.
 const AUXILIARY_KINDS = new Set(["title", "generate", "compaction"]);
+
+/**
+ * Sessions that have already been compacted once because a request overflowed.
+ *
+ * A compaction is asynchronous: the retry can arrive before the summary lands. One
+ * unattended re-compaction per session is the useful amount — a second overflow
+ * after that means compacting is not the answer, and the turn should say so
+ * instead of spinning.
+ */
+const overflowCompacted = new Set<string>();
 
 function sessionKey(sessionID: string, providerID: string) {
 	return `${sessionID}:${providerID}`;
@@ -104,7 +133,13 @@ function isRoutedSlot(key: string) {
 
 function track(sessionID: string, tracked: Tracked, familyKey?: string) {
 	bySession.set(sessionKey(sessionID, tracked.providerID), tracked);
-	if (familyKey) bySession.set(modelKey(sessionID, familyKey), tracked);
+	if (familyKey) {
+		// The balance is the client's: the pin is shared by every session of the
+		// row, while the slot under this session's key stays behind for charging
+		// this session's own request to the credential it used.
+		bySession.set(modelKey(sessionID, familyKey), tracked);
+		pinnedByRow.set(familyKey, tracked);
+	}
 	// Kept for any lookup that cannot name the row: a failure reported without a
 	// model id still has to be charged to the credential that was in use.
 	bySession.set(sessionKey(sessionID, ROUTED), tracked);
@@ -163,11 +198,340 @@ function bindRoute(
 	});
 }
 
+/**
+ * The request one target receives: the host's own request, pointed at the
+ * connector, with the row's name replaced by the connector's id and the
+ * thinking level translated onto that connector's own rung.
+ *
+ * Shared by the first attempt and by every retry inside this plugin, so a
+ * retried call cannot differ from the first in anything but the target.
+ */
+async function prepareRoutedRequest(input: {
+	family: ModelFamily;
+	pristine: Request;
+	route: ChosenRoute;
+	/** The base the request is currently addressed to, when it is not the stub. */
+	replaceBase?: string;
+	variant: string | undefined;
+}): Promise<Request> {
+	const { family, pristine, replaceBase, route, variant } = input;
+	let request = pristine;
+	let url = routedURL(request.url, route.baseURL);
+	// A request the model hook already pointed at a connector no longer names the
+	// stub, so the host is not the thing to swap: the previous target is. Sending
+	// it on with only its credential changed would deliver `p2`'s key to `p1`'s
+	// endpoint.
+	if (url === undefined && replaceBase) {
+		const base = replaceBase.replace(/\/+$/, "");
+		if (request.url.startsWith(base)) {
+			url = `${route.baseURL}${request.url.slice(base.length)}`;
+		}
+	}
+	if (url && url !== request.url) request = new Request(url, request);
+	request = await rewriteModel(request, route.modelID, (body) => {
+		// The host wrote the row's thinking level into the body. The target
+		// may name that level differently, or not have it at all, so the
+		// body is translated onto the rung this connector actually offers.
+		rewriteVariant(
+			body,
+			mapVariant(variant, family.variants ?? []),
+			mapVariant(variant, route.variants ?? []),
+		);
+	});
+	const headers = new Headers(request.headers);
+	applyAuthToHeaders(headers, route.account.auth);
+	return new Request(request, { headers });
+}
+
+/**
+ * Send one failed call to another target, without the session hearing about it.
+ *
+ * The response is read here, inside the plugin, so a spent credential's refusal
+ * never becomes an attempt the host can record: it is parked, the next target is
+ * chosen from the same row, and the request goes out again. Only when the targets
+ * are exhausted does the caller get a response at all, and by then it is the last
+ * target's own words rather than a failure this plugin invented.
+ *
+ * Every byte the session receives still comes from a real provider. Nothing is
+ * synthesised.
+ */
+async function failoverResponse(input: {
+	agent: string;
+	db: Database;
+	family: ModelFamily;
+	kind: string;
+	/** The target whose refusal started this walk. */
+	original: ChosenRoute;
+	/** Where that attempt was addressed, when it was not the stub itself. */
+	originalBase: string;
+	pending: PendingAttempt;
+	sessionID: string;
+	reported: string;
+}): Promise<Response | undefined> {
+	const {
+		agent,
+		db,
+		family,
+		kind,
+		original,
+		originalBase,
+		pending,
+		sessionID,
+		reported,
+	} = input;
+	if (!getBalancingEnabled(db)) return undefined;
+	const minContext = sessionTokens(db, sessionID);
+
+	// A walk that ends with nothing to show must leave the row where it was: the
+	// session is about to be told about the original refusal, and a title call or
+	// the next request must not be pointed at a target this walk merely tried.
+	const abandon = () => {
+		bindRoute(sessionID, family.key, kind, original);
+		return undefined;
+	};
+
+	// A fresh request from the bytes the host wrote: a target cannot inherit the
+	// previous target's URL, model id or credential, and the same bytes can be
+	// sent as many times as there are targets.
+	const template = () =>
+		new Request(pending.url, {
+			body: pending.body === undefined ? undefined : pending.body.slice(0),
+			headers: pending.headers,
+			method: pending.method,
+		});
+	// Each attempt is addressed to its own connector: the previous one is what
+	// the request currently names, so that is what gets replaced.
+	let base = originalBase;
+
+	try {
+		for (;;) {
+			if (pending.failures >= ATTEMPT_CAP) return abandon();
+
+			const route = chooseRouteForRequest(
+				db,
+				family,
+				pending.tried,
+				minContext,
+			);
+			// Nothing left in this row. The session is handed the last refusal that
+			// was actually returned, so the words it reads are a provider's own.
+			if (!route) return abandon();
+
+			pending.failures += 1;
+			const applied = mapVariant(pending.variant, route.variants ?? [])?.id;
+			// Bound before the send, so a failure reported for this attempt — by
+			// the host, if it ever sees one — is charged to the target that
+			// actually answered it.
+			bindRoute(sessionID, family.key, kind, route);
+			announceRoute({
+				db,
+				key: family.key,
+				modelID: family.key,
+				next: { alias: route.account.alias, providerID: route.providerID },
+				reason: `retrying after ${reported.slice(0, 60)}`,
+			});
+			if (!pending.side) {
+				noteServed(db, family.key, {
+					agent,
+					alias: route.account.alias,
+					applied,
+					modelID: route.modelID,
+					providerID: route.providerID,
+					variant: pending.variant,
+				});
+			}
+			markAccountUsed(db, route.providerID, route.account.alias);
+			const tracked = {
+				alias: route.account.alias,
+				at: now(),
+				context: route.context,
+				familyKey: family.key,
+				modelID: route.modelID,
+				providerID: route.providerID,
+			};
+			bySession.set(modelKey(sessionID, family.key), tracked);
+			bySession.set(sessionKey(sessionID, ROUTED), tracked);
+			bySession.set(sessionKey(sessionID, route.providerID), tracked);
+
+			let request: Request;
+			try {
+				request = await prepareRoutedRequest({
+					family,
+					pristine: template(),
+					replaceBase: base,
+					route,
+					variant: pending.variant,
+				});
+			} catch {
+				return abandon();
+			}
+			base = route.baseURL;
+
+			let response: Response;
+			try {
+				response = await fetch(request);
+			} catch {
+				// A transport failure is this target's, not the session's: record it
+				// as a spent credential and walk on.
+				pending.tried.add(accountKey(route.providerID, route.account.alias));
+				markRateLimited(
+					db,
+					route.providerID,
+					route.account.alias,
+					60_000,
+					reported,
+				);
+				byRequest.set(request, tracked);
+				continue;
+			}
+
+			byRequest.set(request, tracked);
+			if (response.ok) return response;
+
+			const refusal = `HTTP ${response.status}${
+				response.statusText ? ` ${response.statusText}` : ""
+			}`;
+			// A refusal the conversation caused, or one every target would repeat,
+			// is not this account's: the session gets it rather than another walk.
+			if (!isRetryableFailure({ status: response.status })) {
+				bindRoute(sessionID, family.key, kind, original);
+				return response;
+			}
+
+			pending.tried.add(accountKey(route.providerID, route.account.alias));
+			markRateLimited(
+				db,
+				route.providerID,
+				route.account.alias,
+				retryAfterMs(response),
+				refusal,
+			);
+			recordLog(
+				"failover",
+				`${route.providerID}/${route.account.alias} answered ${refusal}; retried inside the call`,
+			);
+			// The body is not read, so nothing is left holding the connection.
+			await response.body?.cancel().catch(() => {});
+		}
+	} finally {
+		// The attempt is over: whatever follows is a new model request, and it
+		// must route from the row rather than from this walk's last guess.
+		if (!pending.side) forgetAttempt(sessionID, family.key, kind);
+	}
+}
+
 function clearBoundRoutes(sessionID: string, familyKey: string) {
 	const prefix = `${sessionID}\u0000${familyKey}\u0000`;
 	for (const key of [...boundRoutes.keys()]) {
 		if (key.startsWith(prefix)) boundRoutes.delete(key);
 	}
+}
+
+function forgetAttempt(sessionID: string, familyKey: string, kind: string) {
+	pendingAttempts.delete(pendingKey(sessionID, familyKey, kind));
+}
+
+/**
+ * What one routed call needs in order to be retried inside this plugin.
+ *
+ * A provider failure used to be handed to the host, which classified it, put it
+ * in the conversation, and only then asked the retry hook what to do. Every
+ * spent credential therefore reached the transcript as an error, even when the
+ * next target would have answered. So the request is kept here, pristine — the
+ * host's own body, still naming the virtual row — and the response hook can
+ * send it again to another target before the session ever sees an attempt.
+ *
+ * `pristine` is a clone, not the routed request: the routed one has already had
+ * its URL, model field and credential replaced, and a retry must start from what
+ * the host actually wrote so each target gets its own baseURL and id.
+ */
+type PendingAttempt = {
+	at: number;
+	/** The host's own body, already read, so every attempt is built from it. */
+	body: ArrayBuffer | undefined;
+	headers: Headers;
+	method: string;
+	url: string;
+	/** Whether this model request is the conversation or housekeeping beside it. */
+	side: boolean;
+	/** Accounts this model request has already been sent to. */
+	tried: Set<string>;
+	/** How many targets have answered a failure so far. */
+	failures: number;
+	/** The row's thinking level as the host asked for it. */
+	variant?: string;
+};
+
+/**
+ * Read the host's request into a shape a retry can rebuild from.
+ *
+ * One read, up front. Cloning the request instead and leaving the copy unread
+ * would leave a tee'd branch buffering the whole conversation for the life of
+ * the request, and a request that never fails would never release it.
+ */
+async function readAttempt(request: Request): Promise<{
+	body: ArrayBuffer | undefined;
+	headers: Headers;
+	method: string;
+	url: string;
+}> {
+	let body: ArrayBuffer | undefined;
+	if (request.body !== null) {
+		try {
+			body = await request.arrayBuffer();
+		} catch {
+			body = undefined;
+		}
+	}
+	return {
+		body,
+		headers: new Headers(request.headers),
+		method: request.method,
+		url: request.url,
+	};
+}
+
+const pendingAttempts = new Map<string, PendingAttempt>();
+
+// A retried call is still one model request, so the entry is dropped by the same
+// sweep that bounds the bound routes rather than growing with every request.
+const PENDING_CAP = 256;
+
+function pendingKey(sessionID: string, familyKey: string, kind: string) {
+	return `${sessionID}\u0000${familyKey}\u0000${kind}`;
+}
+
+function pendingAttempt(
+	sessionID: string,
+	familyKey: string,
+	kind: string,
+): PendingAttempt | undefined {
+	const entry = pendingAttempts.get(pendingKey(sessionID, familyKey, kind));
+	return entry && now() - entry.at <= BOUND_ROUTE_TTL_MS ? entry : undefined;
+}
+
+function rememberAttempt(
+	sessionID: string,
+	familyKey: string,
+	kind: string,
+	pristine: Awaited<ReturnType<typeof readAttempt>>,
+	tried: Set<string>,
+	input: { side: boolean; variant?: string },
+) {
+	if (pendingAttempts.size >= PENDING_CAP) {
+		const cutoff = now() - BOUND_ROUTE_TTL_MS;
+		for (const [key, entry] of pendingAttempts) {
+			if (entry.at < cutoff) pendingAttempts.delete(key);
+		}
+	}
+	pendingAttempts.set(pendingKey(sessionID, familyKey, kind), {
+		...pristine,
+		at: now(),
+		failures: 0,
+		side: input.side,
+		tried,
+		variant: input.variant,
+	});
 }
 
 /**
@@ -205,31 +569,38 @@ function isParked(db: Database, providerID: string, alias: string) {
 	return Boolean(account?.rateLimitedUntil && account.rateLimitedUntil > now());
 }
 
-// Credentials this row has already tried since its last answer, named
-// `provider/alias`. A retry reads this so it moves forward through the chain
-// instead of starting again at the first target and parking everything on the
-// way down; naming the credential rather than the provider is what lets the
-// second credential of a provider still answer.
-//
-// The trail carries its own clock because the routing slots cannot: the failover
-// path clears those before a retry on purpose, so by the time the question is
-// asked there is nothing there to date. `at` is refreshed by every routing
-// decision, which makes it the last time this row was balanced.
+/**
+ * The row this client is balanced on: the provider that last answered it, and
+ * the credentials already tried since.
+ *
+ * The balance belongs to the client, not to a session. Every session sending
+ * the same model is sending the same request to the same quota, so the unit
+ * that fails over is the row: one conversation hitting a limit moves the whole
+ * client to the next target, and a new conversation starts where the client
+ * already is instead of walking back onto the exhausted credential. Keyed by
+ * session, each tab kept its own private idea of the order and re-hit the same
+ * dead account again and again.
+ *
+ * Which credential served a particular request is a different question and is
+ * still per session: a failure has to be charged to the account that request
+ * actually used. That stays on `bySession` under the session key.
+ */
 type Trail = { at: number; tried: Set<string> };
-const trailsByModel = new Map<string, Trail>();
+const trailsByRow = new Map<string, Trail>();
+/** The target each row last answered on, shared by every session of the row. */
+const pinnedByRow = new Map<string, Tracked>();
 
-function trailFor(sessionID: string, familyKey: string) {
-	const key = modelKey(sessionID, familyKey);
-	let trail = trailsByModel.get(key);
+function trailFor(familyKey: string) {
+	let trail = trailsByRow.get(familyKey);
 	if (!trail) {
 		trail = { at: now(), tried: new Set() };
-		trailsByModel.set(key, trail);
+		trailsByRow.set(familyKey, trail);
 	}
 	return trail;
 }
 
-function triedFor(sessionID: string, familyKey: string) {
-	const trail = trailFor(sessionID, familyKey);
+function triedFor(familyKey: string) {
+	const trail = trailFor(familyKey);
 	trail.at = now();
 	return trail.tried;
 }
@@ -242,13 +613,21 @@ function triedFor(sessionID: string, familyKey: string) {
 type RecordedTarget = { at: number; target: SessionTarget };
 const targetsBySession = new Map<string, Map<string, RecordedTarget>>();
 
-function recordTarget(sessionID: string, target: SessionTarget) {
+function recordTarget(db: Database, sessionID: string, target: SessionTarget) {
 	let rows = targetsBySession.get(sessionID);
 	if (!rows) {
 		rows = new Map();
 		targetsBySession.set(sessionID, rows);
 	}
 	rows.set(target.familyKey, { at: now(), target });
+	// Written through to the store: a reload would otherwise leave the
+	// compaction watcher with no row to measure, and a conversation nothing
+	// measures is a conversation nothing compacts.
+	noteSessionRow(db, sessionID, {
+		context: target.context,
+		familyKey: target.familyKey,
+		providerID: target.providerID,
+	});
 }
 
 // The target each row was last announced on, so a switch can name where it came
@@ -264,17 +643,16 @@ const announced = new Map<string, { alias: string; providerID: string }>();
  * own schedule, and throwing that away would send a call straight back to
  * something still limited.
  */
-function forgetStaleTrail(db: Database, sessionID: string, familyKey: string) {
-	const key = modelKey(sessionID, familyKey);
-	const trail = trailsByModel.get(key);
+function forgetStaleTrail(db: Database, familyKey: string) {
+	const trail = trailsByRow.get(familyKey);
 	if (!trail) return;
 	const window = rebalanceAfterMs(db);
 	// Zero is the window switched off, so nothing ages a trail out but a change to
 	// the order itself.
 	if (window <= 0) return;
 	if (now() - trail.at <= window) return;
-	trailsByModel.delete(key);
-	announced.delete(key);
+	trailsByRow.delete(familyKey);
+	announced.delete(familyKey);
 }
 
 /**
@@ -293,9 +671,11 @@ function forgetStaleTrail(db: Database, sessionID: string, familyKey: string) {
  * describe which model a conversation is on, which no reorder changes.
  */
 export function forgetRoutingMemory() {
-	trailsByModel.clear();
+	trailsByRow.clear();
+	pinnedByRow.clear();
 	announced.clear();
 	boundRoutes.clear();
+	pendingAttempts.clear();
 	for (const key of [...bySession.keys()]) {
 		if (isRoutedSlot(key)) bySession.delete(key);
 	}
@@ -393,6 +773,93 @@ function recordHandedOver(input: {
 }
 
 /**
+ * When the client's balance would next be dropped for sitting idle, in epoch
+ * milliseconds, or `undefined` when nothing is counting down.
+ *
+ * Routing memory is per row, so different rows go stale at different moments.
+ * The soonest one is what a single note can honestly say: it is the moment the
+ * next request would start from the head of the order instead of continuing.
+ * A window switched off has no such moment; a row with no trail has nothing to
+ * forget yet.
+ */
+export function nextRebalanceAt(db: Database, at: number = now()) {
+	const window = rebalanceAfterMs(db);
+	if (window <= 0) return undefined;
+	let soonest: number | undefined;
+	// The served notes are the persisted record of each row's last routed
+	// request, so the countdown survives a reload that a trail in memory does not.
+	for (const entry of servedEntries(db, at)) {
+		const due = entry.at + window;
+		// A note already past its window is stale, not pending: the next request
+		// drops it rather than waiting for it.
+		if (due <= at) continue;
+		if (soonest === undefined || due < soonest) soonest = due;
+	}
+	return soonest;
+}
+
+/**
+ * Tell the conversation, once, why this row cannot be served.
+ *
+ * The message is a synthetic one rather than a thrown error: the turn still
+ * fails on the provider request, which is an ordinary model error the client
+ * already knows how to show, but the reason is in the transcript and the panel's
+ * log instead of being inferable only from a stack trace. Announced through the
+ * model-request hook's own session, so it lands in the conversation that asked.
+ */
+/**
+ * Say that nothing can serve this model.
+ *
+ * The claim a provider makes when it refuses is about the conversation, and the
+ * host has no way to separate "your prompt is wrong" from "every account is
+ * spent". This message is the second half of that: it names what is exhausted,
+ * when each comes back, and what the user can do now. It is a status line, not a
+ * failure — the turn still ends, because there is nothing honest to answer with.
+ *
+ * One per request, deliberately: a second attempt is a second thing the user
+ * asked for, so it earns its own answer rather than being suppressed as a repeat.
+ */
+async function announceUnroutable(
+	ctx: Context,
+	db: Database,
+	sessionID: string,
+	family: ModelFamily,
+) {
+	const reasons = describeUnroutable(db, family).map((reason) =>
+		// The instant inside the line is an epoch timestamp; the panel reads it as
+		// one, but a sentence in a conversation does not.
+		reason.replace(/limited until (\S+)$/, (_whole, iso: string) => {
+			const at = Date.parse(iso);
+			return Number.isFinite(at)
+				? `limited until ${formatRollover(at, now())}`
+				: `limited (${iso})`;
+		}),
+	);
+	const text = [
+		`Balancer: nothing can serve ${family.key} right now.`,
+		...reasons.map((reason) => `- ${reason}`),
+		"Open the Balancer panel to add a target, or wait for the limited credentials to reset.",
+	].join("\n");
+	recordLog("error", text.replace(/\n/g, " "));
+	try {
+		await ctx.session.synthetic({
+			description: `no target can serve ${family.key}`,
+			sessionID,
+			text,
+		});
+	} catch (error) {
+		// A host that will not take a synthetic message must not turn this into a
+		// second failure: the log line above already carries the reason.
+		recordLog(
+			"error",
+			`could not tell the session why ${family.key} is unroutable: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+/**
  * One route choice for both request hooks. The row keeps the target that last
  * answered while it is healthy, so a conversation stays on the model it shifted
  * to instead of snapping back to the top of the chain. Targets already tried
@@ -409,11 +876,11 @@ function chooseStickyRoute(input: {
 	// A conversation that already fills more than a target's window cannot be
 	// handed to it: the provider would reject the whole request, which reads as
 	// a failure of the account when it is really the row's own target choice.
-	const minContext = sessionTokens(sessionID);
+	const minContext = sessionTokens(db, sessionID);
 	// A trail older than the idle window is void, so the balance starts again.
-	forgetStaleTrail(db, sessionID, family.key);
-	const tried = triedFor(sessionID, family.key);
-	const remembered = bySession.get(modelKey(sessionID, family.key));
+	forgetStaleTrail(db, family.key);
+	const tried = triedFor(family.key);
+	const remembered = pinnedByRow.get(family.key);
 	const pinned =
 		remembered && fresh(remembered)
 			? {
@@ -440,11 +907,13 @@ function chooseStickyRoute(input: {
 	const lastChance =
 		chooseRouteIgnoringParks(db, family, tried, minContext) ??
 		chooseRouteIgnoringParks(db, family, undefined, minContext) ??
-		// Every target's window is too small for this conversation. Compacting is
-		// the real answer, and leaving the call pointed at the stub cannot even
-		// say so; the provider's own refusal at least names the size problem.
-		chooseRouteIgnoringParks(db, family, tried) ??
-		chooseRouteIgnoringParks(db, family);
+		// Every target's window is too small for this conversation. Handing it to
+		// one anyway is what produced a hard overflow from a model that had never
+		// seen this conversation: the provider rejects the whole request, and the
+		// failure reads as the account's. The widest target is the only one that
+		// might still fit, and its refusal names the real limit when nothing does.
+		chooseLargestTarget(db, family, tried) ??
+		chooseLargestTarget(db, family);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 
@@ -459,12 +928,30 @@ function chooseStickyRoute(input: {
  * provider this plugin does not hold, and its conversation is then not ours to
  * compact.
  */
-export function balancerTargetsFor(sessionID: string): SessionTarget[] {
+export function balancerTargetsFor(
+	db: Database,
+	sessionID: string,
+): SessionTarget[] {
 	const rows = targetsBySession.get(sessionID);
-	if (!rows) return [];
-	const live = [...rows.values()].filter(
-		(recorded) => now() - recorded.at <= STALE_AFTER_MS,
-	);
+	const live = rows
+		? [...rows.values()].filter(
+				(recorded) => now() - recorded.at <= STALE_AFTER_MS,
+			)
+		: [];
+	const known = new Set(live.map((recorded) => recorded.target.familyKey));
+	// The store is the record across a reload, so rows this run has not seen
+	// are still this session's own conversation.
+	for (const row of sessionRows(db, sessionID, now(), STALE_AFTER_MS)) {
+		if (known.has(row.familyKey)) continue;
+		live.push({
+			at: row.at ?? now(),
+			target: {
+				context: row.context,
+				familyKey: row.familyKey,
+				providerID: row.providerID,
+			},
+		});
+	}
 	return live.map((recorded) => recorded.target);
 }
 
@@ -526,7 +1013,14 @@ export async function registerHooks({
 					family,
 					sessionID: event.sessionID,
 				});
-		if (!chosen) return;
+		if (!chosen) {
+			// Nothing in the row can answer, and leaving the call pointed at the
+			// stub is what turned this into an unexplainable transport failure. Say
+			// what is wrong in the conversation itself, in one message, and let the
+			// request fail as an ordinary provider error rather than a system one.
+			if (!side) await announceUnroutable(ctx, db, event.sessionID, family);
+			return;
+		}
 		const route = chosen.route;
 		bindRoute(event.sessionID, family.key, kind, route);
 
@@ -540,7 +1034,17 @@ export async function registerHooks({
 		// conversation failure will be charged to.
 		if (side) return;
 
-		noteServed(family.key, route);
+		noteServed(db, family.key, {
+			agent: String(event.agent),
+			alias: route.account.alias,
+			// The level the connector is actually asked for. `route.variants` is
+			// this target's own ladder, so a row asking for `max` on a connector
+			// that tops out at `high` reports `high`, which is what is running.
+			applied: mapVariant(event.model.variant, route.variants ?? [])?.id,
+			modelID: route.modelID,
+			providerID: route.providerID,
+			variant: event.model.variant,
+		});
 		markAccountUsed(db, route.providerID, route.account.alias);
 		track(
 			event.sessionID,
@@ -549,6 +1053,7 @@ export async function registerHooks({
 				at: now(),
 				context: route.context,
 				familyKey: family.key,
+				modelID: route.modelID,
 				providerID: route.providerID,
 			},
 			family.key,
@@ -557,7 +1062,7 @@ export async function registerHooks({
 		// call: either hook alone has to leave the watcher with the right row,
 		// and writing the same target twice is not a change.
 		if (!AUXILIARY_KINDS.has(String(event.kind))) {
-			recordTarget(event.sessionID, {
+			recordTarget(db, event.sessionID, {
 				context: route.context,
 				familyKey: family.key,
 				providerID: route.providerID,
@@ -586,10 +1091,40 @@ export async function registerHooks({
 
 			const kind = String(event.kind);
 			const side = SIDE_KINDS.has(kind);
+			// The prompt on the wire is the one figure routing cannot infer from
+			// the host: every balancer row is declared at 1M, so nothing else stops
+			// a conversation that has outgrown a target from being sent to it. It is
+			// measured when the balancer has no figure of its own — a session it has
+			// never seen, or one that was running before the plugin loaded — and
+			// otherwise the step-end measurement keeps the figure current. Reading
+			// every body would cost a copy of the conversation on every request for
+			// a number the host already reports after each step.
+			if (
+				!side &&
+				kind === PRIMARY_KIND &&
+				sessionTokens(db, event.sessionID) === undefined
+			) {
+				const prompt = await promptTokensFrom(event.request);
+				if (prompt !== undefined) {
+					noteSessionTokens(db, event.sessionID, prompt);
+				}
+			}
 			// Reuse the route this model request chose. The host's HTTP stack
 			// retries the request itself, and choosing a new credential for each
 			// retry is what mixed two providers' errors into one attempt.
 			let route = boundRoute(event.sessionID, family.key, kind);
+			if (
+				route &&
+				typeof route.context === "number" &&
+				route.context > 0 &&
+				route.context < (sessionTokens(db, event.sessionID) ?? 0)
+			) {
+				// The model request chose before the prompt could be measured, and
+				// this target cannot hold what is about to be sent to it. Sending it
+				// anyway is the hard overflow the provider reports as its own fault.
+				clearBoundRoutes(event.sessionID, family.key);
+				route = undefined;
+			}
 			let parkedFallback = false;
 			if (!route) {
 				const chosen = side
@@ -599,36 +1134,59 @@ export async function registerHooks({
 							family,
 							sessionID: event.sessionID,
 						});
-				if (!chosen) return;
+				if (!chosen) {
+					if (!side) {
+						await announceUnroutable(ctx, db, event.sessionID, family);
+					}
+					return;
+				}
 				route = chosen.route;
 				parkedFallback = chosen.parkedFallback;
 			}
 			bindRoute(event.sessionID, family.key, kind, route);
 
-			let request = event.request;
-			const url = routedURL(request.url, route.baseURL);
-			if (url && url !== request.url) request = new Request(url, request);
-			request = await rewriteModel(request, route.modelID);
+			// What the host actually wrote, before this plugin touched it. A retry
+			// to another target has to start from here: the routed request below
+			// already names one connector's URL and model id, and sending that to
+			// a different provider is the failure this copy exists to prevent.
+			const pristine = await readAttempt(event.request);
 
-			const headers = new Headers(request.headers);
-			applyAuthToHeaders(headers, route.account.auth);
-			request = new Request(request, { headers });
+			const variant = event.model.variant;
+			const request = await prepareRoutedRequest({
+				family,
+				// A fresh stream from the bytes just read: the host's own request
+				// has already been consumed by `readAttempt`.
+				pristine: new Request(pristine.url, {
+					body:
+						pristine.body === undefined ? undefined : pristine.body.slice(0),
+					headers: pristine.headers,
+					method: pristine.method,
+				}),
+				route,
+				variant,
+			});
 
 			event.request = request;
 			if (!side) {
 				announceRoute({
 					db,
-					// Per row, so one model's switch is not announced as another's:
-					// with two models in a session these lines would otherwise
-					// alternate for no reason at all.
-					key: modelKey(event.sessionID, family.key),
+					// Per row: the balance is the client's, so one switch is one line,
+					// whichever session happened to make it.
+					key: family.key,
 					modelID: family.key,
 					next: { alias: route.account.alias, providerID: route.providerID },
 					reason: parkedFallback
 						? "nothing healthy could answer; trying it anyway"
 						: undefined,
 				});
-				noteServed(family.key, route);
+				noteServed(db, family.key, {
+					agent: String(event.agent),
+					alias: route.account.alias,
+					applied: mapVariant(event.model.variant, route.variants ?? [])?.id,
+					modelID: route.modelID,
+					providerID: route.providerID,
+					variant: event.model.variant,
+				});
 				markAccountUsed(db, route.providerID, route.account.alias);
 			}
 			const tracked = {
@@ -636,9 +1194,21 @@ export async function registerHooks({
 				at: now(),
 				context: route.context,
 				familyKey: family.key,
+				modelID: route.modelID,
 				providerID: route.providerID,
 			};
 			byRequest.set(request, tracked);
+			// The attempt this call may have to repeat. Only a routed call can be
+			// retried from here — the request has to be one this plugin can
+			// re-point at another target, and its targets are a row's.
+			rememberAttempt(
+				event.sessionID,
+				family.key,
+				kind,
+				pristine,
+				new Set([accountKey(route.providerID, route.account.alias)]),
+				{ side, variant },
+			);
 			// A side call keeps its failure on its own request, so the response
 			// hook charges the right credential, but never rewrites the
 			// conversation's remembered target.
@@ -652,7 +1222,7 @@ export async function registerHooks({
 				// refusing to record would mean refusing to compact, and a session
 				// that quietly stops being compacted overflows instead.
 				if (!AUXILIARY_KINDS.has(String(event.kind))) {
-					recordTarget(event.sessionID, {
+					recordTarget(db, event.sessionID, {
 						context: route.context,
 						familyKey: family.key,
 						providerID: route.providerID,
@@ -685,7 +1255,7 @@ export async function registerHooks({
 		bySession.set(sessionKey(event.sessionID, providerID), tracked);
 	});
 
-	await ctx.session.hook("http.response", (event) => {
+	await ctx.session.hook("http.response", async (event) => {
 		const tracked = lookupTracked({
 			familyKey: event.model.id,
 			providerID: event.model.providerID,
@@ -698,16 +1268,37 @@ export async function registerHooks({
 		// excluded before it is asked about.
 		const failed = event.response.status >= 400;
 		if (!failed || !isRetryableFailure({ status: event.response.status })) {
-			// An answer ends the failover trail for this row: the session stays
-			// on this target and a later failure may try the others again.
+			// An answer ends the failover trail for this row: the client stays on
+			// this target and a later failure may try the others again.
 			if (tracked.familyKey) {
-				trailsByModel.delete(modelKey(event.sessionID, tracked.familyKey));
+				trailsByRow.delete(tracked.familyKey);
 			}
 			return;
 		}
 		const reported = `HTTP ${event.response.status}${
 			event.response.statusText ? ` ${event.response.statusText}` : ""
 		}`;
+
+		// A call that is not one of this balancer's rows — a provider used
+		// directly — cannot be retried here: there is no row to choose from, so
+		// the park is the whole of this hook's work.
+		if (!tracked.familyKey) {
+			markRateLimited(
+				db,
+				tracked.providerID,
+				tracked.alias,
+				retryAfterMs(event.response),
+				reported,
+			);
+			recordLog(
+				"failover",
+				`${tracked.providerID}/${tracked.alias} answered ${reported}; parked`,
+			);
+			return;
+		}
+
+		// The credential that answered is spent whatever happens next, and it
+		// is parked first so the walk below cannot pick it again.
 		markRateLimited(
 			db,
 			tracked.providerID,
@@ -715,6 +1306,59 @@ export async function registerHooks({
 			retryAfterMs(event.response),
 			reported,
 		);
+
+		// The last moment at which the failure can be kept out of the session.
+		// Everything the host could do with it — classify it, record it, ask the
+		// retry hook, put a cut-off in the transcript — happens after this hook
+		// returns, so a refusal another target can answer is answered here and the
+		// session is handed that answer instead. What it sees is a slow turn.
+		{
+			const family = await familyFor(ctx, db, tracked.familyKey);
+			const pending = pendingAttempt(
+				event.sessionID,
+				tracked.familyKey,
+				String(event.kind),
+			);
+			if (family && pending) {
+				const replacement = await failoverResponse({
+					agent: String(event.agent),
+					db,
+					family,
+					kind: String(event.kind),
+					original: boundRoute(
+						event.sessionID,
+						tracked.familyKey,
+						String(event.kind),
+					) ?? {
+						account: { alias: tracked.alias } as ChosenRoute["account"],
+						available: true,
+						baseURL: BALANCER_BASE_URL,
+						modelID: tracked.modelID ?? tracked.familyKey,
+						package: family.package,
+						providerID: tracked.providerID,
+					},
+					// Where this attempt was sent, so the retry replaces that base
+					// rather than assuming the request still names the stub.
+					originalBase:
+						boundRoute(event.sessionID, tracked.familyKey, String(event.kind))
+							?.baseURL ?? BALANCER_BASE_URL,
+					pending,
+					reported,
+					sessionID: event.sessionID,
+				});
+				if (replacement) {
+					event.response = replacement;
+					if (replacement.ok) {
+						trailsByRow.delete(tracked.familyKey);
+						return;
+					}
+					// Every target refused in words another would repeat. That is
+					// the conversation's problem and the session must see it.
+					return;
+				}
+			}
+		}
+
 		recordLog(
 			"failover",
 			`${tracked.providerID}/${tracked.alias} answered ${reported}; parked`,
@@ -756,7 +1400,91 @@ export async function registerHooks({
 
 		const rowKey = event.model.id;
 		const from = `${tracked.providerID}/${tracked.alias}`;
-		if (!isRetryableFailure({ error: event.error, status })) {
+
+		// Three failures arrive here, and only one of them is about the account:
+		//
+		//   - a model the provider will not serve on this plan: the credential is
+		//     fine, so the pair is marked and another target is tried;
+		//   - a request that ran out of time: the same key answers the next call,
+		//     so nothing is parked and only this row moves on;
+		//   - anything else: the account is spent, limited, or unreachable.
+		//
+		// Parking on the first two is what made a slow model look limited and took
+		// a provider out of rotation while the rest of its catalogue worked.
+		const refusal = isModelRefusal({ error: event.error, status });
+		const timeout = isTimeoutFailure({ error: event.error, status });
+		const refusedModel = tracked.modelID ?? rowKey;
+
+		// A conversation larger than the window it was sent to is nobody's fault
+		// but this request's: the same prompt overflows on every target. The answer
+		// is a smaller conversation, so compact and let the host try again — the
+		// alternative is handing the raw overflow text to the session, which reads
+		// as a provider failure and stops the turn.
+		if (isOverflowFailure({ error: event.error, status })) {
+			if (overflowCompacted.has(event.sessionID)) {
+				// Compacting did not shrink it enough. Retrying forever would spin,
+				// so the failure is handed over with the reason written down.
+				overflowCompacted.delete(event.sessionID);
+				recordLog(
+					"error",
+					`${from} overflowed after compacting: the conversation is larger than ${refusedModel} can hold: ${reported.slice(0, 120)}`,
+				);
+				recordHandedOver({
+					alias: tracked.alias,
+					branch: "overflow after compaction",
+					db,
+					from,
+					providerID: tracked.providerID,
+					reported,
+				});
+				return;
+			}
+			overflowCompacted.add(event.sessionID);
+			// What was measured no longer describes the prompt.
+			forgetSessionTokens(db, event.sessionID);
+			recordLog(
+				"compact",
+				`${from} could not hold the conversation; compacting before trying again`,
+			);
+			try {
+				await ctx.session.compact({ sessionID: event.sessionID });
+			} catch (error) {
+				overflowCompacted.delete(event.sessionID);
+				recordLog(
+					"error",
+					`compaction after overflow failed: ${
+						error instanceof Error ? error.message : String(error)
+					}`,
+				);
+				recordHandedOver({
+					alias: tracked.alias,
+					branch: "overflow, compaction failed",
+					db,
+					from,
+					providerID: tracked.providerID,
+					reported,
+				});
+				return;
+			}
+			event.decision = { delay: 0, retry: true };
+			return;
+		}
+
+		if (refusal) {
+			// The catalogue cannot know a plan, so the answer has to: remember the
+			// pair for a while and let routing step over it.
+			noteModelUnavailable(db, tracked.providerID, refusedModel);
+			recordLog(
+				"failover",
+				`${from} refused ${refusedModel}: ${reported.slice(0, 120)}; the account stays, the model is skipped`,
+			);
+		}
+
+		if (
+			!refusal &&
+			!timeout &&
+			!isRetryableFailure({ error: event.error, status })
+		) {
 			recordLog(
 				"error",
 				`${from} failed and is not the account's fault, so the session sees it: ${reported.slice(0, 120)}`,
@@ -773,15 +1501,19 @@ export async function registerHooks({
 		}
 
 		// Park before deciding, so a failure that cannot be passed on still
-		// leaves the account out of the next selection.
-		const park = Math.min(
-			errorRetryAfterMs(event.error) ?? 60_000,
-			MAX_PARK_MS,
-		);
-		markRateLimited(db, tracked.providerID, tracked.alias, park, reported);
-		triedFor(event.sessionID, rowKey).add(
-			accountKey(tracked.providerID, tracked.alias),
-		);
+		// leaves the account out of the next selection. A timeout and a model
+		// refusal are excluded on purpose: neither says the credential is spent.
+		if (!refusal && !timeout) {
+			const park = Math.min(
+				errorRetryAfterMs(event.error) ?? 60_000,
+				MAX_PARK_MS,
+			);
+			markRateLimited(db, tracked.providerID, tracked.alias, park, reported);
+		}
+		// Credentials this row has tried are always recorded, so a retry walks on
+		// instead of re-picking the target that just failed — for a timeout that
+		// is the whole of the response, since the account is left alone.
+		triedFor(rowKey).add(accountKey(tracked.providerID, tracked.alias));
 
 		if (!getBalancingEnabled(db)) {
 			recordLog(
@@ -826,6 +1558,15 @@ export async function registerHooks({
 				providerID: tracked.providerID,
 				reported,
 			});
+			// A row whose every target is spent has already been walked inside the
+			// call, so there is no answer left to give. What the session must not
+			// get is a bare error with no way forward: name what is spent, when it
+			// comes back, and where to add a target. The provider's own failure
+			// still reaches the session after this, because there is nothing honest
+			// to replace it with.
+			if (routed && family) {
+				await announceUnroutable(ctx, db, event.sessionID, family);
+			}
 			return;
 		}
 
@@ -837,7 +1578,7 @@ export async function registerHooks({
 		// eventually cross the cap and be cut off from failover for good. Counting
 		// per row is what keeps one model's failures from spending another's room,
 		// and the row is the model, so it is also the list the user can see.
-		const triedNow = triedFor(event.sessionID, rowKey).size;
+		const triedNow = triedFor(rowKey).size;
 		if (triedNow > ATTEMPT_CAP) {
 			recordLog(
 				"error",
@@ -855,8 +1596,10 @@ export async function registerHooks({
 		}
 
 		// Forget this row's target so the retry routes from scratch; the account
-		// just marked limited is skipped by the health check either way.
+		// just marked limited is skipped by the health check either way. The pin
+		// is the client's, so dropping it moves every session of this row on.
 		clearBoundRoutes(event.sessionID, rowKey);
+		pinnedByRow.delete(rowKey);
 		bySession.delete(modelKey(event.sessionID, rowKey));
 		bySession.delete(sessionKey(event.sessionID, ROUTED));
 		bySession.delete(sessionKey(event.sessionID, tracked.providerID));

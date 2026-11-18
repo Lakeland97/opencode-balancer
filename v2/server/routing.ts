@@ -1,12 +1,15 @@
 import type { Database } from "bun:sqlite";
 import { accountKey } from "../core/accounts";
+import { now } from "../core/time";
 import type { Account } from "../core/types";
 import {
 	BALANCER_BASE_URL,
 	type FamilyRoute,
 	type ModelFamily,
 	resolveChain,
+	sortRoutes,
 } from "./connectors";
+import { modelUnavailable } from "./model-availability";
 import {
 	enabledAccounts,
 	enabledAccountsInOrder,
@@ -68,6 +71,7 @@ export function chooseRouteForRequest(
 
 /** The route to send for one credential, or undefined if free-only blocks it. */
 function targetFor(
+	db: Database,
 	route: FamilyRoute,
 	account: Account,
 	minContext?: number,
@@ -75,6 +79,11 @@ function targetFor(
 	const target =
 		route.free === false && account.freeOnly ? freeVariantOf(route) : route;
 	if (!target) return undefined;
+	// A provider that has refused this exact model will refuse it again until the
+	// mark lapses: the catalogue cannot know a plan, so the answer has to. The
+	// mark is per pair, which keeps one refused model from hiding the rest of the
+	// provider's row.
+	if (modelUnavailable(db, target.providerID, target.modelID)) return undefined;
 	// A conversation already larger than this target's window cannot be sent
 	// there: the provider would reject the whole request. The row reports one
 	// large window, so nothing else stops a failover from walking into a
@@ -105,7 +114,7 @@ function walkStoredChain(
 			: healthyAccounts(db, route.providerID);
 		for (const account of accounts) {
 			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
-			const chosen = targetFor(route, account, minContext);
+			const chosen = targetFor(db, route, account, minContext);
 			if (chosen) return chosen;
 		}
 	}
@@ -129,7 +138,7 @@ function walkCredentialOrder(
 		if (exclude.has(accountKey(account.providerID, account.alias))) continue;
 		const route = byProvider.get(account.providerID);
 		if (!route || route.available === false) continue;
-		const chosen = targetFor(route, account, minContext);
+		const chosen = targetFor(db, route, account, minContext);
 		if (chosen) return chosen;
 	}
 	return undefined;
@@ -156,7 +165,89 @@ export function chooseRouteIgnoringParks(
 		: walkCredentialOrder(db, family, exclude, true, minContext);
 }
 
-/** The route the next request would take for this row. */
+/**
+ * The target with the largest window this row can reach, parks included.
+ *
+ * Only used when nothing fits the conversation: every other target would be
+ * rejected outright by the provider, so the largest window is the only one that
+ * might still answer — and it is also the one whose refusal names the real
+ * limit, which is more use to the user than a smaller model's.
+ */
+export function chooseLargestTarget(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+): ChosenRoute | undefined {
+	const routes = family.stored
+		? resolveChain(db, family)
+		: sortRoutes(family.targets, db);
+	const candidates = routes.filter((route) => route.available !== false);
+	// Largest first, so the first credential of the widest target answers.
+	candidates.sort((left, right) => (right.context ?? 0) - (left.context ?? 0));
+	for (const route of candidates) {
+		for (const account of enabledAccounts(db, route.providerID)) {
+			const key = accountKey(route.providerID, account.alias);
+			if (exclude.has(key)) continue;
+			const target =
+				route.free === false && account.freeOnly ? freeVariantOf(route) : route;
+			if (!target) continue;
+			if (modelUnavailable(db, target.providerID, target.modelID)) continue;
+			return { ...target, account };
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Why nothing can serve this row, in the words the user needs to act on.
+ *
+ * A row that cannot be routed is not a balancer failure: a model may have left
+ * every provider that offered it, a price gate may have blocked every one, or
+ * every credential may be parked. Saying which of those it is turns "the call
+ * failed" into a sentence the user can do something about.
+ */
+export function describeUnroutable(
+	db: Database,
+	family: ModelFamily,
+): string[] {
+	const reasons: string[] = [];
+	for (const route of resolveChain(db, family)) {
+		const target = `${route.providerID} ${route.modelID}`;
+		if (route.available === false) {
+			reasons.push(`${target}: the provider no longer offers it`);
+			continue;
+		}
+		if (modelUnavailable(db, route.providerID, route.modelID)) {
+			reasons.push(
+				`${target}: refused by the provider or blocked by a price gate`,
+			);
+			continue;
+		}
+		const accounts = enabledAccounts(db, route.providerID);
+		if (accounts.length === 0) {
+			reasons.push(`${target}: no enabled credential for ${route.providerID}`);
+			continue;
+		}
+		const parked = accounts.every(
+			(account) =>
+				account.rateLimitedUntil != null && account.rateLimitedUntil > now(),
+		);
+		if (parked) {
+			const until = Math.max(
+				...accounts.map((account) => account.rateLimitedUntil ?? 0),
+			);
+			reasons.push(
+				`${target}: every credential is limited until ${new Date(until).toISOString()}`,
+			);
+			continue;
+		}
+		reasons.push(`${target}: no credential could take the request`);
+	}
+	return reasons.length > 0
+		? reasons
+		: [`${family.key}: the row has no targets left`];
+}
+
 export function chooseRoute(
 	db: Database,
 	family: ModelFamily,
@@ -205,10 +296,14 @@ export function routedURL(
  * upstream never sees the virtual family name. Anything unparseable is returned
  * untouched: failing the call is better than changing a body we do not
  * understand.
+ *
+ * `adjust` sees the parsed body first, for the parts of a request that are about
+ * the target rather than the model — a thinking level named differently, say.
  */
 export async function rewriteModel(
 	request: Request,
 	modelID: string,
+	adjust?: (body: Record<string, unknown>) => void,
 ): Promise<Request> {
 	const contentType = request.headers.get("content-type") ?? "";
 	if (!contentType.includes("application/json")) return request;
@@ -220,8 +315,8 @@ export async function rewriteModel(
 	}
 	if (!body || typeof body !== "object" || Array.isArray(body)) return request;
 	const record = body as Record<string, unknown>;
-	if (record.model === modelID) return request;
 	record.model = modelID;
+	adjust?.(record);
 	return new Request(request.url, {
 		body: JSON.stringify(record),
 		headers: request.headers,

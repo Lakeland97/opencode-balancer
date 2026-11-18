@@ -99,7 +99,7 @@ export function createCompactionController(input: {
 				inFlight.delete(sessionID);
 				// The conversation shrank (or the attempt failed); what was measured
 				// before it no longer describes the prompt.
-				forgetSessionTokens(sessionID);
+				forgetSessionTokens(input.db, sessionID);
 				return false;
 			}
 			if (event.type !== "session.step.ended") return false;
@@ -124,7 +124,7 @@ export function createCompactionController(input: {
 			const tokens = contextTokens(event.data?.tokens as TokenInfo | undefined);
 			// Routing uses this so a failover never walks into a target whose
 			// window is smaller than the conversation already fills.
-			noteSessionTokens(sessionID, tokens);
+			noteSessionTokens(input.db, sessionID, tokens);
 			if (tokens < threshold) {
 				// Comfortably inside the window, which also means a compaction
 				// that was in flight has served its purpose as a guard.
@@ -172,7 +172,7 @@ export async function registerCompaction({
 		compact: (sessionID) => ctx.session.compact({ sessionID }),
 		db,
 		recordLog,
-		resolve: balancerTargetsFor,
+		resolve: (sessionID) => balancerTargetsFor(db, sessionID),
 	});
 
 	void (async () => {

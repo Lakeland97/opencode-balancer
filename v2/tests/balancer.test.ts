@@ -237,7 +237,7 @@ describe("chain commands", () => {
 			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
 		]);
 		markAccountUsed(db, "p1", "a");
-		noteServed("deepseek-v4.1-flash", {
+		noteServed(db, "deepseek-v4.1-flash", {
 			modelID: "deepseek-v4.1-flash",
 			providerID: "p1",
 		});
