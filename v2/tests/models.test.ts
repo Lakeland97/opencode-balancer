@@ -64,7 +64,21 @@ describe("model matching", () => {
 	test("an exact id outranks everything", () => {
 		const match = matchModel("deepseek/deepseek-v4.1-flash-fast", candidates);
 		expect(match?.model.modelID).toBe("deepseek/deepseek-v4.1-flash-fast");
-		expect(match?.score).toBe(4);
+		expect(match?.score).toBe(5);
+	});
+
+	test("a build tag is what the query names, not a stripped identity", () => {
+		// `deepseek-v4.1-flash-1017` is one model's exact id and, with its build
+		// tag folded, also matches the plain model. Scoring the two the same left
+		// the picker's choice decided by list order, so choosing the 1017 build
+		// stored the plain one and the chain never showed the tag.
+		const builds = [
+			{ modelID: "deepseek-v4.1-flash", name: "DeepSeek-V4.1-Flash" },
+			{ modelID: "deepseek-v4.1-flash-1017", name: "DeepSeek-V4.1-Flash-1017" },
+		];
+		const match = matchModel("deepseek-v4.1-flash-1017", builds);
+		expect(match?.model.modelID).toBe("deepseek-v4.1-flash-1017");
+		expect(ambiguousModels(match)).toHaveLength(0);
 	});
 
 	test("the picker's label resolves to the provider id", () => {

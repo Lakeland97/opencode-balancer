@@ -94,7 +94,16 @@ function startsWithWords(
 
 export type ModelMatch<T extends ModelCandidate> = {
 	model: T;
-	/** 4 id exact (including `v`/separator variants), 3 name exact, 2 id family, 1 name family or a family prefix. */
+	/**
+	 * 5 the id written exactly as the provider spells it, 4 the same identity
+	 * with its build tag or `v` folded away, 3 name exact, 2 id family, 1 name
+	 * family or a family prefix.
+	 *
+	 * The two id scores have to differ. `deepseek-v4.1-flash-1017` is both the
+	 * exact id of one model and the folded identity of another, and scoring them
+	 * the same made the first candidate win by list order — so adding the 1017
+	 * build stored the plain one instead.
+	 */
 	score: number;
 	/** Every candidate tied at the winning score, including the winner. */
 	ties: readonly T[];
@@ -104,7 +113,7 @@ function score(query: string, candidate: ModelCandidate): number {
 	const normalized = normalizeModel(query);
 	const family = modelFamily(query);
 	const words = modelWords(query);
-	if (normalizeModel(candidate.modelID) === normalized) return 4;
+	if (normalizeModel(candidate.modelID) === normalized) return 5;
 	// The same identity with the provider's `v` and separators removed:
 	// `deepseek 4.1 eco` is `deepseek-v4.1-eco`, not a weaker guess.
 	if (sameWords(modelWords(candidate.modelID), words)) return 4;
