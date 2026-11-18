@@ -17,6 +17,7 @@ import { applyAuthToHeaders } from "../server/apply-auth";
 import { runCommand } from "../server/commands";
 import { invalidateCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
+import { noteServed, resetRouteMemory } from "../server/route-memory";
 import {
 	hasAlternativeAccount,
 	selectHealthyAccount,
@@ -32,6 +33,7 @@ const apiAuth = (key: string) => ({ key, type: "api" as const });
 
 beforeEach(() => {
 	invalidateCatalog();
+	resetRouteMemory();
 });
 
 describe("account store", () => {
@@ -235,6 +237,10 @@ describe("chain commands", () => {
 			connectorModel("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
 		]);
 		markAccountUsed(db, "p1", "a");
+		noteServed("deepseek-v4.1-flash", {
+			modelID: "deepseek-v4.1-flash",
+			providerID: "p1",
+		});
 
 		const reply = await runCommand({
 			ctx,

@@ -1,6 +1,5 @@
 import type { Database } from "bun:sqlite";
 import type { Context } from "@opencode/plugin/promise/plugin";
-import { mostRecentlyUsed } from "../core/accounts";
 import {
 	type ChainTarget,
 	deleteChain,
@@ -361,12 +360,11 @@ function targetState(
 	if (!selectHealthyAccount(db, target.providerID)) return "unavailable";
 	// "In use" is the provider this row itself last served with. The most
 	// recently used credential is global, so a row could otherwise claim a
-	// provider that had served another model while this row was elsewhere.
+	// provider that had served some other model while this row was elsewhere.
+	// A row with no note of its own has not served since the plugin started,
+	// which is better than pointing at whoever happened to answer last.
 	const served = servedFor(familyKey);
-	if (served)
-		return served.providerID === target.providerID ? "in use" : "available";
-	const used = mostRecentlyUsed(db);
-	return used?.providerID === target.providerID ? "in use" : "available";
+	return served?.providerID === target.providerID ? "in use" : "available";
 }
 
 export type ChainRow = {

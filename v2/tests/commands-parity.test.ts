@@ -293,6 +293,7 @@ describe("review parity cases", () => {
 		saveAccount(db, "p1", "a", apiAuth("k1"));
 		saveAccount(db, "p1", "b", apiAuth("k2"));
 		markAccountUsed(db, "p1", "b");
+		noteServed(KEY, { modelID: KEY, providerID: "p1" });
 		const out = await runCommand({
 			ctx: workingCtx(),
 			db,
