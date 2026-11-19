@@ -6,8 +6,13 @@ import {
 	getActiveAccount,
 	markAccountUsed,
 } from "../core/accounts";
-import { writeCompactPromptTokens } from "../core/context";
+import {
+	formatTokens,
+	requestBudget,
+	writeCompactPromptTokens,
+} from "../core/context";
 import { appendEvent } from "../core/events";
+import { trimOldestTurns } from "../core/fit";
 import { getBalancingEnabled } from "../core/priority";
 import { rebalanceAfterMs } from "../core/rebalance";
 import { formatRollover } from "../core/rollover";
@@ -47,11 +52,8 @@ import {
 } from "./route-memory";
 import {
 	type ChosenRoute,
-	chooseLargestTarget,
-	chooseLastServed,
-	chooseRouteAtAnyCost,
+	chooseFailoverRoute,
 	chooseRouteForRequest,
-	chooseRouteIgnoringParks,
 	describeUnroutable,
 	hasAlternativeRoute,
 	rewriteModel,
@@ -213,6 +215,7 @@ function bindRoute(
  * retried call cannot differ from the first in anything but the target.
  */
 async function prepareRoutedRequest(input: {
+	db: Database;
 	family: ModelFamily;
 	pristine: Request;
 	route: ChosenRoute;
@@ -220,7 +223,7 @@ async function prepareRoutedRequest(input: {
 	replaceBase?: string;
 	variant: string | undefined;
 }): Promise<Request> {
-	const { family, pristine, replaceBase, route, variant } = input;
+	const { db, family, pristine, replaceBase, route, variant } = input;
 	let request = pristine;
 	let url = routedURL(request.url, route.baseURL);
 	// A request the model hook already pointed at a connector no longer names the
@@ -242,6 +245,22 @@ async function prepareRoutedRequest(input: {
 			body,
 			mapVariant(variant, family.variants ?? []),
 			mapVariant(variant, route.variants ?? []),
+		);
+		// A conversation that has outgrown this target is cut at a turn boundary
+		// rather than sent to be refused. The budget is the cut the balancer
+		// compacts at, so the room the provider needs for its answer — and the
+		// summary request its own prompt — is already taken off the window.
+		const window =
+			typeof route.context === "number" && route.context > 0
+				? route.context
+				: undefined;
+		if (window === undefined) return;
+		const fitted = trimOldestTurns(body, requestBudget(db, family.key, window));
+		if (!fitted) return;
+		body.messages = fitted.messages;
+		recordLog(
+			"compact",
+			`${family.key}: dropped ${fitted.dropped} older messages to fit ${route.providerID}/${route.modelID} (${formatTokens(window)} window)`,
 		);
 	});
 	const headers = new Headers(request.headers);
@@ -340,11 +359,14 @@ async function failoverResponse(input: {
 		for (;;) {
 			if (pending.failures >= ATTEMPT_CAP) return abandon();
 
-			const route = chooseRouteForRequest(
+			const route = chooseFailoverRoute(
 				db,
 				family,
 				pending.tried,
 				minContext,
+				// A retry loop that repeats a credential it just watched refuse
+				// spends its attempt cap without learning anything new.
+				{ wrap: false },
 			);
 			// Nothing left in this row. The session is handed the last refusal that
 			// was actually returned, so the words it reads are a provider's own.
@@ -390,6 +412,7 @@ async function failoverResponse(input: {
 			let request: Request;
 			try {
 				request = await prepareRoutedRequest({
+					db,
 					family,
 					pristine: template(),
 					replaceBase: base,
@@ -935,34 +958,12 @@ function chooseStickyRoute(input: {
 		chooseRouteForRequest(db, family, undefined, minContext);
 	if (route) return { parkedFallback: false, route };
 
-	// Nothing healthy can answer this row at all. The row holds only providers
-	// that offer the model, so there is no alternative the park is protecting:
-	// trying the head again is better than leaving the call pointed at the stub.
-	const lastChance =
-		chooseRouteIgnoringParks(db, family, tried, minContext) ??
-		chooseRouteIgnoringParks(db, family, undefined, minContext) ??
-		// Every target's window is too small for this conversation. Handing it to
-		// one anyway is what produced a hard overflow from a model that had never
-		// seen this conversation: the provider rejects the whole request, and the
-		// failure reads as the account's. The widest target is the only one that
-		// might still fit, and its refusal names the real limit when nothing does.
-		chooseLargestTarget(db, family, tried) ??
-		chooseLargestTarget(db, family) ??
-		// The row is unroutable by every rule the balancer has. The one fact left
-		// is which target last answered it, and a session that was working a
-		// minute ago should keep working on the model it was on rather than stop
-		// because the plugin's own bookkeeping went bad. If that credential really
-		// is spent, the provider will say so in its own words.
-		chooseLastServed(db, family, tried) ??
-		chooseLastServed(db, family) ??
-		// Nothing has ever answered this row in this store, so there is no last
-		// good target to fall back to. Every target is marked as refusing this
-		// model, which is the balancer's own guess rather than this request's
-		// answer, and leaving the call pointed at the stub sends it to a host name
-		// that does not resolve. Trying a real target is the only way to find out
-		// whether the guess still holds.
-		chooseRouteAtAnyCost(db, family, tried) ??
-		chooseRouteAtAnyCost(db, family);
+	// Nothing healthy can answer this row as it stands. Climb the same ladder a
+	// retry inside one call climbs: cut the oldest turns for a smaller healthy
+	// window, then a parked target, then the widest, then the target that last
+	// answered, then anything at all. The row holds only providers that offer the
+	// model, so there is no alternative a park is protecting.
+	const lastChance = chooseFailoverRoute(db, family, tried, minContext);
 	return lastChance ? { parkedFallback: true, route: lastChance } : undefined;
 }
 
@@ -1206,6 +1207,7 @@ export async function registerHooks({
 
 			const variant = event.model.variant;
 			const request = await prepareRoutedRequest({
+				db,
 				family,
 				// A fresh stream from the bytes just read: the host's own request
 				// has already been consumed by `readAttempt`.
@@ -1635,6 +1637,12 @@ export async function registerHooks({
 			if (routed && family) {
 				await announceUnroutable(ctx, db, event.sessionID, family);
 			}
+			// The host's own policy treats a 429 as worth another try, so left
+			// alone it asks again within the second — and every one of those asks
+			// is another real refusal from a provider that has already said no. A
+			// spent account produced a hundred in one minute that way. Nothing
+			// else can answer, so the decision is settled and the turn ends once.
+			event.decision = { ...(event.decision ?? {}), retry: false };
 			return;
 		}
 

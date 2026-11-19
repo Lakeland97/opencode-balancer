@@ -14,6 +14,7 @@ import { invalidateCatalog, loadCatalog } from "../server/connectors";
 import { markRateLimited } from "../server/request-state";
 import { noteServed } from "../server/route-memory";
 import {
+	chooseFailoverRoute,
 	chooseLastServed,
 	chooseRoute,
 	chooseRouteAtAnyCost,
@@ -399,5 +400,55 @@ describe("the target that last answered", () => {
 		// The last resort still needs a key: sending a request with no credential
 		// would fail as an authentication error nobody can act on.
 		expect(chooseRouteAtAnyCost(db, family)).toBeUndefined();
+	});
+});
+
+describe("a conversation larger than a healthy target", () => {
+	test("the healthy small window is cut to fit before a parked large one", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		// p1 holds 1M and p2 holds 200k. The conversation is past 200k, so the
+		// only healthy target cannot take it as written — but cutting the oldest
+		// turns fits it, and that beats handing it to a parked 1M target.
+		markRateLimited(db, "p1", "a");
+
+		const route = chooseFailoverRoute(db, family, undefined, 250_000);
+
+		expect(route?.providerID).toBe("p2");
+	});
+
+	test("a target that can hold the conversation is preferred without a cut", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+
+		const route = chooseFailoverRoute(db, family, undefined, 250_000);
+
+		expect(route?.providerID).toBe("p1");
+	});
+
+	test("the widest healthy window is chosen, because it loses the least", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		const family = await familyFor(db, [
+			model("p1", "deepseek-v4.1-flash", 400_000),
+			model("p2", "deepseek-v4.1-flash", 300_000),
+			model("p3", "deepseek-v4.1-flash", 200_000),
+		]);
+		markRateLimited(db, "p1", "a");
+
+		const route = chooseFailoverRoute(db, family, undefined, 500_000);
+
+		expect(route?.providerID).toBe("p2");
+	});
+
+	test("with no healthy window left the largest target still answers", async () => {
+		const db = freshDb();
+		const family = await familyFor(db, ordinary);
+		markRateLimited(db, "p1", "a");
+		markRateLimited(db, "p2", "a");
+
+		const route = chooseFailoverRoute(db, family, undefined, 250_000);
+
+		expect(route?.providerID).toBe("p1");
 	});
 });

@@ -9,7 +9,7 @@ import {
 	saveAccount,
 	setActiveAccount,
 } from "../core/accounts";
-import { readCompactPromptTokens } from "../core/context";
+import { readCompactPromptTokens, setModelLimit } from "../core/context";
 import { listEvents } from "../core/events";
 import { setBalancingEnabled } from "../core/priority";
 import { setRebalance, setRebalanceAuto } from "../core/rebalance";
@@ -22,6 +22,7 @@ import {
 	registerHooks,
 } from "../server/hooks";
 import { markRateLimited } from "../server/request-state";
+import { noteSessionTokens } from "../server/route-memory";
 import { registerBalancerRpc } from "../server/rpc";
 
 const PROVIDER = "anthropic";
@@ -266,6 +267,23 @@ describe("retry hook", () => {
 		expect(event.decision).toEqual({ delay: 2_500, retry: false });
 	});
 
+	test("a refusal nothing else can answer ends the host's retries", async () => {
+		const { db, registry } = await setup();
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		setBalancingEnabled(db, true);
+
+		await registry["http.request"](requestEvent("retry-settled", newRequest()));
+
+		// The host treats a 429 as worth retrying and will ask again every half
+		// second or so. Nothing else can answer this row, so every one of those
+		// asks costs a real refusal from the provider: a spent account produced
+		// a hundred of them in a minute. The decision is settled here instead, so
+		// the turn ends once with the provider's own words.
+		const event = retryEvent("retry-settled", { delay: 500, retry: true });
+		await registry.retry(event);
+
+		expect(event.decision).toEqual({ delay: 500, retry: false });
+	});
 	test("leaves the decision unchanged when balancing is off", async () => {
 		const { db, registry } = await setup();
 		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
@@ -883,6 +901,26 @@ describe("a balance that has gone stale", () => {
 		await registry["model.request"](event);
 		expect(event.headers.authorization).toBe("Bearer sk-1");
 	});
+
+	test("a pick on a provider that is not first begins serving", async () => {
+		const { ctx, db, registry } = await twoProviders();
+
+		// p1 holds the head of the order, and p2 holds one credential of its own,
+		// so this pick only means anything if it crosses providers. Selecting a
+		// credential that is already first in its own block used to be a no-op.
+		const rpc = (await registerBalancerRpc({ ctx, db })) as unknown as Record<
+			string,
+			(input: unknown) => Promise<unknown>
+		>;
+		const picked = (await rpc.use({ alias: "a", providerID: "p2" })) as {
+			ok: boolean;
+		};
+		expect(picked.ok).toBe(true);
+
+		const event = request("picked-second");
+		await registry["model.request"](event);
+		expect(event.headers.authorization).toBe("Bearer sk-2");
+	});
 });
 
 describe("a refusal the session never sees", () => {
@@ -1012,6 +1050,50 @@ describe("a refusal the session never sees", () => {
 		} finally {
 			fetched.restore();
 		}
+	});
+
+	test("a conversation too large for the target is cut before it is sent", async () => {
+		const { db, registry } = await offered();
+		// A window far below the conversation, so the cut is large enough to be
+		// obvious in the body. The session's measured size is what routing uses to
+		// see that no target can hold it whole.
+		setModelLimit(db, "alpha-1", "5k");
+		noteSessionTokens(db, "too-large", 250_000);
+		const long = (label: string) => label + "x".repeat(8_000);
+		const event = {
+			...call("too-large"),
+			request: new Request("https://balancer.invalid/v1/messages", {
+				body: JSON.stringify({
+					messages: [
+						{ content: "Be brief.", role: "system" },
+						{ content: long("one"), role: "user" },
+						{ content: long("two"), role: "assistant" },
+						{ content: long("three"), role: "user" },
+						{ content: long("four"), role: "assistant" },
+						{ content: long("five"), role: "user" },
+						{ content: long("six"), role: "assistant" },
+					],
+					model: "alpha-1",
+				}),
+				headers: { "content-type": "application/json" },
+				method: "POST",
+			}),
+		};
+
+		await registry["http.request"](event);
+
+		const sent = (await event.request.clone().json()) as {
+			messages: { content: string; role: string }[];
+		};
+		// The older turns are gone, the instructions and the newest turn remain,
+		// and the cut is on a turn boundary rather than mid-conversation.
+		expect(sent.messages.map((message) => message.role)).toEqual([
+			"system",
+			"user",
+			"assistant",
+		]);
+		expect(sent.messages[1]?.content).toBe(long("five"));
+		expect(sent.messages[2]?.content).toBe(long("six"));
 	});
 
 	test("the retried body names the target's own model id", async () => {

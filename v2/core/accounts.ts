@@ -567,8 +567,13 @@ export function moveAccount(
 }
 
 /**
- * Make one credential the one its provider serves with: it moves ahead of that
- * provider's other rows, and the stored active alias follows it.
+ * Make one credential the one that serves next: it moves to the head of the
+ * order every provider shares, and the stored active alias follows it.
+ *
+ * Moving it only to the head of its own provider's block was a no-op whenever
+ * the provider held one credential, which is the usual shape — the pick then
+ * changed no order and the next request went wherever it was already going. The
+ * order is one list across providers, so that is the list the pick has to move.
  */
 export function useAccount(db: Database, providerID: string, alias: string) {
 	const all = orderedAccounts(db);
@@ -577,13 +582,12 @@ export function useAccount(db: Database, providerID: string, alias: string) {
 		(account) => account.providerID === providerID && account.alias === wanted,
 	);
 	if (from < 0) return;
-	const head = all.findIndex((account) => account.providerID === providerID);
 
 	const write = db.transaction(() => {
-		if (from !== head) {
+		if (from > 0) {
 			const reordered = all.slice();
 			const [moved] = reordered.splice(from, 1);
-			reordered.splice(head, 0, moved);
+			reordered.unshift(moved);
 			renumber(db, reordered);
 		}
 		// The pick is the point: the stored alias must name this credential even

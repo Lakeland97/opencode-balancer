@@ -478,6 +478,31 @@ export function effectiveThreshold(input: {
 }
 
 /**
+ * The prompt size a request for this row may reach before its oldest turns are
+ * cut to fit the target that is serving it.
+ *
+ * This is the same cut the balancer compacts at, deliberately: a conversation
+ * handed to a smaller window leaves the room behind it that compaction would
+ * have left, so the provider still has space for its answer and a later summary
+ * request still has room for its prompt. Reusing the rule keeps the panel's
+ * threshold and the wire trim from becoming two opinions about one number.
+ */
+export function requestBudget(
+	db: Database,
+	familyKey: string,
+	realContext: number,
+): number {
+	return effectiveThreshold({
+		buffer: readBufferSpec(db),
+		bufferEnforcement: readBufferEnforcement(db),
+		globalLimit: readLimitSpec(db),
+		modelLimit: readModelLimitSpec(db, familyKey),
+		promptTokens: readCompactPromptTokens(db),
+		realContext,
+	});
+}
+
+/**
  * Where the cut lands for a limit and buffer as typed, measured against the
  * declared window. The same rule the balancer uses, because a panel readout that
  * computes it differently is a second opinion about the same number.

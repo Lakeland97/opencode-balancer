@@ -250,6 +250,89 @@ export function chooseLargestTarget(
 }
 
 /**
+ * The healthiest target that can still answer this row once its oldest turns
+ * are cut away.
+ *
+ * A target is only a candidate when it is healthy and its window is smaller than
+ * the conversation. Anything that could hold the conversation whole was already
+ * returned by `chooseRouteForRequest`, so reaching this means every fitting
+ * target is spent, marked, or parked. The widest candidate is taken first
+ * because it loses the least of the conversation, and a tie falls back to the
+ * row's own order.
+ *
+ * A parked target is deliberately not a candidate. Cutting the conversation is a
+ * real cost, and a park is the balancer's belief that a credential is spent; a
+ * healthy smaller window is the better purchase than a larger one that is
+ * probably going to refuse.
+ */
+export function chooseTrimTarget(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+	minContext?: number,
+): ChosenRoute | undefined {
+	if (minContext === undefined || minContext <= 0) return undefined;
+	const routes = family.stored
+		? resolveChain(db, family)
+		: sortRoutes(family.targets, db);
+	const candidates = routes
+		.filter(
+			(route) =>
+				route.available !== false &&
+				typeof route.context === "number" &&
+				route.context > 0 &&
+				route.context < minContext,
+		)
+		.sort((left, right) => (right.context ?? 0) - (left.context ?? 0));
+	for (const route of candidates) {
+		for (const account of healthyAccounts(db, route.providerID)) {
+			if (exclude.has(accountKey(route.providerID, account.alias))) continue;
+			const chosen = targetFor(db, route, account);
+			if (chosen) return chosen;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The ladder a request climbs when its row's first choice did not answer.
+ *
+ * The rungs go from cheapest to most drastic: a target that fits the
+ * conversation, a smaller healthy target that fits once the oldest turns are
+ * cut, a parked target that fits, the widest window, the target that last
+ * answered, and finally anything at all. `wrap` controls the second pass, where
+ * credentials already tried in this walk are offered again — the request hooks
+ * want that so a row with one credential still reaches it, while the failover
+ * loop does not, because repeating a credential it just saw refuse only burns
+ * the attempt cap.
+ */
+export function chooseFailoverRoute(
+	db: Database,
+	family: ModelFamily,
+	exclude: ReadonlySet<string> = new Set(),
+	minContext?: number,
+	options: { wrap?: boolean } = {},
+): ChosenRoute | undefined {
+	const chosen =
+		chooseRouteForRequest(db, family, exclude, minContext) ??
+		chooseTrimTarget(db, family, exclude, minContext) ??
+		chooseRouteIgnoringParks(db, family, exclude, minContext) ??
+		chooseLargestTarget(db, family, exclude) ??
+		chooseLastServed(db, family, exclude) ??
+		chooseRouteAtAnyCost(db, family, exclude);
+	if (chosen) return chosen;
+	if (options.wrap === false) return undefined;
+	return (
+		chooseRouteForRequest(db, family, undefined, minContext) ??
+		chooseTrimTarget(db, family, undefined, minContext) ??
+		chooseRouteIgnoringParks(db, family, undefined, minContext) ??
+		chooseLargestTarget(db, family) ??
+		chooseLastServed(db, family) ??
+		chooseRouteAtAnyCost(db, family)
+	);
+}
+
+/**
  * The last target this row can reach at all, for a request that must not be left
  * pointed at the stub.
  *
