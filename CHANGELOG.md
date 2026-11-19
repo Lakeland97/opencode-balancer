@@ -4,11 +4,6 @@
 
 ### Minor Changes
 
-One consolidated release. It replaces the 0.3.0–0.6.0 line and carries
-everything since 0.2.18: the credential-level router, the catalogue-driven
-model list, the window and compaction rules, and the panel rebuild. The
-original notes from 0.3.0 through 0.6.0 follow below, newest first.
-
 - **Routing is per credential and fails over inside the call.** A provider key is
   the unit: `use`, `enable`, `free`, parks and cooldowns belong to it. A refusal
   that is worth retrying is answered by the next target of the same row before the
@@ -61,7 +56,7 @@ original notes from 0.3.0 through 0.6.0 follow below, newest first.
   target after a failover walk that produced no answer, and kept unchanged rows
   identical across the panel's poll so the picker no longer closes itself.
 
-### The 0.3.0–0.6.0 changelogs this release replaces
+### Earlier entries
 
 #### 0.6.0
 
