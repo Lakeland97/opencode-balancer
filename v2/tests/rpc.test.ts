@@ -1,5 +1,12 @@
 import { Database } from "bun:sqlite";
-import { beforeEach, describe, expect, test } from "bun:test";
+import {
+	afterAll,
+	beforeAll,
+	beforeEach,
+	describe,
+	expect,
+	test,
+} from "bun:test";
 
 import {
 	getAccount,
@@ -11,6 +18,7 @@ import { getStoredChain } from "../core/chains";
 import { migrate } from "../core/schema";
 import { balancerDefinition } from "../rpc";
 import { invalidateCatalog } from "../server/connectors";
+import { invalidateRemoteModels } from "../server/remote-models";
 import { markRateLimited } from "../server/request-state";
 import { registerBalancerRpc } from "../server/rpc";
 
@@ -144,8 +152,22 @@ async function handlersFailingProviderList(db: Database) {
 	>;
 }
 
+// The chain answers must depend on the declared models and the stored order,
+// never on whether a provider's `/models` happened to answer during the run. A
+// `.invalid` host usually fails at once, but a runner with a DNS proxy can answer
+// it, and the catalogue then adds a target the test never asked for.
+const originalFetch = globalThis.fetch;
+beforeAll(() => {
+	globalThis.fetch = (async () =>
+		new Response("{}", { status: 404 })) as unknown as typeof fetch;
+});
+afterAll(() => {
+	globalThis.fetch = originalFetch;
+	invalidateRemoteModels();
+});
 beforeEach(() => {
 	invalidateCatalog();
+	invalidateRemoteModels();
 });
 
 describe("chain rpc", () => {

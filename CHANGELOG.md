@@ -53,6 +53,9 @@ the panel rebuild — ships as a single version.
 
 ### Patch Changes
 
+- Made the chain RPC tests independent of provider catalogues, so CI and local
+  runs agree.
+
 - Fixed the in-use marker to follow the row's own target, restored the row's bound
   target after a failover walk that produced no answer, and kept unchanged rows
   identical across the panel's poll so the picker no longer closes itself.
