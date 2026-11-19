@@ -4,7 +4,7 @@ import { listAccounts } from "../core/accounts";
 import { listStoredChains } from "../core/chains";
 import { DECLARED_CONTEXT } from "../core/context";
 import { isFreeModel, modelFamily, normalizeModel } from "../core/models";
-import { providerOrder } from "../core/priority";
+import { getAssumeWindows, providerOrder } from "../core/priority";
 import {
 	cachedRemoteModels,
 	type RemoteModel,
@@ -50,6 +50,18 @@ export type FamilyRoute = {
 	package: string;
 	/** The model's own window, which clamps the share it is compacted at. */
 	context?: number;
+	/**
+	 * Where that window came from.
+	 *
+	 * `published` is the provider's own catalogue, `declared` is what
+	 * `opencode.json` said, `assumed` is a published window borrowed from the
+	 * same model on another connector, and `unknown` is the honest answer when
+	 * nobody said. The panel prints this, so a host default can never read as a
+	 * measurement.
+	 */
+	contextSource?: ContextSource;
+	/** The connector a window was borrowed from, when it was assumed. */
+	assumedFrom?: string;
 	output?: number;
 	/** False when the connector no longer offers this model. */
 	available?: boolean;
@@ -104,6 +116,33 @@ function stripTrailingSlash(value: string) {
 	return value.replace(/\/+$/, "");
 }
 
+/**
+ * The providers the host knows, with the URL and wire format each declares.
+ *
+ * A provider describes itself even when none of its models is written down, so
+ * this is what lets a catalogue-only provider exist. The call is guarded because
+ * a host (or a test double) that predates `provider.list` still has model
+ * records that carry the same URL; the caller fills the gaps from those.
+ */
+async function providerMetaOf(ctx: Context) {
+	const meta = new Map<string, { baseURL?: string; package?: string }>();
+	try {
+		if (typeof ctx.provider.list !== "function") return meta;
+		const list = await ctx.provider.list();
+		for (const provider of list?.data ?? []) {
+			const baseURL = provider.settings?.baseURL;
+			meta.set(provider.id, {
+				baseURL:
+					typeof baseURL === "string" ? stripTrailingSlash(baseURL) : undefined,
+				package: provider.package,
+			});
+		}
+	} catch {
+		// The host did not describe itself; model records still can.
+	}
+	return meta;
+}
+
 /** Short name for a wire format, e.g. `anthropic` from its package. */
 function packageTag(pkg: string) {
 	return (pkg.split("/").pop() ?? pkg).replace(/-compatible$/, "");
@@ -117,6 +156,76 @@ function freeBase(modelID: string) {
 /** Distinguishes rows that exist in more than one wire format. */
 function labelSuffix(pkg: string) {
 	return pkg === DEFAULT_PACKAGE ? "" : ` (${packageTag(pkg)})`;
+}
+
+/** Where a route's window came from; absent means the same as `unknown`. */
+export type ContextSource = "published" | "declared" | "assumed" | "unknown";
+
+/** The wire format a model speaks when it answers on Anthropic's route only. */
+const ANTHROPIC_PACKAGE = "@opencode/ai/providers/anthropic-compatible";
+
+/** The free spelling is a different deal, never a window source. */
+function isFreeID(id: string) {
+	return /(^|[/:_-])free$/i.test(id);
+}
+
+/**
+ * The wire format one catalogue entry actually speaks.
+ *
+ * A provider is not one format end to end: CommandCode answers open models on
+ * `/chat/completions` and Claude models on `/messages` only. The entry's own
+ * endpoint list is the only place that distinction is written down, so it picks
+ * the package rather than the provider's default.
+ */
+function wirePackage(providerPackage: string, endpoints?: readonly string[]) {
+	if (!endpoints || endpoints.length === 0) return providerPackage;
+	const messages = endpoints.includes("/messages");
+	const chat = endpoints.some(
+		(endpoint) => endpoint === "/chat/completions" || endpoint === "/responses",
+	);
+	return messages && !chat ? ANTHROPIC_PACKAGE : providerPackage;
+}
+
+/**
+ * Lend an unpublished window the value an identically named model publishes on
+ * another connector.
+ *
+ * Only an exact id counts: `deepseek-v4.1-flash` may borrow from the same id on
+ * opencode, while `deepseek-v4.1-flash-free` and `-tee` are different deals and
+ * keep their own (unknown) answer. The smallest published value wins, so the
+ * borrowed window never invites a request longer than some connector already
+ * says it can hold.
+ */
+function applyAssumedWindows(db: Database, families: readonly ModelFamily[]) {
+	for (const family of families) {
+		const routes = [...new Set([...family.routes, ...family.targets])];
+		const published = routes.filter(
+			(route) =>
+				route.contextSource === "published" &&
+				typeof route.context === "number" &&
+				route.context > 0 &&
+				!isFreeID(route.modelID),
+		);
+		if (published.length === 0) continue;
+		for (const route of routes) {
+			if (route.contextSource !== "unknown") continue;
+			if (isFreeID(route.modelID)) continue;
+			if (!getAssumeWindows(db, route.providerID)) continue;
+			const wanted = normalizeModel(route.modelID);
+			const matches = published.filter(
+				(entry) =>
+					entry.providerID !== route.providerID &&
+					normalizeModel(entry.modelID) === wanted,
+			);
+			if (matches.length === 0) continue;
+			const borrowed = matches.reduce((left, right) =>
+				(left.context ?? 0) <= (right.context ?? 0) ? left : right,
+			);
+			route.context = borrowed.context;
+			route.contextSource = "assumed";
+			route.assumedFrom = borrowed.providerID;
+		}
+	}
 }
 
 /**
@@ -292,6 +401,27 @@ export async function loadCatalog(
 		listAccounts(db).map((account) => account.providerID),
 	);
 	const models = await ctx.model.list();
+	// The URL and wire format live on the provider itself, not only on its
+	// models. Reading them there is what lets a provider whose `opencode.json`
+	// entry declares no models at all still be described by its catalogue.
+	const providerMeta = await providerMetaOf(ctx);
+	// A model record's URL is the one that provider actually answered on before,
+	// and for a multi-route provider it can differ from the provider-level one
+	// (opencode exposes a Google route on its models and an OpenAI route on the
+	// provider). First declared model wins, matching the old discovery order;
+	// the provider URL is what a model-less provider falls back to.
+	const fromModel = new Set<string>();
+	for (const model of models.data) {
+		if (fromModel.has(model.providerID)) continue;
+		const baseURL = model.settings?.baseURL;
+		if (typeof baseURL !== "string") continue;
+		fromModel.add(model.providerID);
+		const known = providerMeta.get(model.providerID);
+		providerMeta.set(model.providerID, {
+			baseURL: stripTrailingSlash(baseURL),
+			package: known?.package ?? model.package,
+		});
+	}
 
 	// What each connector itself publishes, when it publishes anything. The
 	// host's list is a snapshot of `opencode.json`, which is why a provider that
@@ -300,17 +430,11 @@ export async function loadCatalog(
 	// catalogue open; the entries it adds are real models of that provider, with
 	// the window the provider itself reports.
 	const remote = new Map<string, RemoteModel[]>();
-	for (const model of models.data) {
-		if (!connectorIDs.has(model.providerID)) continue;
-		const baseURL = model.settings?.baseURL;
-		if (typeof baseURL !== "string") continue;
-		if (remote.has(model.providerID)) continue;
-		const listed = cachedRemoteModels(
-			db,
-			model.providerID,
-			baseURL.replace(/\/+$/, ""),
-		);
-		if (listed.length > 0) remote.set(model.providerID, [...listed]);
+	for (const [providerID, meta] of providerMeta) {
+		if (!connectorIDs.has(providerID)) continue;
+		if (!meta.baseURL) continue;
+		const listed = cachedRemoteModels(db, providerID, meta.baseURL);
+		if (listed.length > 0) remote.set(providerID, [...listed]);
 	}
 
 	// A provider often offers the same model twice, once paid and once with a
@@ -320,7 +444,9 @@ export async function loadCatalog(
 	const freeSiblings = new Map<string, ModelRecord>();
 	for (const model of models.data) {
 		if (!connectorIDs.has(model.providerID)) continue;
-		if (typeof model.settings?.baseURL !== "string") continue;
+		const modelBaseURL =
+			model.settings?.baseURL ?? providerMeta.get(model.providerID)?.baseURL;
+		if (typeof modelBaseURL !== "string") continue;
 		if (!isFreeModel({ cost: model.cost, modelID: model.modelID })) continue;
 		const base = freeBase(model.modelID);
 		if (!base || base === modelFamily(model.modelID)) continue;
@@ -339,13 +465,15 @@ export async function loadCatalog(
 		if (model.type && model.type !== "chat") continue;
 		if (model.enabled === false) continue;
 
-		const baseURL = model.settings?.baseURL;
+		const baseURL =
+			model.settings?.baseURL ?? providerMeta.get(providerID)?.baseURL;
 		if (typeof baseURL !== "string") continue;
 
 		const family = modelFamily(model.modelID);
 		if (!family) continue;
 
-		const pkg = model.package ?? "";
+		const pkg =
+			model.package ?? providerMeta.get(providerID)?.package ?? DEFAULT_PACKAGE;
 		const tagged = pkg !== DEFAULT_PACKAGE;
 		const key = tagged ? `${family}-${packageTag(pkg)}` : family;
 		const group = groups.get(key) ?? {
@@ -364,6 +492,7 @@ export async function loadCatalog(
 			available: true,
 			baseURL: stripTrailingSlash(baseURL),
 			context: model.limit?.context,
+			contextSource: model.limit?.context ? "declared" : "unknown",
 			free,
 			...(sibling && typeof sibling.settings?.baseURL === "string"
 				? {
@@ -414,6 +543,7 @@ export async function loadCatalog(
 	// the provider's own answer, so it is routable: the baseURL comes from a
 	// sibling record of the same provider, and the window is the provider's own.
 	for (const [providerID, listed] of remote) {
+		const meta = providerMeta.get(providerID);
 		const sibling =
 			models.data.find(
 				(model) =>
@@ -427,27 +557,39 @@ export async function loadCatalog(
 					model.type === "chat" &&
 					typeof model.settings?.baseURL === "string",
 			);
-		if (!sibling) continue;
-		const baseURL = String(sibling.settings?.baseURL);
-		const pkg = sibling.package ?? DEFAULT_PACKAGE;
+		const baseURL =
+			meta?.baseURL ??
+			(typeof sibling?.settings?.baseURL === "string"
+				? stripTrailingSlash(sibling.settings.baseURL)
+				: undefined);
+		if (!baseURL) continue;
+		const pkg = sibling?.package ?? meta?.package ?? DEFAULT_PACKAGE;
 
 		for (const entry of listed) {
 			if (!isChatCatalogueEntry(entry.id)) continue;
 			const family = modelFamily(entry.id);
 			if (!family) continue;
-			const tagged = pkg !== DEFAULT_PACKAGE;
-			const key = tagged ? `${family}-${packageTag(pkg)}` : family;
+			const entryPackage = wirePackage(pkg, entry.endpoints);
+			const tagged = entryPackage !== DEFAULT_PACKAGE;
+			const key = tagged ? `${family}-${packageTag(entryPackage)}` : family;
 			const group = groups.get(key) ?? {
 				family,
 				label: entry.name ?? entry.id,
-				package: pkg,
+				package: entryPackage,
 				routes: [],
 				score: -1,
 			};
-			// The host's declaration wins where both exist: it is the one the
-			// picker, the limits and any user edit already point at. Where the
-			// provider lists the same family twice with different build tags,
-			// the row keeps the one whose id spells the family exactly.
+			// The provider's own entry replaces the host's record for this id,
+			// window included. A host record always carries a window — it fills
+			// its default into every connector — so a model the provider lists
+			// without one looks like a measured window when it is only the
+			// host's fallback. Trusting that number made the balancer cut a
+			// conversation SayGM could hold: 200k declared, 337k answered.
+			// Where the provider publishes no catalogue at all there is no entry
+			// here, and the declared window still stands.
+			// Where the provider lists the same family twice with different
+			// build tags, the row keeps the one whose id spells the family
+			// exactly.
 			const same = group.routes.findIndex(
 				(route) => route.providerID === providerID,
 			);
@@ -461,24 +603,27 @@ export async function loadCatalog(
 				}
 				group.routes[same] = {
 					...current,
-					baseURL: stripTrailingSlash(baseURL),
-					context: entry.context ?? current.context,
+					baseURL,
+					context: entry.context,
+					contextSource: entry.context ? "published" : "unknown",
 					modelID: entry.id,
 					name: entry.name ?? current.name ?? entry.id,
 					output: entry.output ?? current.output,
+					package: entryPackage,
 				};
 				groups.set(key, group);
 				continue;
 			}
 			group.routes.push({
 				available: true,
-				baseURL: stripTrailingSlash(baseURL),
+				baseURL,
 				context: entry.context,
-				free: /(^|[/:_-])free$/i.test(entry.id),
+				contextSource: entry.context ? "published" : "unknown",
+				free: isFreeID(entry.id),
 				modelID: entry.id,
 				name: entry.name ?? entry.id,
 				output: entry.output,
-				package: pkg,
+				package: entryPackage,
 				providerID,
 				variants: [],
 			});
@@ -517,11 +662,21 @@ export async function loadCatalog(
 	for (const model of models.data) {
 		byRef.set(`${model.providerID}:${model.modelID}`, model);
 	}
+	// A stored row's window must come from the provider too: with no declared
+	// models left in `opencode.json`, the record is absent while the catalogue
+	// still answers for it.
+	const listedByRef = new Map<string, RemoteModel>();
+	for (const [providerID, listed] of remote) {
+		for (const entry of listed) {
+			listedByRef.set(`${providerID}:${entry.id}`, entry);
+		}
+	}
 
 	for (const chain of listStoredChains(db)) {
 		if (chain.targets.length === 0) continue;
 		const targets: FamilyRoute[] = chain.targets.map((target) => {
 			const record = byRef.get(`${target.providerID}:${target.modelID}`);
+			const listed = listedByRef.get(`${target.providerID}:${target.modelID}`);
 			// The stored id may be paid while the credential serving it is told to
 			// spend nothing, in which case the provider's free spelling is what is
 			// sent. Carry it on the target so routing can swap it in.
@@ -531,10 +686,19 @@ export async function loadCatalog(
 						`${target.providerID}:${family}:${record?.package ?? ""}`,
 					)
 				: undefined;
+			const context = listed?.context ?? record?.limit?.context;
+			const contextSource: ContextSource = listed
+				? listed.context
+					? "published"
+					: "unknown"
+				: record?.limit?.context
+					? "declared"
+					: "unknown";
 			return {
-				available: Boolean(record),
+				available: Boolean(record ?? listed),
 				baseURL: stripTrailingSlash(target.baseURL),
-				context: record?.limit?.context,
+				context,
+				contextSource,
 				free: record
 					? isFreeModel({ cost: record.cost, modelID: target.modelID })
 					: undefined,
@@ -550,8 +714,8 @@ export async function loadCatalog(
 						}
 					: {}),
 				modelID: target.modelID,
-				name: record?.name ?? target.modelID,
-				output: record?.limit?.output,
+				name: listed?.name ?? record?.name ?? target.modelID,
+				output: listed?.output ?? record?.limit?.output,
 				package: chain.package,
 				providerID: target.providerID,
 				variants: (record?.variants ?? []) as Variant[],
@@ -589,6 +753,8 @@ export async function loadCatalog(
 		const head = byRef.get(`${targets[0].providerID}:${targets[0].modelID}`);
 		if (head) sources.set(chain.familyKey, head);
 	}
+
+	applyAssumedWindows(db, families);
 
 	const catalog = { families, sources };
 	cached = { at: Date.now(), catalog };
@@ -722,13 +888,26 @@ export async function registerBalancerProvider({
 	// provider's side should be in it. This is the only await on the network, it
 	// is bounded, and a provider that does not answer costs nothing but its own
 	// declared models.
-	const connectorList = await ctx.model.list();
+	const connectorIDs = new Set(
+		listAccounts(db).map((account) => account.providerID),
+	);
 	const sources = new Map<string, string>();
+	for (const [providerID, meta] of await providerMetaOf(ctx)) {
+		if (providerID === BALANCER_PROVIDER_ID) continue;
+		if (!connectorIDs.has(providerID)) continue;
+		if (!meta.baseURL) continue;
+		sources.set(providerID, meta.baseURL);
+	}
+	// A host without `provider.list` describes the same URL on its models.
+	const connectorList = await ctx.model.list();
 	for (const model of connectorList.data) {
 		if (model.providerID === BALANCER_PROVIDER_ID) continue;
-		if (typeof model.settings?.baseURL !== "string") continue;
+		if (!connectorIDs.has(model.providerID)) continue;
 		if (sources.has(model.providerID)) continue;
-		sources.set(model.providerID, model.settings.baseURL.replace(/\/+$/, ""));
+		const baseURL = model.settings?.baseURL;
+		if (typeof baseURL === "string") {
+			sources.set(model.providerID, stripTrailingSlash(baseURL));
+		}
 	}
 	await refreshRemoteModels(
 		db,

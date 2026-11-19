@@ -22,7 +22,9 @@ function chain(
 		package: PACKAGE,
 		stored: false,
 		targets: targets.map((target) => ({
+			assumedFrom: "",
 			context: target.context ?? 0,
+			contextSource: "unknown",
 			modelID: target.modelID ?? key,
 			name: target.modelID ?? key,
 			providerID: target.providerID,

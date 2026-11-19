@@ -30,6 +30,8 @@ export type RemoteModel = {
 	context?: number;
 	/** The answer cap the provider reports, when it reports one. */
 	output?: number;
+	/** The endpoints this model answers on, when the provider publishes them. */
+	endpoints?: readonly string[];
 	/** The provider's own creation instant, for ordering a catalogue by age. */
 	created?: number;
 };
@@ -42,6 +44,16 @@ const TTL_MS = 10 * 60_000;
 const TIMEOUT_MS = 8_000;
 /** A failed read is retried sooner than a good one, without becoming a request per poll. */
 const FAILURE_MS = 60_000;
+/**
+ * Sent with every catalogue read.
+ *
+ * A bare runtime user agent is a signature some gateways block outright (a
+ * Python probe answered Cloudflare 1010 while the same request with this header
+ * answered 200), so the request names itself instead of borrowing whichever
+ * client Bun shipped with.
+ */
+const USER_AGENT =
+	"opencode-balancer/0.6 (+https://github.com/Lakeland97/opencode-balancer)";
 
 const cache = new Map<string, Cached>();
 const inFlight = new Map<string, Promise<void>>();
@@ -71,6 +83,22 @@ function windowOf(entry: Record<string, unknown>) {
 		metadata?.context_limit ??
 		metadata?.context_length;
 	return numeric(limit?.context) ?? numeric(top);
+}
+
+/**
+ * The routes a provider says serve this model, when it says so.
+ *
+ * CommandCode answers Claude models only on `/messages` and open models on
+ * `/chat/completions`. Naming the wire format per model is what keeps a row
+ * from being sent to an endpoint that answers 400 for it.
+ */
+function endpointsOf(entry: Record<string, unknown>) {
+	const raw = entry.supported_endpoints ?? entry.endpoints;
+	if (!Array.isArray(raw)) return undefined;
+	const endpoints = raw.filter(
+		(value): value is string => typeof value === "string",
+	);
+	return endpoints.length > 0 ? endpoints : undefined;
 }
 
 function outputOf(entry: Record<string, unknown>) {
@@ -107,6 +135,7 @@ export function parseCatalogue(body: unknown): RemoteModel[] | undefined {
 		models.push({
 			context: windowOf(entry),
 			created: numeric(entry.created),
+			endpoints: endpointsOf(entry),
 			id,
 			name: typeof entry.name === "string" ? entry.name : undefined,
 			output: outputOf(entry),
@@ -117,7 +146,14 @@ export function parseCatalogue(body: unknown): RemoteModel[] | undefined {
 
 /** The credential that may read this provider's catalogue. */
 function authFor(db: Database, providerID: string) {
-	const account = listAccounts(db, providerID).find((entry) => !entry.disabled);
+	// A disabled credential is switched off for routing, not deleted: the store
+	// still holds the key. Reading the catalogue with it is what keeps a
+	// provider the user has turned off for now from being described by the
+	// hardcoded list in `opencode.json` until it is switched back on. Prefer an
+	// enabled one so a provider with several keys reads the same account that
+	// serves it.
+	const accounts = listAccounts(db, providerID);
+	const account = accounts.find((entry) => !entry.disabled) ?? accounts[0];
 	if (!account) return undefined;
 	const auth = account.auth;
 	const key =
@@ -144,6 +180,7 @@ async function fetchCatalogue(
 			headers: {
 				accept: "application/json",
 				authorization: `Bearer ${credential.key}`,
+				"user-agent": USER_AGENT,
 				"x-api-key": credential.key,
 			},
 			signal: AbortSignal.timeout(TIMEOUT_MS),

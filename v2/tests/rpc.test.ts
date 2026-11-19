@@ -857,3 +857,20 @@ describe("rebalance rpc", () => {
 		expect(await rpc.rebalance({})).toMatchObject({ auto: false, value: "0" });
 	});
 });
+
+describe("the published contract", () => {
+	// The handler accepted `to` long before the schema did, so a live drag or
+	// stepper was refused as invalid input while every unit test passed.
+	test("a reorder may name a step or the slot it lands on", () => {
+		for (const name of ["move", "chainMove"]) {
+			const method = (
+				balancerDefinition.methods as Record<string, { input: Schema }>
+			)[name];
+			const properties = Object.keys(method.input.properties ?? {});
+			expect(properties).toContain("to");
+			expect(properties).toContain("direction");
+			expect(method.input.required ?? []).not.toContain("direction");
+			expect(method.input.required ?? []).not.toContain("to");
+		}
+	});
+});

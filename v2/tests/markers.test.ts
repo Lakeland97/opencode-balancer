@@ -27,7 +27,10 @@ import {
 	errorRetryAfterMs,
 	isRetryableFailure,
 	markRateLimited,
+	parksAccount,
 	RETRYABLE_STATUS,
+	refusalWords,
+	retryAfterMs,
 } from "../server/request-state";
 import { registerBalancerRpc } from "../server/rpc";
 
@@ -252,6 +255,78 @@ describe("account markers", () => {
 		markRateLimited(db, "p1", "a", 60_000, "resets in 12d 23h");
 		clearAccountPark(db, "p1", "a");
 		expect(readLimitedUntil(db, "p1", "a")).toBeUndefined();
+	});
+
+	test("a quota refusal that names its refill parks until then", () => {
+		const db = freshDb();
+		const reset = Date.parse("2026-11-21T03:08:07.324Z");
+		// A weekly limit is not a one-minute cooldown. Retrying it every minute
+		// spends a real refusal each time, and a spent provider's wide window
+		// still looks like the best place to send a long conversation, so it is
+		// chosen ahead of a healthy target that would only need a trim.
+		markRateLimited(
+			db,
+			"p1",
+			"a",
+			60_000,
+			"You've reached your weekly usage limit for your plan. Your limit resets at 2026-11-21T03:08:07.324Z.",
+		);
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBe(reset);
+	});
+
+	test("a gateway failure is not the credential's to sit out", () => {
+		// 502/503/504/529 and a dropped connection say the endpoint is having a
+		// bad minute. Parking the account for one minute on those made a blip
+		// look like an exhausted credential, and with a single enabled target the
+		// row then had nowhere to send the next request.
+		expect(parksAccount(502)).toBe(false);
+		expect(parksAccount(503)).toBe(false);
+		expect(parksAccount(504)).toBe(false);
+		expect(parksAccount(529)).toBe(false);
+		// Quota, billing and auth are the credential's own answers, and they are.
+		expect(parksAccount(429)).toBe(true);
+		expect(parksAccount(402)).toBe(true);
+		expect(parksAccount(401)).toBe(true);
+		expect(parksAccount(400)).toBe(false);
+	});
+
+	test("a refusal that names its refill only in the body parks until then", () => {
+		const reset = Date.parse("2026-11-25T01:00:40Z");
+		const body = JSON.stringify({
+			error: {
+				code: "insufficient_balance",
+				details: {
+					coding_plan_exhausted: true,
+					reset_at: "2026-11-25T01:00:40Z",
+				},
+				message:
+					"Coding Plan quota is exhausted and wallet balance is insufficient.",
+			},
+		});
+		const response = new Response(body, {
+			status: 402,
+			statusText: "Payment Required",
+		});
+		// No Retry-After header. Billing refusals in this deployment say when
+		// they refill in the body and nowhere else, and reading only the header
+		// parked a six-day exhaustion for a minute, re-trying it every minute —
+		// which spent the row's best target and handed the session a 402.
+		const ms = retryAfterMs(response, body);
+		expect(ms).toBeGreaterThan(60_000);
+		expect(now() + ms).toBeLessThanOrEqual(reset + 1_000);
+		expect(refusalWords(body)).toContain("Coding Plan quota");
+	});
+
+	test("the header still decides when it names a wait", () => {
+		const body = JSON.stringify({
+			error: { message: "resets at 2026-11-25T01:00:40Z" },
+		});
+		const response = new Response(body, {
+			headers: { "retry-after": "30" },
+			status: 429,
+			statusText: "Too Many Requests",
+		});
+		expect(retryAfterMs(response, body)).toBe(30_000);
 	});
 
 	test("a park that names no time does not inherit the last one's", () => {

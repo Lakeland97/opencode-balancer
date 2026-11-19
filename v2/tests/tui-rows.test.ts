@@ -27,6 +27,7 @@ function account(providerID: string, alias: string): Account {
 function provider(providerID: string): Provider {
 	return {
 		alias: "a",
+		assumeWindows: false,
 		enabled: true,
 		freeOnly: false,
 		name: `Provider ${providerID}`,
@@ -62,7 +63,9 @@ function chain(key: string, stored: boolean, targets: number): Chain {
 		package: PACKAGE,
 		stored,
 		targets: Array.from({ length: targets }, (_, index) => ({
+			assumedFrom: "",
 			context: 0,
+			contextSource: "unknown",
 			modelID: key,
 			name: key,
 			providerID: `p${index + 1}`,

@@ -9,7 +9,7 @@ import {
 	readLimitedUntil,
 } from "../core/accounts";
 import { readBuffer, readBufferEnforcement, readLimit } from "../core/context";
-import { getBalancingEnabled } from "../core/priority";
+import { getAssumeWindows, getBalancingEnabled } from "../core/priority";
 import { getRebalanceAuto, readRebalance } from "../core/rebalance";
 import { Balancer } from "../rpc";
 import { listChainRows } from "./chain-actions";
@@ -17,6 +17,7 @@ import { nextRebalanceAt } from "./hooks";
 import { clearLog, readLog } from "./log";
 import { servedEntries } from "./route-memory";
 import {
+	writeAssumeWindows,
 	writeBalancing,
 	writeBufferEnforcement,
 	writeContextBuffer,
@@ -244,6 +245,7 @@ export async function registerBalancerRpc({
 			return {
 				entries: orderedAccounts(db).map((account, position) => ({
 					alias: account.alias,
+					assumeWindows: getAssumeWindows(db, account.providerID),
 					enabled: !account.disabled,
 					freeOnly: account.freeOnly,
 					name: names.get(account.providerID) ?? account.providerID,
@@ -266,6 +268,14 @@ export async function registerBalancerRpc({
 			// then shows the built-in default rather than pretending it was typed.
 			value: readRebalance(db) ?? "",
 		}),
+
+		setAssumeWindows: async (input) => {
+			const { providerID, enabled } = input as {
+				providerID: string;
+				enabled: boolean;
+			};
+			return writeAssumeWindows(db, providerID, enabled);
+		},
 
 		setBalancing: async (input) => {
 			const { enabled } = input as { enabled: boolean };

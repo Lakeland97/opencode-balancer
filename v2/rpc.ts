@@ -20,12 +20,16 @@ const pair = object({ alias: str, providerID: str }, ["providerID", "alias"]);
 const result = object({ message: str, ok: bool }, ["ok", "message"]);
 const chainTarget = object(
 	{
+		/** The connector a window was borrowed from, empty when it was not. */
+		assumedFrom: str,
 		/**
 		 * The window this target reports, or 0 when it reports none. The row's own
 		 * `context` is the tightest of these, which is why the panel can say why a
 		 * row is cut where it is.
 		 */
 		context: num,
+		/** Where that window came from: published, declared, assumed or unknown. */
+		contextSource: str,
 		modelID: str,
 		/** The connector's own name for the model, empty when it published none. */
 		name: str,
@@ -34,7 +38,16 @@ const chainTarget = object(
 		resolved: str,
 		state: str,
 	},
-	["providerID", "modelID", "name", "context", "resolved", "state"],
+	[
+		"providerID",
+		"modelID",
+		"name",
+		"context",
+		"contextSource",
+		"assumedFrom",
+		"resolved",
+		"state",
+	],
 );
 const chainRow = object(
 	{
@@ -134,11 +147,14 @@ export const balancerDefinition = {
 		chainMove: {
 			input: object(
 				{
+					/** One place up or down. */
 					direction: { enum: ["up", "down"], type: "string" },
 					key: str,
 					providerID: str,
+					/** The slot to land on, which is what a drag or a stepper names. */
+					to: num,
 				},
-				["key", "providerID", "direction"],
+				["key", "providerID"],
 			),
 			output: result,
 		},
@@ -231,10 +247,13 @@ export const balancerDefinition = {
 			input: object(
 				{
 					alias: str,
+					/** One place up or down. */
 					direction: { enum: ["up", "down"], type: "string" },
 					providerID: str,
+					/** The slot to land on, which is what a drag or a stepper names. */
+					to: num,
 				},
-				["providerID", "alias", "direction"],
+				["providerID", "alias"],
 			),
 			output: result,
 		},
@@ -280,6 +299,13 @@ export const balancerDefinition = {
 				"nextAt",
 				"value",
 			]),
+		},
+		setAssumeWindows: {
+			input: object({ enabled: bool, providerID: str }, [
+				"providerID",
+				"enabled",
+			]),
+			output: result,
 		},
 		setBalancing: {
 			input: object({ enabled: bool }, ["enabled"]),

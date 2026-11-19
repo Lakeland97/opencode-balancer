@@ -19,6 +19,7 @@ import { invalidateCatalog } from "../server/connectors";
 import {
 	balancerTargetsFor,
 	forgetRoutingMemory,
+	ontoTarget,
 	registerHooks,
 } from "../server/hooks";
 import { markRateLimited } from "../server/request-state";
@@ -380,6 +381,27 @@ describe("the session's target", () => {
 		await registerHooks({ ctx: ctx as unknown as Context, db });
 		return { db, registry };
 	}
+
+	test("a conversation larger than every window still sends somewhere", async () => {
+		const { db, registry } = await routedSetup();
+		// The only target publishes 200k and the conversation is past it. Every
+		// rung that respects windows declines, and the request used to stay on
+		// `balancer.invalid` — which does not resolve, so the host reported a
+		// network error and re-sent four times. One attempt the provider can
+		// refuse in its own words is strictly more useful than that.
+		noteSessionTokens(db, "big-1", 900_000);
+		const event = {
+			agent: "build",
+			headers: {} as Record<string, string>,
+			kind: "chat",
+			model: BALANCER,
+			sessionID: "big-1",
+		};
+		await registry["model.request"](event);
+		expect((event as { baseURL?: string }).baseURL).toBe(
+			"https://p1.invalid/v1",
+		);
+	});
 
 	test("a routed call records the row and the window it went through", async () => {
 		const { db, registry } = await routedSetup();
@@ -902,12 +924,13 @@ describe("a balance that has gone stale", () => {
 		expect(event.headers.authorization).toBe("Bearer sk-1");
 	});
 
-	test("a pick on a provider that is not first begins serving", async () => {
+	test("a pick on a provider that is not first leaves the order alone", async () => {
 		const { ctx, db, registry } = await twoProviders();
 
-		// p1 holds the head of the order, and p2 holds one credential of its own,
-		// so this pick only means anything if it crosses providers. Selecting a
-		// credential that is already first in its own block used to be a no-op.
+		// p1 holds the head of the order and p2 holds one credential of its own.
+		// Picking p2 selects that credential inside p2; it must not drag p2 in
+		// front of p1, because that would change which provider serves every
+		// other model too. Until the order moves, p1 still serves.
 		const rpc = (await registerBalancerRpc({ ctx, db })) as unknown as Record<
 			string,
 			(input: unknown) => Promise<unknown>
@@ -919,7 +942,7 @@ describe("a balance that has gone stale", () => {
 
 		const event = request("picked-second");
 		await registry["model.request"](event);
-		expect(event.headers.authorization).toBe("Bearer sk-2");
+		expect(event.headers.authorization).toBe("Bearer sk-1");
 	});
 });
 
@@ -1180,15 +1203,72 @@ describe("a refusal the session never sees", () => {
 			expect(event.response.status).toBe(429);
 
 			// The refusal is what parked `p1`: a transport failure on the retry
-			// says nothing about the credential that was actually refused.
+			// says nothing about either credential. `p2` is not parked, because a
+			// connection that could not be made is not an answer about an account
+			// — parking it on one dropped connection emptied the row.
 			expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeDefined();
-			expect(getAccount(db, "p2", "a")?.rateLimitedUntil).toBeDefined();
+			expect(getAccount(db, "p2", "a")?.rateLimitedUntil).toBeUndefined();
 
+			// `p2` is not parked but it was already tried in this trail, so the
+			// next request still goes back to `p1` — the credential that is
+			// actually serving the row — rather than to the one that vanished.
 			const next = call("unreachable");
 			await registry["http.request"](next);
 			expect(next.request.headers.get("authorization")).toBe("Bearer sk-1");
 		} finally {
 			fetched.restore();
 		}
+	});
+});
+
+describe("a request is always sent to the target's own host", () => {
+	// The store recorded this exact failure: SayGM's key delivered to
+	// `amr-link.open-design.ai`, which answered `[code=invalid_api_key] api key
+	// not found` and the refusal was charged to SayGM. A request that names
+	// neither the stub nor the base it was last sent to must still be moved.
+	test("a request naming another connector is moved, path intact", () => {
+		expect(
+			ontoTarget({
+				baseURL: "https://api.saygm.com/v1",
+				replaceBase: "https://opencode.ai/inference/openai/v1",
+				url: "https://amr-link.open-design.ai/v1/chat/completions",
+			}),
+		).toBe("https://api.saygm.com/v1/chat/completions");
+	});
+
+	test("a version path is not doubled", () => {
+		expect(
+			ontoTarget({
+				baseURL: "https://api.saygm.com/v1",
+				url: "https://api.saygm.com/v1/chat/completions?x=1",
+			}),
+		).toBe("https://api.saygm.com/v1/chat/completions?x=1");
+	});
+
+	test("the base it was last sent to decides the path", () => {
+		expect(
+			ontoTarget({
+				baseURL: "https://api.cline.bot/api/v1",
+				replaceBase: "https://api.saygm.com/v1",
+				url: "https://api.saygm.com/v1/chat/completions",
+			}),
+		).toBe("https://api.cline.bot/api/v1/chat/completions");
+	});
+
+	test("a version path the connector already carries is not doubled", () => {
+		// This is the shape that 404'd the live session: the stub's `/v1` plus
+		// opencode's own `/inference/openai/v1` produced `/v1/v1/...`.
+		expect(
+			ontoTarget({
+				baseURL: "https://opencode.ai/inference/openai/v1",
+				url: "https://balancer.invalid/v1/chat/completions",
+			}),
+		).toBe("https://opencode.ai/inference/openai/v1/chat/completions");
+		expect(
+			ontoTarget({
+				baseURL: "https://api.saygm.com/v1",
+				url: "https://balancer.invalid/v1/chat/completions",
+			}),
+		).toBe("https://api.saygm.com/v1/chat/completions");
 	});
 });

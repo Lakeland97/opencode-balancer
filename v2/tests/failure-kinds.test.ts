@@ -295,7 +295,7 @@ describe("a row nothing can serve", () => {
 		expect(synthetic[0].text).toContain("no enabled credential");
 	});
 
-	test("one message per attempt, so a retry does not fill the transcript", async () => {
+	test("one message per outage, so a retry does not fill the transcript", async () => {
 		const { db, registry, synthetic } = await harness();
 		setAccountEnabled(db, "p1", "a", false);
 		setAccountEnabled(db, "p2", "a", false);
@@ -303,9 +303,10 @@ describe("a row nothing can serve", () => {
 		await registry["model.request"](row("twice"));
 		await registry["model.request"](row("twice"));
 
-		// One synthetic message per request: a second attempt is a second thing
-		// the user asked for, not a loop the plugin is running.
-		expect(synthetic).toHaveLength(2);
-		expect(synthetic.every((entry) => entry.sessionID === "twice")).toBe(true);
+		// The host retries what failed, and every retry is the same outage. The
+		// reason is worth saying once; a second copy is noise the user has to
+		// scroll past to find the provider's own words.
+		expect(synthetic).toHaveLength(1);
+		expect(synthetic[0].sessionID).toBe("twice");
 	});
 });

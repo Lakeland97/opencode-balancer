@@ -482,7 +482,9 @@ export async function listChainRows(
 				// means the free spelling answers, so that is the model the row
 				// names. Printing both read as the same model twice.
 				return {
+					assumedFrom: target.assumedFrom ?? "",
 					context: resolved.context,
+					contextSource: target.contextSource ?? "unknown",
 					modelID: target.modelID,
 					name: resolved.name,
 					providerID: target.providerID,

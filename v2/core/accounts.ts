@@ -578,21 +578,35 @@ export function moveAccount(
 export function useAccount(db: Database, providerID: string, alias: string) {
 	const all = orderedAccounts(db);
 	const wanted = normalizeAlias(alias);
-	const from = all.findIndex(
-		(account) => account.providerID === providerID && account.alias === wanted,
-	);
+	// The pick is a credential choice, not a provider choice: moving the row to
+	// the front of the whole list made `use` reorder the providers, so a
+	// credential picked for one model became the first provider tried for every
+	// other model too. The chosen credential moves to the front of its own
+	// provider's block, and the block itself keeps its place.
+	const mine = all.filter((account) => account.providerID === providerID);
+	const from = mine.findIndex((account) => account.alias === wanted);
 	if (from < 0) return;
 
 	const write = db.transaction(() => {
 		if (from > 0) {
-			const reordered = all.slice();
+			const reordered = mine.slice();
 			const [moved] = reordered.splice(from, 1);
 			reordered.unshift(moved);
-			renumber(db, reordered);
+			// Reuse the positions the provider already held, in ascending order,
+			// so no other provider's row moves.
+			const slots = mine
+				.map((account) => account.position)
+				.sort((left, right) => left - right);
+			for (const [index, account] of reordered.entries()) {
+				db.query<unknown, [number, number, string, string]>(
+					`UPDATE accounts SET position = ?, updated_at = ?
+                     WHERE provider_id = ? AND alias = ?`,
+				).run(slots[index], now(), providerID, account.alias);
+			}
 		}
-		// The pick is the point: the stored alias must name this credential even
-		// when it was already the top row, because saving an account leaves that
-		// alias on whichever row was written last.
+		// The stored alias must name this credential even when it was already
+		// first, because saving an account leaves that alias on whichever row was
+		// written last.
 		setActiveAlias(db, providerID, wanted);
 	});
 	write();

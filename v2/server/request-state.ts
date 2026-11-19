@@ -18,6 +18,22 @@ export const RETRYABLE_STATUS = new Set([
 ]);
 
 /**
+ * Statuses that say the endpoint broke, not that the credential is spent.
+ *
+ * A gateway that answers 502, an overloaded endpoint answering 529, a timeout:
+ * none of these is evidence about the account, and parking it for a minute
+ * turns a blip into a dead row. With one healthy credential left, that is the
+ * whole model unavailable and the session pointed at a host that does not
+ * resolve. They are walked past inside the call and retried on the next one.
+ */
+export const TRANSIENT_STATUS = new Set([502, 503, 504, 529]);
+
+/** Whether a refusal is this credential's to sit out. */
+export function parksAccount(status: number): boolean {
+	return RETRYABLE_STATUS.has(status) && !TRANSIENT_STATUS.has(status);
+}
+
+/**
  * A failure the conversation itself caused, which no other account would accept
  * either: the request has outgrown the window and must be compacted. Parking a
  * provider on one of these would take a healthy account out of rotation for a
@@ -203,17 +219,55 @@ export function isRetryableFailure(input: {
 	return text !== "";
 }
 
-export function retryAfterMs(response: Response) {
+export function retryAfterMs(response: Response, body?: string) {
 	const retryAfter = response.headers.get("retry-after");
-	if (!retryAfter) return 60_000;
+	if (retryAfter) {
+		const seconds = Number(retryAfter);
+		if (Number.isFinite(seconds)) return Math.max(1_000, seconds * 1000);
 
-	const seconds = Number(retryAfter);
-	if (Number.isFinite(seconds)) return Math.max(1_000, seconds * 1000);
+		const date = Date.parse(retryAfter);
+		if (Number.isFinite(date)) return Math.max(1_000, date - Date.now());
+	}
 
-	const date = Date.parse(retryAfter);
-	if (Number.isFinite(date)) return Math.max(1_000, date - Date.now());
+	// No header, so the endpoint said it in the body. Billing and quota
+	// refusals in this deployment name their reset there and nowhere else
+	// (`reset_at`, `resets at …`), and a minute-long park on a six-day
+	// exhaustion is a refusal spent once a minute while the row's best target
+	// sits at the head of the order, failing every turn.
+	if (body) {
+		const refill = parseRollover(body, Date.now());
+		if (refill !== undefined) return Math.max(1_000, refill - Date.now());
+	}
 
 	return 60_000;
+}
+
+/**
+ * The endpoint's own words from a refusal body, for the panel.
+ *
+ * A park the panel explains as "HTTP 401 Unauthorized" says nothing a reader can
+ * act on; the sentence the provider wrote beside that status does. Only the
+ * message is taken — codes and metadata are for the log, not a tooltip.
+ */
+export function refusalWords(body: string | undefined): string | undefined {
+	if (!body) return undefined;
+	try {
+		const parsed = JSON.parse(body) as { error?: unknown; message?: unknown };
+		const error = parsed?.error;
+		const nested =
+			typeof error === "object" && error !== null
+				? (error as { message?: unknown }).message
+				: error;
+		const message = nested ?? parsed?.message;
+		if (typeof message === "string" && message.trim() !== "") {
+			return message.trim();
+		}
+	} catch {
+		// Not JSON: a plain-text refusal is still the provider's own words.
+		const text = body.trim();
+		if (text !== "" && text.length <= 300) return text;
+	}
+	return undefined;
 }
 
 /**
@@ -247,6 +301,7 @@ export function markRateLimited(
 	if (!account) return;
 
 	const timestamp = now();
+	let refill: number | undefined;
 	if (reason) {
 		setLimitedReason(db, providerID, alias, reason);
 		// The instant is read from the whole message, before the reason is cut
@@ -254,18 +309,28 @@ export function markRateLimited(
 		// failure said: a later park that names nothing must not inherit the
 		// previous one's time.
 		clearLimitedUntil(db, providerID, alias);
-		const until = parseRollover(reason, timestamp);
-		if (until !== undefined) {
-			setLimitedUntil(db, providerID, alias, until);
+		refill = parseRollover(reason, timestamp);
+		if (refill !== undefined) {
+			setLimitedUntil(db, providerID, alias, refill);
 		}
 	}
 	if (account.rateLimitedUntil && account.rateLimitedUntil > timestamp) return;
 
+	// A provider that named its own refill is parked until then. A weekly cap
+	// retried a minute later is a real refusal every minute, and because a spent
+	// account with a wide window still looks like the best place to send a long
+	// conversation, it keeps being chosen ahead of a healthy target that would
+	// only need a trim.
 	db.query<unknown, [number, number, string, string]>(
 		`UPDATE accounts
          SET failures = failures + 1,
              rate_limited_until = ?,
              updated_at = ?
          WHERE provider_id = ? AND alias = ?`,
-	).run(timestamp + durationMs, timestamp, providerID, account.alias);
+	).run(
+		Math.max(timestamp + durationMs, refill ?? 0),
+		timestamp,
+		providerID,
+		account.alias,
+	);
 }

@@ -8,9 +8,14 @@ import {
 	readLimitSpec,
 	readModelLimitSpec,
 } from "../core/context";
+import { loadCatalog } from "./connectors";
 import { balancerTargetsFor, type SessionTarget } from "./hooks";
 import { recordLog } from "./log";
-import { forgetSessionTokens, noteSessionTokens } from "./route-memory";
+import {
+	forgetSessionTokens,
+	noteSessionTokens,
+	sessionWindowKey,
+} from "./route-memory";
 
 /** The row and connector a session is running on, as the watcher needs it. */
 export type { SessionTarget };
@@ -51,6 +56,25 @@ export type CompactionEvent = {
 type Weighed = { target: SessionTarget; threshold: number };
 
 /**
+ * Replace each row's recorded window with what its provider publishes now.
+ *
+ * The record says where the conversation ran; it is not evidence of what the
+ * provider holds today. A key that is absent means the provider no longer
+ * offers that model, so the stored number is the last word and is kept.
+ */
+export function withPublishedWindows(
+	targets: readonly SessionTarget[],
+	windows: ReadonlyMap<string, number | undefined>,
+): SessionTarget[] {
+	return targets.map((target) => {
+		const key = sessionWindowKey(target.providerID, target.familyKey);
+		return windows.has(key)
+			? { ...target, context: windows.get(key) ?? 0 }
+			: target;
+	});
+}
+
+/**
  * Decides when a conversation has filled its window and asks the host to
  * compact it.
  *
@@ -59,7 +83,7 @@ type Weighed = { target: SessionTarget; threshold: number };
  */
 export function createCompactionController(input: {
 	db: Database;
-	resolve: (sessionID: string) => SessionTarget[];
+	resolve: (sessionID: string) => SessionTarget[] | Promise<SessionTarget[]>;
 	compact: (sessionID: string) => Promise<unknown>;
 	recordLog: (kind: "compact" | "error", text: string) => void;
 }) {
@@ -106,7 +130,7 @@ export function createCompactionController(input: {
 
 			// A session the balancer has never routed is somebody else's
 			// conversation, and its window is not the one we declared.
-			const targets = input.resolve(sessionID);
+			const targets = await input.resolve(sessionID);
 			if (targets.length === 0) return false;
 
 			// Every model the session has run, weighed, smallest first: a
@@ -168,13 +192,44 @@ export async function registerCompaction({
 	ctx: Context;
 	db: Database;
 }) {
+	/** The window each provider/model publishes right now, by session row key. */
+	const windowsFor = async () => {
+		const catalog = await loadCatalog(ctx, db);
+		const windows = new Map<string, number | undefined>();
+		for (const family of catalog.families) {
+			for (const target of family.routes) {
+				windows.set(
+					sessionWindowKey(target.providerID, family.key),
+					target.context,
+				);
+			}
+		}
+		return windows;
+	};
+
 	const controller = createCompactionController({
 		compact: (sessionID) => ctx.session.compact({ sessionID }),
 		db,
 		recordLog,
-		resolve: (sessionID) => balancerTargetsFor(db, sessionID),
+		// The catalogue is the claim about a provider **now**; the stored note is
+		// only where the conversation last ran. Reading the window from the live
+		// catalogue keeps a number recorded hours ago — say, the host's 200k
+		// placeholder — from deciding where a conversation is cut today.
+		resolve: async (sessionID) => {
+			const targets = balancerTargetsFor(db, sessionID);
+			if (targets.length === 0) return targets;
+			let windows: Map<string, number | undefined>;
+			try {
+				windows = await windowsFor();
+			} catch {
+				return targets;
+			}
+			return withPublishedWindows(targets, windows);
+		},
 	});
 
+	// The catalogue is read per event (via the cached catalog), so the comment
+	// above the resolve explains why the stored window is not trusted.
 	void (async () => {
 		try {
 			for await (const event of ctx.event.subscribe({

@@ -8,7 +8,9 @@ import {
 	contextTokens,
 	createCompactionController,
 	type SessionTarget,
+	withPublishedWindows,
 } from "../server/compaction";
+import { sessionWindowKey } from "../server/route-memory";
 
 function freshDb() {
 	const db = new Database(":memory:");
@@ -261,5 +263,36 @@ describe("one compaction per breach", () => {
 		// than leaving the conversation with nothing protecting it.
 		await handle(step("s1", { input: 250_000 }));
 		expect(compacted).toEqual(["s1", "s1"]);
+	});
+});
+
+describe("the window a conversation is measured against", () => {
+	test("the provider's current silence replaces a recorded placeholder", () => {
+		// The recorded 200k was the host's fallback, and SayGM publishes no
+		// window at all. The live catalogue has the last word, so the row is
+		// measured against the declared window instead.
+		const [target] = withPublishedWindows(
+			[TARGET],
+			new Map([[sessionWindowKey("p1", TARGET.familyKey), undefined]]),
+		);
+		expect(target.context).toBe(0);
+	});
+
+	test("a published window replaces a different recorded one", () => {
+		const [target] = withPublishedWindows(
+			[{ ...TARGET, context: 200_000 }],
+			new Map([[sessionWindowKey("p1", TARGET.familyKey), 1_048_000]]),
+		);
+		expect(target.context).toBe(1_048_000);
+	});
+
+	test("a provider that no longer offers the model keeps the last window", () => {
+		// No entry means the row is not in any catalogue now; dropping the only
+		// measurement would make the conversation look unmetered.
+		const [target] = withPublishedWindows(
+			[{ ...TARGET, context: 200_000 }],
+			new Map(),
+		);
+		expect(target.context).toBe(200_000);
 	});
 });

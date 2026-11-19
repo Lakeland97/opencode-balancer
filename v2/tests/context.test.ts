@@ -33,27 +33,28 @@ function freshDb() {
 describe("where the conversation is cut", () => {
 	test("the limit picks the cut, and the buffer comes off it", () => {
 		// The balancer tells every model it holds 1M, so a 25% limit asks for
-		// 250k. The buffer is a share of that limit, so 5% is 12.5k, and the
-		// conversation is compacted at 237.5k.
+		// 250k. The buffer is a share of that limit, so 5% is 12.5k — raised to
+		// the 20k floor — and the conversation is compacted at 230k.
 		expect(
 			effectiveThreshold({
 				buffer: { percent: 5 },
 				globalLimit: { percent: 25 },
 				realContext: 1_000_000,
 			}),
-		).toBe(237_500);
+		).toBe(230_000);
 	});
 
 	test("the buffer is a share of the limit, not of the window", () => {
-		// The reserve is 12.5k whatever the model holds, because the limit is
-		// the same either way; the window only clamps what is left of it.
+		// The reserve is 20k whatever the model holds, because the limit is the
+		// same either way and 5% of it is below the floor; the window only clamps
+		// what is left of it.
 		expect(
 			effectiveThreshold({
 				buffer: { percent: 5 },
 				globalLimit: { percent: 25 },
 				realContext: 200_000,
 			}),
-		).toBe(187_500);
+		).toBe(180_000);
 		// The same limit on a model that can hold all of it.
 		expect(
 			effectiveThreshold({
@@ -61,7 +62,7 @@ describe("where the conversation is cut", () => {
 				globalLimit: { percent: 25 },
 				realContext: 1_000_000,
 			}),
-		).toBe(237_500);
+		).toBe(230_000);
 	});
 
 	test("with nothing set, the limit is a fifth of the declared window", () => {
@@ -263,7 +264,7 @@ describe("when the buffer is enforced", () => {
 				globalLimit: { percent: 25 },
 				realContext: 1_000_000,
 			}),
-		).toBe(237_500);
+		).toBe(230_000);
 	});
 });
 
@@ -514,33 +515,34 @@ describe("the buffer", () => {
 		).toBe(25_000);
 	});
 
-	test("a reserve smaller than the summary prompt is raised to it", () => {
-		// 1% of a 250k limit is 2.5k, already above the prompt, so the share stands.
+	test("a buffer set below the floor is raised to it", () => {
+		// 1% of a 250k limit is 2.5k, which no longer stands: the floor is 20k
+		// whatever was typed, so a compaction request always has room for its
+		// own instruction without measuring that instruction every time.
 		expect(
 			compactionReserve({
 				buffer: { percent: 1 },
 				ceiling: 250_000,
 				limit: 250_000,
 			}),
-		).toBe(2_500);
-		// 1% of 30k is 300 — less than the instructions the summary request adds
-		// on top of the conversation it carries, so it is raised to cover them.
+		).toBe(20_000);
+		// A 30k window cannot spare 20k, so the quarter cap decides.
 		expect(
 			compactionReserve({
 				buffer: { percent: 1 },
 				ceiling: 30_000,
 				limit: 30_000,
 			}),
-		).toBe(1_000);
-		// A size below the prompt is raised the same way.
+		).toBe(7_500);
+		// A size below the floor is raised the same way.
 		expect(
 			compactionReserve({
 				buffer: { tokens: 200 },
 				ceiling: 200_000,
 				limit: 200_000,
 			}),
-		).toBe(1_000);
-		// A window too small to spare the prompt keeps its quarter: a cut with
+		).toBe(20_000);
+		// A window too small to spare the floor keeps its quarter: a cut with
 		// nothing left behind it is the other way to trip the same overflow.
 		expect(
 			compactionReserve({
@@ -557,9 +559,10 @@ describe("the buffer", () => {
 		);
 	});
 
-	test("a measurement from a real compaction sets the floor", () => {
-		// The host's prompt grew, so the floor moves with it instead of staying at
-		// the figure measured from its source.
+	test("the floor holds whatever was measured", () => {
+		// The instruction the host actually sent is no longer what sets the
+		// floor: 20k covers every summary measured so far, and a figure below it
+		// would be the difference between a compaction and an overflow.
 		expect(
 			compactionReserve({
 				buffer: { tokens: 500 },
@@ -567,8 +570,9 @@ describe("the buffer", () => {
 				limit: 200_000,
 				promptTokens: 3_000,
 			}),
-		).toBe(3_000);
-		// And the cut a session is compacted at moves with it.
+		).toBe(20_000);
+		// And the cut a session is compacted at follows the floor, not the
+		// measurement.
 		expect(
 			effectiveThreshold({
 				buffer: { tokens: 500 },
@@ -576,7 +580,7 @@ describe("the buffer", () => {
 				promptTokens: 3_000,
 				realContext: 200_000,
 			}),
-		).toBe(197_000);
+		).toBe(180_000);
 	});
 
 	test("it moves the cut, which is the whole point", () => {

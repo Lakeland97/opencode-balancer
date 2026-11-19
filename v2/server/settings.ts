@@ -11,7 +11,7 @@ import {
 	setLimit,
 	setModelLimit,
 } from "../core/context";
-import { setBalancingEnabled } from "../core/priority";
+import { setAssumeWindows, setBalancingEnabled } from "../core/priority";
 import {
 	formatDuration,
 	parseDuration,
@@ -20,6 +20,7 @@ import {
 	setRebalance,
 	setRebalanceAuto,
 } from "../core/rebalance";
+import { invalidateCatalog } from "./connectors";
 import { forgetRoutingMemory } from "./hooks";
 import { recordLog } from "./log";
 
@@ -41,6 +42,31 @@ function describeLimit(size: SizeOrShare, window: string): string {
  * surface writes the same settings. One body means one validation message, one
  * log line and one routing-memory reset, whichever front end asked.
  */
+/**
+ * Whether a connector may borrow a window from an identical model elsewhere.
+ *
+ * The catalogue is invalidated because the borrowed number is part of a route,
+ * and the panel would otherwise keep showing the old answer for its whole TTL.
+ */
+export function writeAssumeWindows(
+	db: Database,
+	providerID: string,
+	enabled: boolean,
+): WriteResult {
+	setAssumeWindows(db, providerID, enabled);
+	invalidateCatalog();
+	recordLog(
+		"config",
+		`${providerID} ${enabled ? "may borrow" : "will not borrow"} windows from identical models elsewhere`,
+	);
+	return {
+		message: enabled
+			? `${providerID} now borrows the window of an identically named model when it publishes none.`
+			: `${providerID} keeps its window unknown unless it publishes one.`,
+		ok: true,
+	};
+}
+
 export function writeBalancing(db: Database, enabled: boolean): WriteResult {
 	setBalancingEnabled(db, enabled);
 	// Turning routing back on starts from the order as it now stands; a trail

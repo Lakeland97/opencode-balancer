@@ -36,6 +36,37 @@ export function setBalancingEnabled(db: Database, enabled: boolean) {
 }
 
 const freeOnlyPrefix = "free_only:";
+const assumeWindowsPrefix = "assume_windows:";
+
+/**
+ * Whether this connector may borrow a window from an identically named model on
+ * another connector.
+ *
+ * SayGM and cline-pass publish no window at all, and the host then shows whatever
+ * the connector declared, which is a default rather than a measurement. The same
+ * weights on another connector that does publish a window are real evidence; this
+ * switch decides whether that evidence may be used. Off unless asked for, because
+ * a borrowed number is still an assumption and must not masquerade as measured.
+ */
+export function getAssumeWindows(db: Database, providerID: string): boolean {
+	const row = db
+		.query<{ value: string }, [string]>(
+			"SELECT value FROM settings WHERE key = ?",
+		)
+		.get(`${assumeWindowsPrefix}${providerID}`);
+	return row?.value === "1";
+}
+
+export function setAssumeWindows(
+	db: Database,
+	providerID: string,
+	enabled: boolean,
+) {
+	db.query<unknown, [string, string]>(
+		`INSERT INTO settings (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+	).run(`${assumeWindowsPrefix}${providerID}`, enabled ? "1" : "0");
+}
 
 /**
  * Write the order `provider_priority` held onto the credentials themselves.

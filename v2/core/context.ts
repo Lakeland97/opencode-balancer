@@ -348,6 +348,22 @@ export function migrateLimits(db: Database) {
 const COMPACT_PROMPT_TOKENS = 1_000;
 
 /**
+ * The smallest reserve the compaction may leave the window, whatever the user
+ * typed.
+ *
+ * A reserve exists so the compaction request — the conversation plus the
+ * instruction that summarises it — still fits. Sizing that exactly meant
+ * measuring the instruction on every compaction request, and the measurement was
+ * a second opinion about a number a flat floor covers: no summary instruction in
+ * practice comes near twenty thousand tokens, and a reserve under it is the
+ * difference between a compaction that runs and one that overflows. So the floor
+ * is a constant, and a buffer set below it is raised to it. It is still capped at
+ * a quarter of the window, because a small window that keeps the whole floor free
+ * would leave the conversation nowhere to be cut to.
+ */
+const MIN_COMPACT_BUFFER = 20_000;
+
+/**
  * The room the compaction itself needs, taken off the cut.
  *
  * Compacting is another request against the same model, and it carries the
@@ -379,12 +395,11 @@ export function compactionReserve(input: {
 }): number {
 	const requested =
 		input.buffer === undefined
-			? Math.max(Math.round(input.limit / 10), 20_000)
-			: measure(input.buffer, input.limit);
-	return Math.min(
-		Math.max(requested, input.promptTokens ?? COMPACT_PROMPT_TOKENS),
-		Math.round(input.ceiling / 4),
-	);
+			? Math.max(Math.round(input.limit / 10), MIN_COMPACT_BUFFER)
+			: Math.max(measure(input.buffer, input.limit), MIN_COMPACT_BUFFER);
+	// The cap comes last, so a window too small to spare the floor keeps a
+	// quarter rather than a reserve with nothing left behind it.
+	return Math.min(requested, Math.round(input.ceiling / 4));
 }
 
 /** A size or a share, read as a count of tokens against one window. */

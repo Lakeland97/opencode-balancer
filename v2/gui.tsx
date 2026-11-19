@@ -561,47 +561,45 @@ export default Plugin.define({
 			opacity: 0.15,
 		} as const;
 
-		// Reordering by drag: one grip per row instead of a pair of arrows. The
-		// grip is still a control — focus it and the arrow keys move the row — so
-		// a keyboard loses nothing by the buttons going away.
-		type Drag = { list: string; from: number; to: number };
-		const [dragging, setDragging] = createSignal<Drag | null>(null);
-		/** The row under the pointer, by the list it belongs to and its slot. */
-		const rowUnder = (list: string, x: number, y: number) => {
-			for (const element of document.elementsFromPoint(x, y)) {
-				const rowElement = element.closest?.("[data-reorder]");
-				if (!rowElement || rowElement.getAttribute("data-reorder") !== list) {
-					continue;
-				}
-				const index = Number(rowElement.getAttribute("data-reorder-index"));
-				if (Number.isInteger(index)) return index;
-			}
-			return undefined;
-		};
-		// A reorderable row keeps a gutter at its right edge, so the grip is in the
-		// same place on every row instead of wherever a wrapping label leaves it.
-		const grabbableRow = {
-			...row,
-			"padding-right": "1.4em",
-			position: "relative",
+		// Reordering is two buttons, one step each.
+		//
+		// A single drag handle replaced a pair of arrows, and in this panel the
+		// handle never received a usable gesture: three rebuilds — a row-wide
+		// start, pointer capture, and drop slots taken from the rows' own
+		// rectangles — each left a real drag doing nothing. A control nobody can
+		// use is worse than the plainer one it replaced, so the arrows are back
+		// and they call the same RPC the drag would have.
+		const stepper = {
+			"align-items": "center",
+			display: "inline-flex",
+			gap: "2px",
 		} as const;
-		// The grip lives in that gutter rather than in the flow: it cannot be
-		// pushed around by the label beside it, and it always reads as the row's
-		// own handle rather than as a control between two others.
-		const gripStyle = {
+		const stepButton = {
 			background: "none",
 			border: 0,
 			color: "inherit",
-			cursor: "grab",
-			"font-size": "14px",
+			cursor: "pointer",
+			"font-size": "11px",
 			"line-height": 1,
-			opacity: 0.45,
-			padding: "0 2px",
+			opacity: 0.6,
+			padding: "0 1px",
+		} as const;
+		// A reorderable row keeps a gutter at its right edge, so the stepper is in
+		// the same place on every row instead of wherever a wrapping label leaves it.
+		const grabbableRow = {
+			...row,
+			"padding-right": "2.6em",
+			position: "relative",
+		} as const;
+		// The stepper sits in that gutter rather than in the flow: it cannot be
+		// pushed around by the label beside it, and it reads as the row's own
+		// control rather than as a control between two others.
+		const stepperBox = {
+			...stepper,
 			position: "absolute",
 			right: 0,
 			top: "50%",
 			transform: "translateY(-50%)",
-			"user-select": "none",
 		} as const;
 		// A credential row is two lines: who it is, then what you can do to it.
 		// The second line carries the provider's own words on the left, so a
@@ -612,13 +610,13 @@ export default Plugin.define({
 			"flex-direction": "column",
 			gap: "2px",
 		} as const;
-		// That second line reserves the grip's gutter itself, so the handle sits
+		// That second line reserves the stepper's gutter itself, so it sits
 		// level with the switches rather than between the two lines.
 		const controlLine = {
 			"align-items": "center",
 			display: "flex",
 			gap: "6px",
-			"padding-right": "1.4em",
+			"padding-right": "2.6em",
 			position: "relative",
 		} as const;
 		// The note's box: the control line's left side, and the thing a pointer
@@ -649,7 +647,7 @@ export default Plugin.define({
 			"font-size": "11px",
 			opacity: 0.8,
 		} as const;
-		// The row's own switches, pulled together at its right edge beside the grip
+		// The row's own switches, pulled together at its right edge beside the stepper
 		// and divided from the label by a hairline: a row reads as "this credential"
 		// on the left and "what you can do to it" on the right.
 		const controls = {
@@ -665,71 +663,46 @@ export default Plugin.define({
 			opacity: 0.15,
 			width: 0,
 		} as const;
-		/** The row a drag would land on, and the row being dragged. */
-		const rowWhileDragging = (
-			list: string,
-			index: number,
-			base: typeof grabbableRow | typeof stackRow = grabbableRow,
-		) => {
-			const current = dragging();
-			if (!current || current.list !== list) return base;
-			if (current.from === index) return { ...base, opacity: 0.55 };
-			if (current.to === index) {
-				return {
-					...base,
-					"box-shadow": "inset 0 2px 0 currentColor",
-				};
-			}
-			return base;
-		};
-		const grip = (input: {
-			list: string;
+		/** What a step asks the balancer to do, for one credential. */
+		const moveProvider = (providerID: string, alias: string) => (to: number) =>
+			void run(() => rpc().move({ alias, providerID, to }));
+
+		/**
+		 * One row's reorder controls: a step up and a step down.
+		 *
+		 * Both appear on every row, disabled at the ends rather than hidden, so
+		 * the control does not move under the pointer as the row it belongs to
+		 * changes place.
+		 */
+		const Stepper = (props: {
 			index: number;
 			count: number;
 			move: (to: number) => void;
-		}) => ({
-			"aria-label": "reorder",
-			onKeyDown: (event: KeyboardEvent) => {
-				if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-				const to = input.index + (event.key === "ArrowUp" ? -1 : 1);
-				if (to < 0 || to >= input.count) return;
-				event.preventDefault();
-				input.move(to);
-			},
-			onPointerDown: (event: PointerEvent) => {
-				if (event.button !== 0) return;
-				event.preventDefault();
-				const previousSelect = document.body.style.userSelect;
-				document.body.style.userSelect = "none";
-				setDragging({ from: input.index, list: input.list, to: input.index });
-				const track = (move: PointerEvent) => {
-					const to = rowUnder(input.list, move.clientX, move.clientY);
-					if (to !== undefined) {
-						setDragging((current) => (current ? { ...current, to } : current));
-					}
-				};
-				const end = () => {
-					const current = dragging();
-					window.removeEventListener("pointermove", track);
-					window.removeEventListener("pointerup", end);
-					window.removeEventListener("pointercancel", end);
-					document.body.style.userSelect = previousSelect;
-					setDragging(null);
-					if (current && current.from !== current.to) input.move(current.to);
-				};
-				window.addEventListener("pointermove", track);
-				window.addEventListener("pointerup", end);
-				window.addEventListener("pointercancel", end);
-			},
-			role: "button" as const,
-			style: gripStyle,
-			tabIndex: 0,
-			title:
-				"drag to reorder; with this focused, the arrow keys move it one place",
-		});
+		}) => (
+			<span style={stepperBox}>
+				<button
+					aria-label="move up"
+					disabled={props.index === 0}
+					onClick={() => props.move(props.index - 1)}
+					style={stepButton}
+					title="move up one place"
+				>
+					↑
+				</button>
+				<button
+					aria-label="move down"
+					disabled={props.index >= props.count - 1}
+					onClick={() => props.move(props.index + 1)}
+					style={stepButton}
+					title="move down one place"
+				>
+					↓
+				</button>
+			</span>
+		);
 
 		// The providers section is one row per credential, in the balancer's
-		// order: the order, the switches and the grip all act on the
+		// order: the order, the switches and the stepper all act on the
 		// credential, so nothing rides a provider header row.
 		const providerEntries = () =>
 			providers().map((entry) => ({
@@ -974,11 +947,7 @@ export default Plugin.define({
 
 					<For each={providerEntries()}>
 						{(item, index) => (
-							<div
-								data-reorder="providers"
-								data-reorder-index={index()}
-								style={rowWhileDragging("providers", index(), stackRow)}
-							>
+							<div style={stackRow}>
 								<label
 									style={{
 										"align-items": "center",
@@ -1070,6 +1039,28 @@ export default Plugin.define({
 												display: "flex",
 												gap: "4px",
 											}}
+											title="borrow the window of an identically named model on another provider when this one publishes none"
+										>
+											<input
+												checked={item.entry.assumeWindows}
+												onChange={(event) =>
+													void run(() =>
+														rpc().setAssumeWindows({
+															enabled: event.currentTarget.checked,
+															providerID: item.entry.providerID,
+														}),
+													)
+												}
+												type="checkbox"
+											/>
+											{ctx.t("assumeWindows")}
+										</label>
+										<label
+											style={{
+												"align-items": "center",
+												display: "flex",
+												gap: "4px",
+											}}
 											title="use only this credential's free models"
 										>
 											<input
@@ -1103,26 +1094,13 @@ export default Plugin.define({
 										</button>
 									</span>
 
-									{/* Last in the row and out of its flow: the grip sits in the
-								    reserved right-hand gutter, and the final tab stop is the
-								    handle rather than a control that acts on the credential. */}
-									<span
-										{...grip({
-											count: providerEntries().length,
-											index: index(),
-											list: "providers",
-											move: (to) =>
-												void run(() =>
-													rpc().move({
-														alias: item.entry.alias,
-														providerID: item.entry.providerID,
-														to,
-													}),
-												),
-										})}
-									>
-										⠿
-									</span>
+									{/* Last in the row and out of its flow: the stepper sits in the
+								    reserved right-hand gutter, level with the switches. */}
+									<Stepper
+										count={providerEntries().length}
+										index={index()}
+										move={moveProvider(item.entry.providerID, item.entry.alias)}
+									/>
 								</div>
 							</div>
 						)}
@@ -1334,14 +1312,7 @@ export default Plugin.define({
 															<div style={stair(1)}>
 																<For each={chain.targets}>
 																	{(target, index) => (
-																		<div
-																			data-reorder={`targets:${chain.key}`}
-																			data-reorder-index={index()}
-																			style={rowWhileDragging(
-																				`targets:${chain.key}`,
-																				index(),
-																			)}
-																		>
+																		<div style={grabbableRow}>
 																			<span
 																				onClick={() => {
 																					const key = `${chain.key}:${target.providerID}`;
@@ -1380,24 +1351,35 @@ export default Plugin.define({
 																						· {target.state}
 																					</span>
 																				</Show>
+																				{/* A window nobody published is not a number; say
+																				    so instead of showing a default. A borrowed one
+																				    names the connector it came from. */}
+																				<Show
+																					when={
+																						target.contextSource ===
+																							"assumed" || target.context === 0
+																					}
+																				>
+																					<span style={{ opacity: 0.6 }}>
+																						{target.contextSource === "assumed"
+																							? ` · ${formatTokens(target.context)} ${ctx.t("assumedFrom")} ${target.assumedFrom}`
+																							: ` · ${ctx.t("unknownWindow")}`}
+																					</span>
+																				</Show>
 																			</span>
-																			<span
-																				{...grip({
-																					count: chain.targets.length,
-																					index: index(),
-																					list: `targets:${chain.key}`,
-																					move: (to) =>
-																						void run(() =>
-																							rpc().chainMove({
-																								key: chain.key,
-																								providerID: target.providerID,
-																								to,
-																							}),
-																						),
-																				})}
-																			>
-																				⠿
-																			</span>
+																			<Stepper
+																				count={chain.targets.length}
+																				index={index()}
+																				move={(to) =>
+																					void run(() =>
+																						rpc().chainMove({
+																							key: chain.key,
+																							providerID: target.providerID,
+																							to,
+																						}),
+																					)
+																				}
+																			/>
 																			<button
 																				onClick={() =>
 																					void run(() =>

@@ -41,6 +41,10 @@ export type Target = {
 	providerID: string;
 	/** The window this target reports, or 0 when it reports none. */
 	context: number;
+	/** Where that window came from: published, declared, assumed, or unknown. */
+	contextSource: string;
+	/** The connector the window was borrowed from, when it was assumed. */
+	assumedFrom: string;
 	/** What is actually sent, once a free-only provider substitutes. */
 	resolved: string;
 	state: string;
@@ -93,6 +97,8 @@ export type Provider = {
 	alias: string;
 	enabled: boolean;
 	freeOnly: boolean;
+	/** Whether this provider may borrow windows from identical models elsewhere. */
+	assumeWindows: boolean;
 	/** The provider's display name. */
 	name: string;
 	position: number;

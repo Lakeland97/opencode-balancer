@@ -85,18 +85,18 @@ describe("account writes", () => {
 		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
 		expect(readLog().at(-1)?.text).toBe("serving with p1/a");
 	});
-	test("use puts the picked credential at the head of the whole order", () => {
+	test("use never moves the provider order", () => {
 		const db = freshDb();
 		saveAccount(db, "p2", "a", { key: "k3", type: "api" as const });
-		// One credential per provider: moving it to the head of its own
-		// provider's block moves nothing at all, so the pick has to travel the
-		// order every provider shares or selecting it does nothing visible.
+		// The pick is a credential choice. Moving p2 to the head would make that
+		// credential the first provider tried for every other model as well,
+		// which is a provider-order change the user did not ask for.
 		expect(writeUse(db, { alias: "a", providerID: "p2" }).ok).toBe(true);
 		expect(
 			orderedAccounts(db).map(
 				(account) => `${account.providerID}/${account.alias}`,
 			),
-		).toEqual(["p2/a", "p1/a", "p1/b"]);
+		).toEqual(["p1/a", "p1/b", "p2/a"]);
 	});
 	test("move changes the order", () => {
 		const db = freshDb();

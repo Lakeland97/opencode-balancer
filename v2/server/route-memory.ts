@@ -445,6 +445,16 @@ export function sessionRows(
 }
 
 /**
+ * The key one row's window is filed under when a live catalogue is applied.
+ *
+ * A row is the model, not the provider: the same family is served by several
+ * connectors with different windows, and each one answers for its own.
+ */
+export function sessionWindowKey(providerID: string, familyKey: string) {
+	return `${providerID}\u0000${familyKey}`;
+}
+
+/**
  * Drop the cache this run has built. The store is the record, so this only
  * matters to a test that reuses one database across cases; a fresh database
  * already starts empty.

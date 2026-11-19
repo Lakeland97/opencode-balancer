@@ -1,8 +1,9 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 
-import { saveAccount } from "../core/accounts";
+import { saveAccount, setAccountEnabled } from "../core/accounts";
 import { saveChain } from "../core/chains";
+import { setAssumeWindows } from "../core/priority";
 import { migrate } from "../core/schema";
 import {
 	invalidateCatalog,
@@ -11,6 +12,11 @@ import {
 	registerBalancerProvider,
 	resolveChain,
 } from "../server/connectors";
+import {
+	cachedRemoteModels,
+	invalidateRemoteModels,
+	refreshRemoteModels,
+} from "../server/remote-models";
 
 const PACKAGE = "@opencode/ai/providers/openai-compatible";
 
@@ -487,6 +493,139 @@ function hostingCtx(data: unknown[]) {
 type Editor = { add: (input: { models: DeclaredModel[] }) => void };
 
 describe("provider re-declaration", () => {
+	test("a window the provider never published is not the host's placeholder", async () => {
+		const db = freshDb();
+		// The host fills a default window into every connector it loads, so a
+		// model the provider lists without one arrives here looking like a 200k
+		// model. It is not: the number is the host's own fallback, and trusting
+		// it makes the balancer cut a conversation that the provider can hold —
+		// SayGM answered 253k for a 200k-declared model.
+		const host = [
+			model("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+				context: 200_000,
+				output: 32_000,
+			}),
+		];
+		const original = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ data: [{ id: "deepseek-v4.1-flash" }] }), {
+				headers: { "content-type": "application/json" },
+				status: 200,
+			})) as unknown as typeof fetch;
+		try {
+			invalidateRemoteModels();
+			// The catalogue read is never awaited by routing, so the first pass
+			// starts it and the second one sees the answer.
+			cachedRemoteModels(db, "p2", "https://p2.invalid/v1");
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			invalidateCatalog();
+			const catalog = await loadCatalog(ctxWith(host), db);
+			const family = catalog.families.find(
+				(entry) => entry.key === "deepseek-v4.1-flash",
+			);
+			const route = family?.targets.find(
+				(target) => target.providerID === "p2",
+			);
+			expect(route?.context).toBeUndefined();
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test("a window the provider did publish still wins", async () => {
+		const db = freshDb();
+		const host = [
+			model("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+				context: 200_000,
+				output: 32_000,
+			}),
+		];
+		const original = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response(
+				JSON.stringify({
+					data: [{ context_length: 1048000, id: "deepseek-v4.1-flash" }],
+				}),
+				{ headers: { "content-type": "application/json" }, status: 200 },
+			)) as unknown as typeof fetch;
+		try {
+			invalidateRemoteModels();
+			cachedRemoteModels(db, "p2", "https://p2.invalid/v1");
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			invalidateCatalog();
+			const catalog = await loadCatalog(ctxWith(host), db);
+			const family = catalog.families.find(
+				(entry) => entry.key === "deepseek-v4.1-flash",
+			);
+			const route = family?.targets.find(
+				(target) => target.providerID === "p2",
+			);
+			expect(route?.context).toBe(1_048_000);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test("a provider with no catalogue at all keeps its declared window", async () => {
+		const db = freshDb();
+		const host = [
+			model("p2", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+				context: 200_000,
+				output: 32_000,
+			}),
+		];
+		const original = globalThis.fetch;
+		globalThis.fetch = (async () =>
+			new Response("nope", { status: 404 })) as unknown as typeof fetch;
+		try {
+			invalidateRemoteModels();
+			cachedRemoteModels(db, "p2", "https://p2.invalid/v1");
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			invalidateCatalog();
+			const catalog = await loadCatalog(ctxWith(host), db);
+			const family = catalog.families.find(
+				(entry) => entry.key === "deepseek-v4.1-flash",
+			);
+			const route = family?.targets.find(
+				(target) => target.providerID === "p2",
+			);
+			expect(route?.context).toBe(200_000);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
+	test("a credential switched off for routing still reads the catalogue", async () => {
+		// Switching a provider off is a routing decision, not a deleted key. It
+		// must not also switch the provider back to the hardcoded list in
+		// `opencode.json`: with every other provider disabled, that is the whole
+		// difference between the provider's own catalogue and a stale snapshot.
+		const db = freshDb();
+		setAccountEnabled(db, "p2", "a", false);
+
+		const original = globalThis.fetch;
+		let sent: RequestInit | undefined;
+		globalThis.fetch = (async (_url: string, init: RequestInit) => {
+			sent = init;
+			return new Response(JSON.stringify({ data: [{ id: "fresh" }] }), {
+				headers: { "content-type": "application/json" },
+				status: 200,
+			});
+		}) as unknown as typeof fetch;
+		try {
+			invalidateRemoteModels();
+			cachedRemoteModels(db, "p2", "https://p2.invalid/v1");
+			await new Promise((resolve) => setTimeout(resolve, 0));
+
+			expect(sent).toBeDefined();
+			const headers = sent?.headers as Record<string, string>;
+			expect(headers.authorization).toBe("Bearer k2");
+			expect(headers["user-agent"]).toContain("opencode-balancer");
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+
 	test("a refreshed provider follows the chain it now has", async () => {
 		const db = freshDb();
 		const host = hostingCtx(twoConnectors);
@@ -525,5 +664,247 @@ describe("provider re-declaration", () => {
 			context: 1_000_000,
 			output: 384_000,
 		});
+	});
+});
+
+/**
+ * A host that describes its providers separately from their models, which is
+ * what makes a provider with no `opencode.json` models visible at all.
+ */
+function hostWith(
+	providers: Array<{ baseURL: string; id: string; package?: string }>,
+	data: unknown[],
+) {
+	return {
+		model: { list: async () => ({ data }) },
+		provider: {
+			list: async () => ({
+				data: providers.map((provider) => ({
+					id: provider.id,
+					package: provider.package ?? PACKAGE,
+					settings: { baseURL: provider.baseURL },
+				})),
+			}),
+		},
+	} as never;
+}
+
+/** One answer per provider base URL, the way their `/models` would answer. */
+function catalogues(map: Record<string, unknown[]>) {
+	return (async (url: string) => {
+		const base = Object.keys(map).find((entry) =>
+			String(url).startsWith(entry),
+		);
+		if (!base) return new Response("{}", { status: 404 });
+		return new Response(JSON.stringify({ data: map[base] }), {
+			headers: { "content-type": "application/json" },
+			status: 200,
+		});
+	}) as unknown as typeof fetch;
+}
+
+async function warm(
+	db: Database,
+	map: Record<string, unknown[]>,
+	providers: string[],
+) {
+	const original = globalThis.fetch;
+	globalThis.fetch = catalogues(map);
+	try {
+		invalidateRemoteModels();
+		await refreshRemoteModels(
+			db,
+			providers.map((providerID) => ({
+				baseURL: `https://${providerID}.invalid/v1`,
+				providerID,
+			})),
+		);
+	} finally {
+		globalThis.fetch = original;
+	}
+}
+
+describe("a provider described only by its catalogue", () => {
+	test("rows exist with no declared models at all", async () => {
+		const db = freshDb();
+		await warm(
+			db,
+			{
+				"https://p1.invalid/v1": [{ context_length: 500_000, id: "alpha-1" }],
+			},
+			["p1"],
+		);
+		invalidateCatalog();
+		const catalog = await loadCatalog(
+			hostWith([{ baseURL: "https://p1.invalid/v1", id: "p1" }], []),
+			db,
+		);
+		const family = catalog.families.find((entry) => entry.key === "alpha-1");
+		expect(family?.targets.map((target) => target.providerID)).toEqual(["p1"]);
+		expect(family?.targets[0].context).toBe(500_000);
+		expect(family?.targets[0].contextSource).toBe("published");
+	});
+
+	test("a model that answers only on /messages picks the Anthropic package", async () => {
+		const db = freshDb();
+		await warm(
+			db,
+			{
+				"https://p1.invalid/v1": [
+					{
+						id: "claude-speaker",
+						supported_endpoints: ["/messages"],
+					},
+					{
+						id: "open-speaker",
+						supported_endpoints: ["/chat/completions", "/responses"],
+					},
+				],
+			},
+			["p1"],
+		);
+		invalidateCatalog();
+		const catalog = await loadCatalog(
+			hostWith([{ baseURL: "https://p1.invalid/v1", id: "p1" }], []),
+			db,
+		);
+		const claude = catalog.families.find(
+			(entry) => entry.targets[0]?.modelID === "claude-speaker",
+		);
+		const open = catalog.families.find(
+			(entry) => entry.targets[0]?.modelID === "open-speaker",
+		);
+		expect(claude?.package).toBe("@opencode/ai/providers/anthropic-compatible");
+		expect(open?.package).toBe(PACKAGE);
+	});
+});
+
+describe("where a target's window came from", () => {
+	test("a declared limit says so", async () => {
+		const db = freshDb();
+		const host = [
+			model("p1", "deepseek-v4.1-flash", "DeepSeek V4.1 Flash", {
+				context: 200_000,
+			}),
+		];
+		invalidateCatalog();
+		const catalog = await loadCatalog(ctxWith(host), db);
+		const route = catalog.families[0]?.targets.find(
+			(target) => target.providerID === "p1",
+		);
+		expect(route?.contextSource).toBe("declared");
+	});
+
+	test("a provider that publishes no window leaves it unknown", async () => {
+		const db = freshDb();
+		await warm(
+			db,
+			{ "https://p1.invalid/v1": [{ id: "deepseek-v4.1-flash" }] },
+			["p1"],
+		);
+		invalidateCatalog();
+		const catalog = await loadCatalog(
+			hostWith([{ baseURL: "https://p1.invalid/v1", id: "p1" }], []),
+			db,
+		);
+		const route = catalog.families[0]?.targets[0];
+		expect(route?.context).toBeUndefined();
+		expect(route?.contextSource).toBe("unknown");
+	});
+});
+
+describe("borrowing a window from an identical model", () => {
+	const providers = [
+		{ baseURL: "https://p1.invalid/v1", id: "p1" },
+		{ baseURL: "https://p2.invalid/v1", id: "p2" },
+	];
+
+	async function twoSides(db: Database, second = 1_000_000) {
+		await warm(
+			db,
+			{
+				"https://p1.invalid/v1": [{ id: "deepseek-v4.1-flash" }],
+				"https://p2.invalid/v1": [
+					{ context_length: second, id: "deepseek-v4.1-flash" },
+				],
+			},
+			["p1", "p2"],
+		);
+		invalidateCatalog();
+		return loadCatalog(hostWith(providers, []), db);
+	}
+
+	test("the switch is what turns it on", async () => {
+		const db = freshDb();
+		const before = await twoSides(db);
+		expect(
+			before.families[0]?.targets.find((t) => t.providerID === "p1")
+				?.contextSource,
+		).toBe("unknown");
+
+		setAssumeWindows(db, "p1", true);
+		invalidateCatalog();
+		const after = await loadCatalog(hostWith(providers, []), db);
+		const borrowed = after.families[0]?.targets.find(
+			(target) => target.providerID === "p1",
+		);
+		expect(borrowed?.context).toBe(1_000_000);
+		expect(borrowed?.contextSource).toBe("assumed");
+		expect(borrowed?.assumedFrom).toBe("p2");
+	});
+
+	test("the smallest published answer wins", async () => {
+		const db = freshDb();
+		saveAccount(db, "p3", "a", { key: "k3", type: "api" });
+		await warm(
+			db,
+			{
+				"https://p1.invalid/v1": [{ id: "deepseek-v4.1-flash" }],
+				"https://p2.invalid/v1": [
+					{ context_length: 1_048_000, id: "deepseek-v4.1-flash" },
+				],
+				"https://p3.invalid/v1": [
+					{ context_length: 1_000_000, id: "deepseek-v4.1-flash" },
+				],
+			},
+			["p1", "p2", "p3"],
+		);
+		setAssumeWindows(db, "p1", true);
+		invalidateCatalog();
+		const catalog = await loadCatalog(
+			hostWith(
+				[...providers, { baseURL: "https://p3.invalid/v1", id: "p3" }],
+				[],
+			),
+			db,
+		);
+		const borrowed = catalog.families[0]?.targets.find(
+			(target) => target.providerID === "p1",
+		);
+		expect(borrowed?.context).toBe(1_000_000);
+		expect(borrowed?.assumedFrom).toBe("p3");
+	});
+
+	test("a tee or free spelling is not the same model", async () => {
+		const db = freshDb();
+		await warm(
+			db,
+			{
+				"https://p1.invalid/v1": [{ id: "deepseek-v4.1-flash-tee" }],
+				"https://p2.invalid/v1": [
+					{ context_length: 1_000_000, id: "deepseek-v4.1-flash" },
+				],
+			},
+			["p1", "p2"],
+		);
+		setAssumeWindows(db, "p1", true);
+		invalidateCatalog();
+		const catalog = await loadCatalog(hostWith(providers, []), db);
+		const tee = catalog.families.find((family) =>
+			family.targets.some((target) => target.modelID.endsWith("-tee")),
+		);
+		expect(
+			tee?.targets.find((target) => target.providerID === "p1")?.contextSource,
+		).toBe("unknown");
 	});
 });

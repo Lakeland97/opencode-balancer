@@ -35,6 +35,8 @@ import {
 	isRetryableFailure,
 	isTimeoutFailure,
 	markRateLimited,
+	parksAccount,
+	refusalWords,
 	retryAfterMs,
 } from "./request-state";
 import {
@@ -53,6 +55,7 @@ import {
 import {
 	type ChosenRoute,
 	chooseFailoverRoute,
+	chooseRouteAtAnyCost,
 	chooseRouteForRequest,
 	describeUnroutable,
 	hasAlternativeRoute,
@@ -112,6 +115,15 @@ const AUXILIARY_KINDS = new Set(["title", "generate", "compaction"]);
  * instead of spinning.
  */
 const overflowCompacted = new Set<string>();
+/**
+ * One unroutable sentence per session and row per minute.
+ *
+ * The host retries a failed call, and every retry used to write the same
+ * several-line explanation into the conversation. The failure is worth saying
+ * once; the retries are not news.
+ */
+const unroutableAnnounced = new Map<string, number>();
+const UNROUTABLE_MS = 60_000;
 
 function sessionKey(sessionID: string, providerID: string) {
 	return `${sessionID}:${providerID}`;
@@ -214,6 +226,44 @@ function bindRoute(
  * Shared by the first attempt and by every retry inside this plugin, so a
  * retried call cannot differ from the first in anything but the target.
  */
+/**
+ * Move a request onto a target's endpoint, keeping the path it asked for.
+ *
+ * A request can name the stub (handled by `routedURL`), the target it was last
+ * sent to (`replaceBase`), or — when a retry is rebuilt from one the model hook
+ * already pointed somewhere — neither. That last case used to leave the URL
+ * untouched while the credential changed, which put one provider's key on
+ * another provider's host: Open-Design answered `api key not found` and the
+ * refusal was charged to SayGM, which is what every "SayGM 401" in the panel
+ * was. Whatever the request names, the path is worth keeping and the host must
+ * be the target's.
+ */
+export function ontoTarget(input: {
+	url: string;
+	baseURL: string;
+	replaceBase?: string;
+}): string {
+	const target = input.baseURL.replace(/\/+$/, "");
+	const base = (input.replaceBase ?? "").replace(/\/+$/, "");
+	if (base && input.url.startsWith(base)) {
+		return `${target}${input.url.slice(base.length)}`;
+	}
+	const current = new URL(input.url);
+	// The request carries its own version path (`/v1/chat/completions`) and the
+	// connector's base usually carries one too. Leaving both in place produced
+	// `https://opencode.ai/inference/openai/v1/v1/chat/completions` — a 404 from
+	// the provider's own router, which is a worse failure than the leak this
+	// guard exists to stop.
+	const basePath = new URL(target).pathname.replace(/\/+$/, "");
+	let path = current.pathname;
+	if (basePath && path.startsWith(`${basePath}/`)) {
+		path = path.slice(basePath.length);
+	} else if (basePath.endsWith("/v1") && path.startsWith("/v1/")) {
+		path = path.slice("/v1".length);
+	}
+	return `${target}${path}${current.search}`;
+}
+
 async function prepareRoutedRequest(input: {
 	db: Database;
 	family: ModelFamily;
@@ -428,15 +478,15 @@ async function failoverResponse(input: {
 			try {
 				response = await fetch(request);
 			} catch {
-				// A transport failure is this target's, not the session's: record it
-				// as a spent credential and walk on.
+				// The request never reached this endpoint, so nothing was learned
+				// about the credential. The walk moves on; the account is not
+				// parked. Parking it made one dropped connection look like a spent
+				// account, and with a single enabled target the next request then
+				// had nowhere to go but `balancer.invalid`.
 				pending.tried.add(accountKey(route.providerID, route.account.alias));
-				markRateLimited(
-					db,
-					route.providerID,
-					route.account.alias,
-					60_000,
-					reported,
+				recordLog(
+					"failover",
+					`${route.providerID}/${route.account.alias} could not be reached; not parked`,
 				);
 				byRequest.set(request, tracked);
 				continue;
@@ -456,19 +506,61 @@ async function failoverResponse(input: {
 			}
 
 			pending.tried.add(accountKey(route.providerID, route.account.alias));
+			// Read the refusal before deciding how long to sit out: these
+			// endpoints name their reset in the body, and a park that only
+			// reads the header sits out a minute of a six-day exhaustion and
+			// comes back to fail the same turn again.
+			const body = await refusalBody(response);
+			const words = refusalWords(body);
+			const said = words ? `${refusal} — ${words}` : refusal;
+			// A gateway that broke is not a credential that is spent. Parking on
+			// 502/503/504/529 made one blip cost a minute of the whole row when
+			// this was the last enabled credential, and the next request then had
+			// nowhere to go but `balancer.invalid`.
+			if (!parksAccount(response.status)) {
+				appendEvent(db, {
+					alias: route.account.alias,
+					message: `${route.providerID}/${route.account.alias} answered ${said}; the endpoint, not the credential — not parked`,
+					metadata: { status: String(response.status) },
+					providerID: route.providerID,
+					type: "provider_refused",
+				});
+				recordLog(
+					"failover",
+					`${route.providerID}/${route.account.alias} answered ${said}; not parked`,
+				);
+				continue;
+			}
+			// Which host actually answered, kept durably. The panel's reason says
+			// what came back, and this says who said it: a 401 charged to a
+			// provider whose own key answers 200 is only explainable if the host
+			// that refused it is on record. The ring log is lost on every reload.
+			let host = "";
+			try {
+				host = new URL(request.url).host;
+			} catch {
+				host = "";
+			}
+			appendEvent(db, {
+				alias: route.account.alias,
+				message: `${route.providerID}/${route.account.alias} refused by ${
+					host || "an unnamed host"
+				}: ${said}`,
+				metadata: { host, status: String(response.status) },
+				providerID: route.providerID,
+				type: "provider_refused",
+			});
 			markRateLimited(
 				db,
 				route.providerID,
 				route.account.alias,
-				retryAfterMs(response),
-				refusal,
+				retryAfterMs(response, body),
+				said,
 			);
 			recordLog(
 				"failover",
-				`${route.providerID}/${route.account.alias} answered ${refusal}; retried inside the call`,
+				`${route.providerID}/${route.account.alias} answered ${said}; retried inside the call`,
 			);
-			// The body is not read, so nothing is left holding the connection.
-			await response.body?.cancel().catch(() => {});
 		}
 	} finally {
 		// The attempt is over: whatever follows is a new model request, and it
@@ -782,6 +874,23 @@ function announceRoute(input: {
  * and what it calls itself last. A park the panel cannot explain reads exactly
  * like a bug, so one of these always lands.
  */
+/**
+ * The refusal's own words, read once.
+ *
+ * A status line alone is what made a park unreadable: "HTTP 402 Payment
+ * Required" is the same text for a spent wallet and a one-minute cooldown, and
+ * the sentence beside it names both the reason and — for billing refusals in
+ * this deployment — the instant the account refills. Bounded, because a
+ * misbehaving endpoint should not be able to hand this plugin a megabyte.
+ */
+async function refusalBody(response: Response): Promise<string> {
+	try {
+		return (await response.text()).slice(0, 2_000);
+	} catch {
+		return "";
+	}
+}
+
 function describeFailure(error: unknown, status?: number) {
 	const value = error as
 		| { message?: unknown; name?: unknown; type?: unknown; _tag?: unknown }
@@ -892,6 +1001,15 @@ async function announceUnroutable(
 				: `limited (${iso})`;
 		}),
 	);
+	const key = `${sessionID}\u0000${family.key}`;
+	const at = unroutableAnnounced.get(key);
+	if (at !== undefined && now() - at < UNROUTABLE_MS) return;
+	unroutableAnnounced.set(key, now());
+	if (unroutableAnnounced.size > 200) {
+		for (const [entry, when] of unroutableAnnounced) {
+			if (now() - when >= UNROUTABLE_MS) unroutableAnnounced.delete(entry);
+		}
+	}
 	const text = [
 		`Balancer: nothing can serve ${family.key} right now.`,
 		...reasons.map((reason) => `- ${reason}`),
@@ -910,6 +1028,45 @@ async function announceUnroutable(
 		recordLog(
 			"error",
 			`could not tell the session why ${family.key} is unroutable: ${
+				error instanceof Error ? error.message : String(error)
+			}`,
+		);
+	}
+}
+
+/**
+ * Tell the session that the model it is pinned to is not one of the rows any
+ * more, once per outage.
+ *
+ * A row can leave every catalogue between the picker writing it and the next
+ * request. Left on the stub, that call is a DNS failure the host retries; the
+ * retry hook ends it here instead of asking the same dead host again.
+ */
+async function announceUnknownRow(
+	ctx: Context,
+	sessionID: string,
+	modelID: string,
+) {
+	const key = `${sessionID}\u0000no-row:${modelID}`;
+	const at = unroutableAnnounced.get(key);
+	if (at !== undefined && now() - at < UNROUTABLE_MS) return;
+	unroutableAnnounced.set(key, now());
+	const text = [
+		`Balancer: no provider offers ${modelID} right now.`,
+		"It is not in any published catalogue, so there is no target to send it to.",
+		"Pick a model from the Balancer list, or add one in the panel.",
+	].join("\n");
+	recordLog("error", text.replace(/\n/g, " "));
+	try {
+		await ctx.session.synthetic({
+			description: `no row for ${modelID}`,
+			sessionID,
+			text,
+		});
+	} catch (error) {
+		recordLog(
+			"error",
+			`could not tell the session why ${modelID} has no row: ${
 				error instanceof Error ? error.message : String(error)
 			}`,
 		);
@@ -937,7 +1094,19 @@ function chooseStickyRoute(input: {
 	// A trail older than the idle window is void, so the balance starts again.
 	forgetStaleTrail(db, family.key);
 	const tried = triedFor(family.key);
-	const remembered = pinnedByRow.get(family.key);
+	// The row's own note is the same fact the map holds, written down. A reload
+	// empties the map, and a row that then restarted at the head of the order
+	// moved off a provider that was still serving it — the panel said one thing
+	// and routing did another. Reading the note keeps the row sticky across
+	// reloads, and it only moves when the pinned provider cannot serve the row.
+	const noted = servedFor(db, family.key);
+	const remembered:
+		| { providerID: string; alias: string; at: number }
+		| undefined =
+		pinnedByRow.get(family.key) ??
+		(noted?.alias
+			? { alias: noted.alias, at: noted.at, providerID: noted.providerID }
+			: undefined);
 	const pinned =
 		remembered && fresh(remembered)
 			? {
@@ -1064,11 +1233,29 @@ export async function registerHooks({
 					sessionID: event.sessionID,
 				});
 		if (!chosen) {
-			// Nothing in the row can answer, and leaving the call pointed at the
-			// stub is what turned this into an unexplainable transport failure. Say
-			// what is wrong in the conversation itself, in one message, and let the
-			// request fail as an ordinary provider error rather than a system one.
-			if (!side) await announceUnroutable(ctx, db, event.sessionID, family);
+			// Nothing in the row is healthy. Leaving the call pointed at the stub
+			// is not a quiet failure: `balancer.invalid` does not resolve, so the
+			// host reports a network error and re-sends four times, which is
+			// worse than any provider's refusal. Take the row's best remaining
+			// credential — a park and a model mark are this plugin's guesses — so
+			// the provider answers in its own words and the session gets one
+			// real error instead of five it cannot act on.
+			const lastChance = side ? undefined : chooseRouteAtAnyCost(db, family);
+			if (!lastChance) {
+				// Every credential is switched off by hand: there is nowhere to
+				// send this. Say what is wrong in the conversation itself.
+				if (!side) await announceUnroutable(ctx, db, event.sessionID, family);
+				return;
+			}
+			recordLog(
+				"route",
+				`${family.key}: nothing healthy; sending to ${lastChance.providerID}/${lastChance.account.alias} anyway`,
+			);
+			bindRoute(event.sessionID, family.key, kind, lastChance);
+			event.baseURL = lastChance.baseURL;
+			const fallbackHeaders = new Headers(event.headers);
+			applyAuthToHeaders(fallbackHeaders, lastChance.account.auth);
+			event.headers = Object.fromEntries(fallbackHeaders);
 			return;
 		}
 		const route = chosen.route;
@@ -1464,6 +1651,18 @@ export async function registerHooks({
 					providerID: event.model.providerID,
 					reported,
 				});
+				// There is nothing to fail over to: the call never reached a
+				// target, so every retry asks the same dead stub again. End the
+				// turn with the reason instead of letting the host loop.
+				const family = await familyFor(ctx, db, event.model.id);
+				if (!family) {
+					await announceUnknownRow(ctx, event.sessionID, event.model.id);
+				} else if (!hasAlternativeRoute(db, family, "")) {
+					await announceUnroutable(ctx, db, event.sessionID, family);
+				} else {
+					return;
+				}
+				event.decision = { ...(event.decision ?? {}), retry: false };
 			}
 			return;
 		}
