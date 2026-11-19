@@ -1,12 +1,13 @@
 # @thelioo/opencode-balancer
 
-## 0.4.0
+## 0.3.0
 
 ### Minor Changes
 
-One consolidated release. Everything since 0.2.18 — the credential-level
-router, the catalogue-driven model list, the window and compaction rules, and
-the panel rebuild — ships as a single version.
+One consolidated release. It replaces the 0.3.0–0.6.0 line and carries
+everything since 0.2.18: the credential-level router, the catalogue-driven
+model list, the window and compaction rules, and the panel rebuild. The
+original notes from 0.3.0 through 0.6.0 follow below, newest first.
 
 - **Routing is per credential and fails over inside the call.** A provider key is
   the unit: `use`, `enable`, `free`, parks and cooldowns belong to it. A refusal
@@ -59,6 +60,248 @@ the panel rebuild — ships as a single version.
 - Fixed the in-use marker to follow the row's own target, restored the row's bound
   target after a failover walk that produced no answer, and kept unchanged rows
   identical across the panel's poll so the picker no longer closes itself.
+
+### The 0.3.0–0.6.0 changelogs this release replaces
+
+#### 0.6.0
+
+**Minor Changes**
+
+- 17d5737: The panel says whether a routed model is answering right now. A row that is
+  generating reads `build · open-design/deepseek-v4.1-flash (high) · working`
+  instead of a countdown that keeps climbing while it waits, and the countdown
+  itself is now measured from the answer rather than from the request, so a slow
+  model no longer reads as an idle one.
+
+  Also in this release:
+
+  - When nothing can route a row, the target that last answered it is tried
+    instead of an arbitrary one, so a session keeps working on the model it was
+    already running rather than stopping because the balancer's own bookkeeping
+    went bad.
+
+#### 0.5.0
+
+**Minor Changes**
+
+- 97d64e6: The panel no longer has a status area of its own. What is serving is reported
+  on the credential that is serving it, in the note under its name: the model,
+  the thinking level actually applied, and when it last answered. A credential
+  that is limited keeps showing its reset time and the provider's own words.
+
+  Also in this release:
+
+  - Every target in a chain row shows the connector's own name for the model
+    (`DeepSeek V4.1 Flash 1017`, `… Fast`, `… Free`) with the id beside it. Ids
+    repeat across a row — six providers spell the same weights
+    `deepseek-v4.1-flash` — so the name is what tells them apart.
+  - The context readout measures the serving target's own window instead of the
+    tightest window in the row, so a 1M model is no longer cut at a 200k
+    sibling's figure.
+  - A failover walk that produced no answer restores the row's bound target and
+    its last-served note, so the next failure is charged to the provider that
+    actually answered rather than the one that happened to be tried last.
+
+#### 0.4.0
+
+**Minor Changes**
+
+- 7578d42: Failover now happens inside the call, so a spent credential no longer reaches
+  the conversation. A routed request that a provider refuses with a retryable
+  status is parked and re-sent to the next target of the same row before the
+  session sees it; from the client's side the turn is simply slower. When every
+  target is genuinely spent, the session gets the provider's own refusal plus one
+  status message naming what is exhausted, when each credential returns, and where
+  to add a target.
+
+  Also in this release:
+
+  - One picker row per model, matched on id and title. Version punctuation folds
+    (`claude-fable-5-2` and `claude-fable-5.2` are one row), a shared title merges
+    rows that differ only in spelling, and a price marker (`paid`/`free`) is never
+    merged away. Rows that still share a title are told apart by what their key
+    adds, so `Hy3` and `Hy3 (paid)` are distinguishable choices.
+  - The panel's in-use readout names the agent, the connector's real model id and
+    the thinking level actually applied, instead of the row label and the level
+    requested. The TUI renders the same lines.
+  - `+ add target` offers only the models whose wire format the row can carry, so
+    it can no longer propose a choice the add would refuse. The picker's model list
+    loads against the row's own package.
+  - Rows are compared field by field across the panel's poll, and unchanged rows
+    keep their object identity. A refresh no longer rebuilds the rows, which is
+    what closed the model picker before a selection could be made.
+
+#### 0.3.9
+
+**Patch Changes**
+
+- e28ea70: When every target in a row has a smaller window than the conversation already fills, the balancer still routes the request (to one of the row's targets) instead of leaving it pointed at the stub. The provider's own refusal then names the size problem, and compaction can shrink the conversation, rather than the call failing as an unreachable host.
+
+#### 0.3.8
+
+**Patch Changes**
+
+- 6202dcf: A row's `in use` marker now comes from the target that row itself last served, rather than from the globally most recently used credential. A limited provider can no longer be shown as in use while another target is answering.
+
+#### 0.3.7
+
+**Patch Changes**
+
+- ada500f: A provider configured with its own key now becomes an account without a restart, and three routing mistakes are fixed.
+
+  - Providers whose key lives in `opencode.json` rather than in OpenCode's credential store are imported during the account sync, so a freshly added provider can serve on the next request instead of never.
+  - The plugin also watches `provider.updated` and `config.updated`. Provider edits are debounced, and the echo from the balancer's own model reload is ignored, so adding or removing a provider no longer needs an application restart.
+  - A re-import no longer counts as a new credential. That miscount rebuilt the provider on every sync, which interrupted in-flight requests and made the balancer look like it was failing over and parking providers for no reason.
+  - Failover skips any target whose own window is smaller than the conversation already fills. Previously a large conversation could be handed to a smaller variant of the same model and be rejected outright.
+  - A row's `in use` marker now comes from the target that row itself served, not from whichever credential served any model most recently. A limited provider can no longer be shown as in use while another target is answering.
+
+#### 0.3.6
+
+**Patch Changes**
+
+- 0a5e3ae: Find model variants from the words people actually type, and fail over on a timeout even when the host words it as an abort.
+
+  `deepseek 4.1` now matches `deepseek-v4.1-flash`, `-eco` and `-cloud` instead of returning no match. When several variants tie, the command and panel list their exact ids rather than choosing the first; naming the variant still resolves exactly. A spaced query and the `v` in a version no longer spell a different model.
+
+  A stream cut for taking too long is classified as the account's availability before the user-abort pattern, so a slow model fails over instead of surfacing "The operation was aborted". Bound routes now live for an hour and are refreshed by each HTTP attempt, so an attempt longer than five minutes no longer re-routes its own retry through another account.
+
+#### 0.3.5
+
+**Patch Changes**
+
+- 33d4345: Open the TUI panel from the command palette and `ctrl+shift+b`, and keep each model request on one account.
+
+  The TUI keymap layer now opts into global mode, so its palette entry and shortcut stay reachable while a dialog or the prompt owns input.
+
+  Routing binds the account chosen for a model request to that request's HTTP retries. Re-selecting for every retry let one attempt fail on several providers and charged the wrong account with the last error. Title and one-off generation calls now follow the conversation's account without replacing its failure target.
+
+#### 0.3.4
+
+**Patch Changes**
+
+- 787cfa0: Three panel follow-ups: an error you can read, a draft you can cancel, and an
+  all button that reaches everything.
+
+  A parked credential's note is now a disclosure. `▸` opens the provider's message
+  in full, wrapped across as many lines as it needs, with `last tried <time>`
+  underneath — the moment the router last pointed at the credential, which is the
+  attempt that parked it. `▾` folds it back to the single truncated line, and one
+  note is open at a time. The time was already in the panel's data, so nothing
+  about routing or storage changed.
+
+  `+ new chain` becomes `cancel` while the form is open, so a draft can be
+  dismissed rather than re-pressed. Starting a draft now opens the models section
+  it lives in, since a click that revealed nothing read as a no-op, and folding
+  that section — or completing a chain — drops the draft so no stale provider
+  carries into the next form.
+
+  `expand all` / `collapse all` now counts the models section as one more header,
+  so one click reaches every fold on the panel and the label describes what will
+  actually happen.
+
+  The panel is a built bundle, so a running window needs a reload to show these.
+
+#### 0.3.3
+
+**Patch Changes**
+
+- a9583c0: Make the panel's controls read as controls, and give a credential row two lines.
+
+  Every button is now enclosed — a `currentColor` border, a radius and padding — so
+  it reads as something to press rather than as a word that happens to react to a
+  click. Each dropdown sits in a frame of its own with a `▾` beside it, because the
+  host's native arrow is faint in this panel and the arrow is what says "a list
+  opens".
+
+  Section titles are fold controls too: clicking `models`, a brand header such as
+  `claude`, or a model's own label opens or closes it. The little chevron buttons
+  stay where they were, so a keyboard still has a real control to focus.
+
+  A credential row now has two lines. The first is who it is: the checkbox, the
+  name, and its markers. The second is what you can do to it: the refill the
+  endpoint named and the error it threw on the left, then a hairline, `free` and
+  `use`, and the reorder grip at the far right. Narrow windows used to produce
+  that shape only when the flow happened to wrap, and a parked credential's reason
+  was reachable only by hovering `limited`. It is now readable in place, cut to the
+  line with the full text on hover.
+
+  The panel is a built bundle, so a running window needs a reload to show it.
+
+#### 0.3.2
+
+**Patch Changes**
+
+- a6130e6: Reorder by dragging, instead of with `↑`/`↓` buttons.
+
+  The credential rows and a row's targets each carried a pair of step buttons. Each
+  row now has one grip in a right-hand gutter — the same place on every row, and out
+  of the flow so a wrapping label cannot push it around: drag it onto the row whose
+  place it should take, and it moves all the way there in one gesture.
+
+  Nothing about the order changed. Credentials are still one flat list in the order
+  requests take them, a row's targets are still an ordered list of their own, and a
+  drop names the slot it landed on rather than a direction. With the grip focused,
+  the arrow keys still move the row one place, so reordering does not require a
+  mouse.
+
+  The panel is a rebuilt bundle, so the running window needs a reload to show it.
+
+#### 0.3.1
+
+**Patch Changes**
+
+- 0b6d1a6: Hold the compaction reserve to a floor: the size of the summary prompt itself.
+
+  Compacting sends the conversation **plus** a summarization instruction, and the
+  buffer is the room reserved for that request. A very small buffer — `1%` on a
+  small model — could reserve less than the instruction the request carries,
+  leaving the summary request itself over the window it was meant to stay under: the
+  same overflow, reached from the other side. A reserve below that size is now
+  raised to it, so the cut lands slightly earlier exactly where it has to.
+
+  The size is measured rather than assumed. The balancer sees the compaction request
+  go past, reads the instruction the host appended, rounds it to the nearest
+  thousand, and remembers it, so the floor follows the host if its prompt ever
+  changes; the host's short retry reminder is ignored so it cannot overwrite a real
+  measurement. Until the first compaction has been watched the figure stands at what
+  the host's own prompt measured when this was written.
+
+  Nothing in the panel changes: the context limit and the buffer are shown as typed,
+  and the floor only moves the trigger.
+
+#### 0.3.0
+
+**Minor Changes**
+
+- 957555a: Route per credential, and let the panel show and steer the whole thing.
+
+  A **credential** — one provider key, not the provider — is now the unit of
+  routing. Each gets its own row in the panel with `use`, `enable`, `free` and
+  `↑↓`, so a provider's second key is a second chance rather than a duplicate.
+  OpenCode's own credentials are imported on first run instead of added by hand,
+  and `use` on a parked credential clears its cooldown.
+
+  **Failover is reactive.** A provider failure is caught before the session sees
+  it, the credential that raised it is parked, and the request goes to the next
+  one. Routing is sticky **per model row** within a session — a session may run
+  more than one model, and each keeps its own pinned target, its own trail of
+  tried credentials, and its own give-up count. An idle window (`rebalance after`,
+  a toggle and a length in the panel) restarts the order from the head once a
+  session has sat still, measured from the last routed request. When nothing
+  healthy can answer a row at all, the row's head is tried anyway rather than
+  leaving the call pointed at a stub.
+
+  **Context is the balancer's decision.** Every balancer model reports a 1M window
+  so the host does not compact at a moment the balancer cannot choose; the cut is
+  then the tightest of the models a session actually ran, auxiliary calls (a
+  title, a summary, a one-off generation) excluded. The limit takes a size or a
+  share, the buffer comes off it, and `enforce` decides whether the reserve is
+  taken always or only where the limit has reached what the model can hold.
+
+  **The panel says what happened**: `in use` for the live target, `limited` for a
+  credential that failed and has not been retried yet, and the refill a provider
+  named (`resets 14:21`, `resets Nov 26 14:21`). Wording is English-only, and a
+  model's own field is labelled with the cut it produces (`at 304k`).
 
 ## 0.2.18
 
