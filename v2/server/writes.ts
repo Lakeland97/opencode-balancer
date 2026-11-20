@@ -38,7 +38,7 @@ export function writeSetEnabled(
 ): WriteResult {
 	const { providerID, alias, enabled } = input;
 	setAccountEnabled(db, providerID, alias, enabled);
-	forgetRoutingMemory();
+	forgetRoutingMemory(db);
 	recordLog(
 		"config",
 		`${providerID}/${alias} ${enabled ? "enabled" : "disabled"}`,
@@ -58,7 +58,7 @@ export function writeSetFreeOnly(
 	// Which models a credential may serve just changed, so a catalogue built
 	// under the old rule is stale.
 	invalidateCatalog();
-	forgetRoutingMemory();
+	forgetRoutingMemory(db);
 	recordLog(
 		"config",
 		`${providerID}/${alias} ${enabled ? "free models only" : "paid models too"}`,
@@ -86,7 +86,7 @@ export function writeUse(db: Database, input: Pair): WriteResult {
 	// and the pin are dropped so the next request derives its route from the
 	// order the pick just changed. The window restarts by construction — the new
 	// trail begins at the current time.
-	forgetRoutingMemory();
+	forgetRoutingMemory(db);
 	recordLog("config", `serving with ${providerID}/${account.alias}`);
 	return {
 		message: `Serving with ${providerID}/${account.alias}.`,
@@ -130,7 +130,7 @@ export function writeMove(
 		}
 		moveAccount(db, providerID, alias, step);
 	}
-	forgetRoutingMemory();
+	forgetRoutingMemory(db);
 	return {
 		message:
 			typeof to === "number"
@@ -154,7 +154,7 @@ export async function writeChainAdd(
 	const family = await rowByKey(ctx, db, key);
 	if (!family) return { message: `No row named ${key}.`, ok: false };
 	const result = await addTarget(ctx, db, family, providerID, modelID);
-	if (result.ok) forgetRoutingMemory();
+	if (result.ok) forgetRoutingMemory(db);
 	return result;
 }
 
@@ -164,7 +164,7 @@ export async function writeChainCreate(
 	input: TargetRef & { modelID: string },
 ): Promise<WriteResult & { key: string }> {
 	const result = await createChain(ctx, db, input.providerID, input.modelID);
-	if (result.ok) forgetRoutingMemory();
+	if (result.ok) forgetRoutingMemory(db);
 	// The caller needs the row's key to address it next; a refusal has none.
 	return { ...result, key: result.key ?? "" };
 }
@@ -182,7 +182,7 @@ export async function writeChainMove(
 		typeof to === "number"
 			? shiftTargetTo(db, family, providerID, to)
 			: shiftTarget(db, family, providerID, direction ?? "down");
-	if (result.ok) forgetRoutingMemory();
+	if (result.ok) forgetRoutingMemory(db);
 	return result;
 }
 
@@ -195,7 +195,7 @@ export async function writeChainRemove(
 	const family = await rowByKey(ctx, db, key);
 	if (!family) return { message: `No row named ${key}.`, ok: false };
 	const result = removeTarget(db, family, providerID);
-	if (result.ok) forgetRoutingMemory();
+	if (result.ok) forgetRoutingMemory(db);
 	return result;
 }
 
@@ -207,7 +207,7 @@ export async function writeChainReset(
 	const family = await rowByKey(ctx, db, key);
 	if (!family) return { message: `No row named ${key}.`, ok: false };
 	const existed = resetRow(db, family);
-	if (existed) forgetRoutingMemory();
+	if (existed) forgetRoutingMemory(db);
 	return {
 		message: existed
 			? `${key} is back to automatic order.`

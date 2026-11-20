@@ -16,6 +16,7 @@ import { copy } from "../copy";
 import { mergeChainGroups, mergeChainRows } from "../core/chain-view";
 import { bufferTokens, cutFor, formatTokens } from "../core/context";
 import { credentialDetail, formatAttempt, routeMarkers } from "../core/format";
+import { formatRemaining } from "../core/rebalance";
 import { Balancer } from "../rpc";
 import type {
 	Account,
@@ -854,6 +855,13 @@ export function BalancerPanel(props: {
 			<box id={itemID("rebalance-length")}>
 				<text>{`${mark("rebalance-length")} ${copy.rebalance}: ${
 					rebalance().value || copy.builtIn
+				}${
+					// `lastRefreshed` ticks on every poll, so the countdown moves even
+					// though `nextAt` is the same absolute moment each time — the same
+					// reason the desktop panel needs a clock signal.
+					rebalance().auto && rebalance().nextAt > lastRefreshed()
+						? `  (in ${formatRemaining(rebalance().nextAt - lastRefreshed())})`
+						: ""
 				}`}</text>
 			</box>
 			<box id={itemID("limit")}>

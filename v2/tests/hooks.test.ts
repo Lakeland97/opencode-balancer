@@ -19,6 +19,7 @@ import { invalidateCatalog } from "../server/connectors";
 import {
 	balancerTargetsFor,
 	forgetRoutingMemory,
+	nextRebalanceAt,
 	ontoTarget,
 	registerHooks,
 } from "../server/hooks";
@@ -235,6 +236,36 @@ describe("retry hook", () => {
 		await registry.retry(event);
 
 		expect(event.decision).toEqual({ delay: 0, retry: true });
+	});
+
+	test("a billing refusal the host wrapped as a bad request still fails over", async () => {
+		const { db, registry } = await setup();
+		saveAccount(db, PROVIDER, "primary", apiAuth("sk-primary"));
+		saveAccount(db, PROVIDER, "backup", apiAuth("sk-backup"));
+		setActiveAccount(db, PROVIDER, "primary");
+		setBalancingEnabled(db, true);
+
+		await registry["http.request"](requestEvent("retry-billing", newRequest()));
+
+		// The host has no specific mapping for this refusal, so it raises
+		// `AI.Error.InvalidRequest` with a 400 and the provider's own words. The
+		// wrapper used to be read as "the request's fault", which handed the spent
+		// account's refusal to the session while a working one sat beside it.
+		const event = {
+			...retryEvent("retry-billing", { delay: 1_000, retry: false }),
+			error: {
+				message:
+					"You have insufficient credits to make this request. Please purchase more credits to continue using the service.",
+				name: "InvalidRequest",
+				status: 400,
+			},
+		};
+		await registry.retry(event);
+
+		expect(event.decision).toEqual({ delay: 0, retry: true });
+		expect(readLimitedReason(db, PROVIDER, "primary")).toContain(
+			"insufficient credits",
+		);
 	});
 
 	test("a failure the host does not put into words still says why", async () => {
@@ -757,13 +788,14 @@ describe("a balance that has gone stale", () => {
 		sessionID,
 	});
 
-	test("past a quota window the order starts from the head again", async () => {
+	test("past the window the row checks the head of the order again", async () => {
 		const start = Date.now();
 		const { registry } = await twoProviders();
 		await failOverFromTheHead(registry, "stale-window");
 
-		// Five hours on, the provider's window has refilled and p1's park is long
-		// expired, so the trail describes a world that no longer exists.
+		// Five hours on, the check is due: p1's park is long expired, so the head
+		// of the order can serve again rather than the row staying on the target
+		// the failure left it on.
 		setSystemTime(start + FIVE_HOURS + 60_000);
 		try {
 			const event = request("stale-window");
@@ -774,18 +806,69 @@ describe("a balance that has gone stale", () => {
 		}
 	});
 
-	test("inside the window the trail still decides, so a park is not the reason", async () => {
+	test("inside the window the row keeps the target it settled on", async () => {
 		const start = Date.now();
 		const { registry } = await twoProviders();
 		await failOverFromTheHead(registry, "fresh-window");
 
-		// p1's park has expired here too, so only the trail can explain p2 being
-		// chosen: the session already tried p1 and has not had an answer since.
+		// p1's park has expired here too, so only the row's balance can explain p2
+		// being chosen: the window has not elapsed, so the head is not checked.
 		setSystemTime(start + FIVE_HOURS - 60_000);
 		try {
 			const event = request("fresh-window");
 			await registry["model.request"](event);
 			expect(event.headers.authorization).toBe("Bearer sk-2");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("an active conversation still reaches the check, because traffic does not move the clock", async () => {
+		const start = Date.now();
+		const { db, registry } = await twoProviders();
+		await failOverFromTheHead(registry, "busy-window");
+		// The clock was seeded by the first route and is not the answer clock. The
+		// seed is real time, a millisecond or two after `start` was read.
+		const seeded = nextRebalanceAt(db, start);
+		expect(seeded).toBeGreaterThanOrEqual(start + FIVE_HOURS);
+		expect(seeded).toBeLessThan(start + FIVE_HOURS + 5_000);
+
+		// Four hours of real traffic on the expensive target. The old idle timer
+		// restamped the trail on every request, so this request itself is what
+		// used to push the check out to nine hours.
+		setSystemTime(start + 4 * 60 * 60_000);
+		try {
+			const busy = request("busy-window");
+			await registry["model.request"](busy);
+			expect(busy.headers.authorization).toBe("Bearer sk-2");
+			// The same moment as before the request: traffic did not move it.
+			expect(nextRebalanceAt(db)).toBe(seeded);
+		} finally {
+			setSystemTime();
+		}
+
+		// One hour and a minute after the seed, with the conversation still live,
+		// the check fires and returns the row to the cheaper head.
+		setSystemTime(start + FIVE_HOURS + 60_000);
+		try {
+			const event = request("busy-window");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-1");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	test("a check restarts the clock, so the next one is a full window later", async () => {
+		const start = Date.now();
+		const { db, registry } = await twoProviders();
+		await failOverFromTheHead(registry, "next-check");
+		setSystemTime(start + FIVE_HOURS + 60_000);
+		try {
+			const event = request("next-check");
+			await registry["model.request"](event);
+			expect(event.headers.authorization).toBe("Bearer sk-1");
+			expect(nextRebalanceAt(db)).toBe(start + 2 * FIVE_HOURS + 60_000);
 		} finally {
 			setSystemTime();
 		}
@@ -823,8 +906,9 @@ describe("a balance that has gone stale", () => {
 		setRebalanceAuto(db, false);
 		await failOverFromTheHead(registry, "window-off");
 
-		// Ten hours idle: past any quota window, and past the built-in default
-		// twice over. Off means nothing but a change to the order clears a trail.
+		// Ten hours of traffic: past any quota window, and past the built-in
+		// default twice over. Off means nothing but a change to the order moves
+		// a row.
 		setSystemTime(start + 10 * 60 * 60_000);
 		try {
 			const event = request("window-off");

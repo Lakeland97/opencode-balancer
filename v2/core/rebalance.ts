@@ -1,14 +1,12 @@
 import type { Database } from "bun:sqlite";
 
 /**
- * How long a session's balance may sit idle before it starts over.
+ * How long a row keeps its balance before it checks the head of its order again.
  *
- * A provider's quota refills on a five-hour window, so a trail older than one
- * describes a world that no longer exists: the credentials this session had
- * already tried are worth trying first again, and the head of the order is where
- * a fresh balance starts. The clock is refreshed by every routed request, so this
- * measures idleness rather than elapsed time — a session that keeps talking never
- * reaches it, however long it runs.
+ * A provider's quota refills on a five-hour window, so a row that failed over to
+ * an expensive target should give the cheaper ones another chance after that
+ * long. The clock is periodic, not idle: it is measured from the last check, so
+ * a conversation that keeps talking still reaches it.
  */
 export const DEFAULT_REBALANCE_MS = 5 * 60 * 60_000;
 
@@ -110,8 +108,8 @@ export function setRebalance(db: Database, value: string): void {
 }
 
 /**
- * Whether idleness drops a trail at all. Unset reads as on, which is what every
- * version before the switch did.
+ * Whether the periodic re-check runs at all. Unset reads as on, which is what
+ * every version before the switch did.
  */
 export function getRebalanceAuto(db: Database): boolean {
 	const row = db
@@ -130,11 +128,12 @@ export function setRebalanceAuto(db: Database, enabled: boolean): void {
 }
 
 /**
- * The idle window in milliseconds. `0` means a trail never goes stale on its own,
- * which is also what the switch being off says: the length is kept beside it, so
- * turning the switch back on restores the window that was set rather than a
- * default nobody chose. Anything unreadable falls back to the default rather than
- * to an accidental "never": a typo must not pin a session to one trail for good.
+ * The re-check window in milliseconds. `0` means a row never re-checks the head
+ * on its own, which is also what the switch being off says: the length is kept
+ * beside it, so turning the switch back on restores the window that was set
+ * rather than a default nobody chose. Anything unreadable falls back to the
+ * default rather than to an accidental "never": a typo must not pin a session to
+ * one trail for good.
  */
 export function rebalanceAfterMs(db: Database): number {
 	return rebalanceWindowMs(getRebalanceAuto(db), readRebalance(db));

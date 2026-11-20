@@ -1,8 +1,9 @@
 import type { Database } from "bun:sqlite";
 
 /**
- * Two facts routing learns as it works: which target a row last served, and how
- * large a session's conversation has grown.
+ * Three facts routing learns as it works: which target a row last served, how
+ * large a session's conversation has grown, and when the row next re-checks the
+ * head of its order.
  *
  * Both used to live only in module memory, and editing any file reloads the
  * plugin: the panel's `in use` mark vanished on every reload, and a resumed
@@ -347,6 +348,74 @@ export function servedEntries(
 		live.push({ ...entry, familyKey });
 	}
 	return live.sort((left, right) => right.at - left.at);
+}
+
+const SINCE_PREFIX = "rebalance_since:";
+
+/**
+ * When this row last started a balance, in epoch milliseconds.
+ *
+ * The window is measured from here rather than from the last request: a
+ * conversation that keeps talking must still give a cheaper target at the head
+ * of the order a chance to serve again. The first route seeds it; the periodic
+ * check moves it forward.
+ */
+export function readRebalanceSince(
+	db: Database,
+	familyKey: string,
+): number | undefined {
+	return readJSON<number>(db, `${SINCE_PREFIX}${familyKey}`);
+}
+
+export function writeRebalanceSince(
+	db: Database,
+	familyKey: string,
+	at: number,
+) {
+	writeRow(db, `${SINCE_PREFIX}${familyKey}`, JSON.stringify(at));
+}
+
+/** Drop every row's clock, which is what a changed order means. */
+export function clearRebalanceSince(db: Database) {
+	try {
+		db.query<unknown, [string]>("DELETE FROM settings WHERE key LIKE ?").run(
+			`${SINCE_PREFIX}%`,
+		);
+	} catch {
+		// The next request seeds a clock again.
+	}
+}
+
+/**
+ * The soonest future re-check across every row, or undefined when none is
+ * pending. A clock already past its window is not pending: the next request
+ * rebalances it, and the countdown would otherwise claim a moment that has
+ * already gone.
+ */
+export function nextRebalanceDue(
+	db: Database,
+	window: number,
+	at: number = Date.now(),
+): number | undefined {
+	if (window <= 0) return undefined;
+	let soonest: number | undefined;
+	try {
+		const rows = db
+			.query<{ key: string; value: string }, [string]>(
+				"SELECT key, value FROM settings WHERE key LIKE ?",
+			)
+			.all(`${SINCE_PREFIX}%`);
+		for (const row of rows) {
+			const since = Number(row.value);
+			if (!Number.isFinite(since)) continue;
+			const due = since + window;
+			if (due <= at) continue;
+			if (soonest === undefined || due < soonest) soonest = due;
+		}
+	} catch {
+		// A store that cannot be read has no pending check to report.
+	}
+	return soonest;
 }
 
 /**

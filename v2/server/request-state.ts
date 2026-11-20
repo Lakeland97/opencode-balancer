@@ -203,10 +203,21 @@ export function isRetryableFailure(input: {
 	// the cut stream as an abort. Checked before ABORT_TEXT so a timeout that
 	// borrows that wording still fails over.
 	if (TIMEOUT_TEXT.test(text)) return true;
-	if (ABORT_TEXT.test(text) || INVALID_REQUEST_TEXT.test(text)) return false;
+	if (ABORT_TEXT.test(text)) return false;
 
 	// What this account's own state says: spent, unauthenticated, throttled.
+	//
+	// Checked before the request-shaped rejection below on purpose. The host
+	// wraps every upstream failure it has no specific mapping for as
+	// `AI.Error.InvalidRequest`, and that wrapper's name is part of the text, so
+	// a provider saying "you have insufficient credits" arrived named
+	// InvalidRequest and was handed to the session as the request's fault — the
+	// one case this must prevent. The account's own words outrank the wrapper's.
 	if (RETRYABLE_TAG.test(text) || RETRYABLE_TEXT.test(text)) return true;
+
+	// A request or model no account would accept, in words that carry no
+	// statement about this account's state.
+	if (INVALID_REQUEST_TEXT.test(text)) return false;
 
 	const status = input.status;
 	if (typeof status === "number") {

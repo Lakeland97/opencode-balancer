@@ -256,13 +256,13 @@ export async function registerBalancerRpc({
 		},
 
 		rebalance: async () => ({
-			// Whether idleness drops a trail at all, and the length it would drop
-			// it after. The length is reported even when the switch is off, so the
-			// field keeps showing what turning the switch back on would restore.
+			// Whether the periodic re-check runs at all, and the length it waits
+			// between checks. The length is reported even when the switch is off,
+			// so the field keeps showing what turning it back on would restore.
 			auto: getRebalanceAuto(db),
-			// When the client's balance next lapses, in ms, or 0 when nothing is
-			// counting down. The panel shows it as "(in 4h 12m)", which is the
-			// question the field is actually asking.
+			// When a row next checks the head of its order, in ms, or 0 when
+			// nothing is counting down. The panel shows it as "(in 4h 12m)", which
+			// is the question the field is actually asking.
 			nextAt: nextRebalanceAt(db) ?? 0,
 			// As typed, empty when it has never been set: the field's placeholder
 			// then shows the built-in default rather than pretending it was typed.

@@ -122,16 +122,21 @@ export default Plugin.define({
 		const [buffer, setBuffer] = createSignal("");
 		const [bufferDraft, setBufferDraft] = createSignal("");
 		const [bufferEnforce, setBufferEnforce] = createSignal("always");
-		// How long a session may sit idle before its failover trail is dropped
-		// and the order starts again from the head, as typed: `90m`, `5h`.
-		// Empty means the built-in window. The toggle above the field says
-		// whether the clock runs at all; the field says how long.
+		// How long a row holds its balance before it checks the head of the
+		// order again, as typed: `90m`, `5h`. Empty means the built-in window.
+		// The toggle above the field says whether the clock runs at all; the
+		// field says how long.
 		const [rebalance, setRebalance] = createSignal("");
 		const [rebalanceAuto, setRebalanceAuto] = createSignal(true);
 		const [rebalanceDraft, setRebalanceDraft] = createSignal("");
 		// When the client's balance next lapses, in ms; 0 when nothing is
 		// counting down. Read from the server, which is where the trails live.
 		const [rebalanceNextAt, setRebalanceNextAt] = createSignal(0);
+		// The wall clock the countdown is read against. `nextAt` is absolute and
+		// every poll writes the same number back, so a countdown evaluated only
+		// when that signal changes would freeze: Solid skips a set whose value it
+		// already holds. This changes on every poll and re-renders only the note.
+		const [clock, setClock] = createSignal(Date.now());
 		const [message, setMessage] = createSignal("");
 		const [chains, setChains] = createSignal<Chain[]>([]);
 		// A row's limit as it is being typed. Kept apart from the row because the
@@ -204,18 +209,27 @@ export default Plugin.define({
 		const refresh = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [status, list, rows, order, settings, room, idle, log, serving] =
-					await Promise.all([
-						rpc.status({}),
-						rpc.list({}),
-						rpc.chains({}),
-						rpc.priority({}),
-						rpc.contextLimit({}),
-						rpc.contextBuffer({}),
-						rpc.rebalance({}),
-						rpc.log({}),
-						rpc.inUse({}),
-					]);
+				const [
+					status,
+					list,
+					rows,
+					order,
+					settings,
+					room,
+					rebalance,
+					log,
+					serving,
+				] = await Promise.all([
+					rpc.status({}),
+					rpc.list({}),
+					rpc.chains({}),
+					rpc.priority({}),
+					rpc.contextLimit({}),
+					rpc.contextBuffer({}),
+					rpc.rebalance({}),
+					rpc.log({}),
+					rpc.inUse({}),
+				]);
 				setBalancing((status as Status).balancing);
 				setAccounts([...(list as Listed).accounts]);
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
@@ -234,10 +248,10 @@ export default Plugin.define({
 						? "necessary"
 						: "always",
 				);
-				setRebalance((idle as RebalanceState).value);
-				setRebalanceAuto((idle as RebalanceState).auto);
-				setRebalanceDraft((idle as RebalanceState).value);
-				setRebalanceNextAt((idle as RebalanceState).nextAt);
+				setRebalance((rebalance as RebalanceState).value);
+				setRebalanceAuto((rebalance as RebalanceState).auto);
+				setRebalanceDraft((rebalance as RebalanceState).value);
+				setRebalanceNextAt((rebalance as RebalanceState).nextAt);
 				setLastRefreshed(Date.now());
 			} catch (error) {
 				setMessage(describe(error));
@@ -256,7 +270,7 @@ export default Plugin.define({
 		const refreshInUse = async () => {
 			try {
 				const rpc = ctx.client.rpc(Balancer);
-				const [list, log, rows, order, serving, idle] = await Promise.all([
+				const [list, log, rows, order, serving, rebalance] = await Promise.all([
 					rpc.list({}),
 					rpc.log({}),
 					rpc.chains({}),
@@ -268,7 +282,7 @@ export default Plugin.define({
 				setLogEntries([...(log as { entries: LogEntry[] }).entries]);
 				mergeChains((rows as Chains).rows);
 				setInUse([...(serving as InUse).entries]);
-				setRebalanceNextAt((idle as RebalanceState).nextAt);
+				setRebalanceNextAt((rebalance as RebalanceState).nextAt);
 				// The provider list is where a credential appears, and a sync that
 				// imports one runs after the panel mounted. Reading it only on the
 				// full refresh left a new provider invisible until somebody
@@ -731,7 +745,10 @@ export default Plugin.define({
 		const View = () => {
 			onMount(() => {
 				void refresh();
-				const timer = setInterval(() => void refreshInUse(), 2000);
+				const timer = setInterval(() => {
+					setClock(Date.now());
+					void refreshInUse();
+				}, 2000);
 				onCleanup(() => clearInterval(timer));
 			});
 			return (
@@ -775,14 +792,14 @@ export default Plugin.define({
 					</div>
 
 					{/* The switch and the length are separate controls on purpose: the
-					    toggle says whether idleness drops a trail at all, the field
-					    says after how long. The clock is measured from the last
-					    routed request, so it is idleness that ages a trail out, not
-					    elapsed time — a session that keeps talking never reaches it. */}
+					    toggle says whether the periodic check runs at all, the field
+					    says after how long. The clock runs from the last check, not
+					    from the last request, so a conversation that keeps talking
+					    still gives a cheaper target at the head another chance. */}
 					<div style={row}>
 						<label
 							style={{ "align-items": "center", display: "flex", gap: "4px" }}
-							title="drop a session's failover trail once it has sat idle for the time beside this, so the order starts again from the head. Off means nothing ages a trail out by itself; only a change to the order — a pick, a reorder, a switch, a chain edit — starts a session over."
+							title="check the head of the order again after the time beside this, so a cheaper target that has recovered is used again. Off means only a change to the order — a pick, a reorder, a switch, a chain edit — moves a row."
 						>
 							<input
 								checked={rebalanceAuto()}
@@ -805,19 +822,19 @@ export default Plugin.define({
 							}}
 							placeholder={formatDuration(DEFAULT_REBALANCE_MS)}
 							style={{ width: "4.5em" }}
-							title="how long a session may sit idle before its failover trail is dropped: 90m, 5h, 1d 2h; empty keeps the built-in 5h. 0 turns the switch off, and any length typed here turns it back on."
+							title="how long a row holds its balance before checking the head of the order again: 90m, 5h, 1d 2h; empty keeps the built-in 5h. 0 turns the switch off, and any length typed here turns it back on."
 							value={rebalanceDraft()}
 						/>
-						{/* When the balance actually lapses, which is the question the
-						    field is asking: the idle window measured from the last
-						    routed request. Nothing counting down means no request
-						    has been routed yet, or the switch is off. */}
-						<Show when={rebalanceNextAt() > Date.now()}>
+						{/* When the row next checks the head, which is the question the
+						    field is asking: the window measured from the last check.
+						    Nothing counting down means nothing is in flight yet, or
+						    the switch is off. */}
+						<Show when={rebalanceNextAt() > clock()}>
 							<span
 								style={{ opacity: 0.7 }}
-								title="how long until the balance starts over from the head of the order, measured from the last routed request"
+								title="how long until the row checks the head of the order again, measured from the last check"
 							>
-								{`(in ${formatRemaining(rebalanceNextAt() - Date.now())})`}
+								{`(in ${formatRemaining(rebalanceNextAt() - clock())})`}
 							</span>
 						</Show>
 					</div>

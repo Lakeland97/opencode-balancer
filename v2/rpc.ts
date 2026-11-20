@@ -290,9 +290,9 @@ export const balancerDefinition = {
 		},
 		rebalance: {
 			input: empty,
-			// Whether idleness drops a session's trail at all, the length it would
-			// drop it after as the user typed it (empty means the built-in), and
-			// when the client's balance next lapses (ms; 0 when nothing is
+			// Whether the periodic re-check runs at all, the length it waits
+			// between checks as the user typed it (empty means the built-in), and
+			// when a row next checks the head of its order (ms; 0 when nothing is
 			// counting down).
 			output: object({ auto: bool, nextAt: num, value: str }, [
 				"auto",

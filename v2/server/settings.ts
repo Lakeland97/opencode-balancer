@@ -71,7 +71,7 @@ export function writeBalancing(db: Database, enabled: boolean): WriteResult {
 	setBalancingEnabled(db, enabled);
 	// Turning routing back on starts from the order as it now stands; a trail
 	// from before the switch describes another world.
-	if (enabled) forgetRoutingMemory();
+	if (enabled) forgetRoutingMemory(db);
 	recordLog("config", `automatic balancing ${enabled ? "on" : "off"}`);
 	return {
 		message: `Automatic balancing ${enabled ? "enabled" : "disabled"}.`,
@@ -175,18 +175,21 @@ export function writeRebalance(db: Database, value: string): WriteResult {
 	// "off" would do nothing visible.
 	const shut = parsed.ms !== undefined && parsed.ms <= 0;
 	setRebalanceAuto(db, !shut);
+	// A new length is a new balance: the old clock would make the first check
+	// happen at a moment nobody chose.
+	forgetRoutingMemory(db);
 	const ms = rebalanceAfterMs(db);
 	recordLog(
 		"config",
 		ms > 0
-			? `rebalance after ${formatDuration(ms)} idle`
-			: "rebalance window off; a trail never goes stale on its own",
+			? `rebalance after ${formatDuration(ms)}`
+			: "rebalance window off; a row never re-checks the head on its own",
 	);
 	return {
 		message:
 			ms > 0
-				? `A session starts over from the head after ${formatDuration(ms)} idle.`
-				: "A trail no longer goes stale on its own; only a change to the order starts it over.",
+				? `A row checks the head of the order again after ${formatDuration(ms)}.`
+				: "A row no longer re-checks the head of the order on its own; only a change to the order moves it.",
 		ok: true,
 	};
 }
@@ -197,13 +200,14 @@ export function writeRebalanceAuto(
 ): WriteResult {
 	if (!enabled) {
 		setRebalanceAuto(db, false);
+		forgetRoutingMemory(db);
 		recordLog(
 			"config",
-			"rebalance window off; a trail never goes stale on its own",
+			"rebalance window off; a row never re-checks the head on its own",
 		);
 		return {
 			message:
-				"A trail no longer goes stale on its own; only a change to the order starts it over.",
+				"A row no longer re-checks the head of the order on its own; only a change to the order moves it.",
 			ok: true,
 		};
 	}
@@ -220,10 +224,11 @@ export function writeRebalanceAuto(
 		setRebalance(db, "");
 	}
 	setRebalanceAuto(db, true);
+	forgetRoutingMemory(db);
 	const ms = rebalanceAfterMs(db);
-	recordLog("config", `rebalance after ${formatDuration(ms)} idle`);
+	recordLog("config", `rebalance after ${formatDuration(ms)}`);
 	return {
-		message: `A session starts over from the head after ${formatDuration(ms)} idle.`,
+		message: `A row checks the head of the order again after ${formatDuration(ms)}.`,
 		ok: true,
 	};
 }

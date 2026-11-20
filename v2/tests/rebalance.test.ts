@@ -16,7 +16,11 @@ import {
 } from "../core/rebalance";
 import { migrate } from "../core/schema";
 import { nextRebalanceAt } from "../server/hooks";
-import { noteServed, resetRouteMemory } from "../server/route-memory";
+import {
+	noteServed,
+	resetRouteMemory,
+	writeRebalanceSince,
+} from "../server/route-memory";
 
 function freshDb() {
 	const db = new Database(":memory:");
@@ -33,7 +37,7 @@ beforeEach(() => {
 	resetRouteMemory();
 });
 
-describe("how long a session may sit idle", () => {
+describe("how long a row keeps its balance", () => {
 	test("a number and a unit is a duration in any of the units", () => {
 		expect(parseDuration("5h")).toEqual({ ms: 5 * 3_600_000, ok: true });
 		expect(parseDuration("90m")).toEqual({ ms: 90 * 60_000, ok: true });
@@ -88,32 +92,34 @@ describe("how long a session may sit idle", () => {
 		expect(formatDuration(0)).toBe("never");
 	});
 
-	test("the countdown is the soonest row to lapse, not the window", () => {
+	test("the countdown is the soonest row to re-check, not the window", () => {
+		const db = freshDb();
+		const start = 1_000_000 + 2 * HOUR;
+		// Two rows began their balance at different moments: one two hours ago,
+		// one a minute ago. The first to check is the one that began two hours
+		// ago, since the window runs from the last check and five hours from then
+		// is three hours away, while the newer one has nearly five.
+		writeRebalanceSince(db, "older", start - 2 * HOUR);
+		writeRebalanceSince(db, "newer", start - MINUTE);
+
+		expect(nextRebalanceAt(db, start)).toBe(start - 2 * HOUR + 5 * HOUR);
+	});
+
+	test("traffic does not move a row's clock", () => {
 		const db = freshDb();
 		const start = 1_000_000;
-		// Two rows balanced at different moments: one answered a minute ago, one
-		// two hours ago. The first to lapse is the one that answered a minute
-		// ago, since the window runs from the last routed request.
-		noteServed(
-			db,
-			"older",
-			{ modelID: "older", providerID: "p1" },
-			start - 2 * HOUR,
-		);
-		noteServed(
-			db,
-			"newer",
-			{ modelID: "newer", providerID: "p2" },
-			start - MINUTE,
-		);
+		writeRebalanceSince(db, "row", start - 2 * HOUR);
+		// A row that keeps answering must still come due: the served note is the
+		// answer clock, and the re-check clock is a different fact.
+		noteServed(db, "row", { modelID: "row", providerID: "p1" }, start - MINUTE);
 
-		expect(nextRebalanceAt(db, start)).toBe(start - MINUTE + 5 * HOUR);
+		expect(nextRebalanceAt(db, start)).toBe(start - 2 * HOUR + 5 * HOUR);
 	});
 
 	test("nothing counting down when the switch is off", () => {
 		const db = freshDb();
 		setRebalanceAuto(db, false);
-		noteServed(db, "row", { modelID: "row", providerID: "p1" }, 1_000_000);
+		writeRebalanceSince(db, "row", 1_000_000);
 
 		expect(nextRebalanceAt(db, 1_000_000)).toBeUndefined();
 	});
@@ -122,15 +128,10 @@ describe("how long a session may sit idle", () => {
 		expect(nextRebalanceAt(freshDb(), 1_000_000)).toBeUndefined();
 	});
 
-	test("a trail already past its window is stale, not pending", () => {
+	test("a check already due is waiting on the next request, not pending", () => {
 		const db = freshDb();
 		const start = 1_000_000;
-		noteServed(
-			db,
-			"row",
-			{ modelID: "row", providerID: "p1" },
-			start - 6 * HOUR,
-		);
+		writeRebalanceSince(db, "row", start - 6 * HOUR);
 
 		expect(nextRebalanceAt(db, start)).toBeUndefined();
 	});

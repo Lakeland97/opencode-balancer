@@ -14,7 +14,7 @@ import {
 import { appendEvent } from "../core/events";
 import { trimOldestTurns } from "../core/fit";
 import { getBalancingEnabled } from "../core/priority";
-import { rebalanceAfterMs } from "../core/rebalance";
+import { formatDuration, rebalanceAfterMs } from "../core/rebalance";
 import { formatRollover } from "../core/rollover";
 import { now } from "../core/time";
 import { applyAuthToHeaders } from "./apply-auth";
@@ -40,17 +40,20 @@ import {
 	retryAfterMs,
 } from "./request-state";
 import {
+	clearRebalanceSince,
 	forgetServed,
 	forgetSessionTokens,
+	nextRebalanceDue,
 	noteAnswered,
 	noteIdle,
 	noteServed,
 	noteSessionRow,
 	noteSessionTokens,
-	servedEntries,
+	readRebalanceSince,
 	servedFor,
 	sessionRows,
 	sessionTokens,
+	writeRebalanceSince,
 } from "./route-memory";
 import {
 	type ChosenRoute,
@@ -734,7 +737,7 @@ function isParked(db: Database, providerID: string, alias: string) {
  * still per session: a failure has to be charged to the account that request
  * actually used. That stays on `bySession` under the session key.
  */
-type Trail = { at: number; tried: Set<string> };
+type Trail = { tried: Set<string> };
 const trailsByRow = new Map<string, Trail>();
 /** The target each row last answered on, shared by every session of the row. */
 const pinnedByRow = new Map<string, Tracked>();
@@ -742,16 +745,14 @@ const pinnedByRow = new Map<string, Tracked>();
 function trailFor(familyKey: string) {
 	let trail = trailsByRow.get(familyKey);
 	if (!trail) {
-		trail = { at: now(), tried: new Set() };
+		trail = { tried: new Set() };
 		trailsByRow.set(familyKey, trail);
 	}
 	return trail;
 }
 
 function triedFor(familyKey: string) {
-	const trail = trailFor(familyKey);
-	trail.at = now();
-	return trail.tried;
+	return trailFor(familyKey).tried;
 }
 
 // The model rows a session has had a conversation on, so the compaction watcher
@@ -786,22 +787,35 @@ function recordTarget(db: Database, sessionID: string, target: SessionTarget) {
 const announced = new Map<string, { alias: string; providerID: string }>();
 
 /**
- * Forget a trail that has outlived the idle window.
+ * Re-check a row from the head of its order once the window has elapsed.
  *
- * Only the trail goes — a park is the provider's own clock and expires on its
- * own schedule, and throwing that away would send a call straight back to
- * something still limited.
+ * Unlike an idle timer, this clock is not restamped by ordinary requests: a
+ * conversation that keeps talking must still give a cheaper target at the head
+ * a chance to serve again. The check is lazy — it runs on the next request —
+ * and costs nothing when the head is still parked, because the router skips a
+ * parked credential without sending to it.
+ *
+ * Returns true when the row started over, so the caller ignores the pin for this
+ * one decision.
  */
-function forgetStaleTrail(db: Database, familyKey: string) {
-	const trail = trailsByRow.get(familyKey);
-	if (!trail) return;
+function rebalanceIfDue(db: Database, familyKey: string) {
 	const window = rebalanceAfterMs(db);
-	// Zero is the window switched off, so nothing ages a trail out but a change to
-	// the order itself.
-	if (window <= 0) return;
-	if (now() - trail.at <= window) return;
+	if (window <= 0) return false;
+	const since = readRebalanceSince(db, familyKey);
+	if (since === undefined) {
+		writeRebalanceSince(db, familyKey, now());
+		return false;
+	}
+	if (now() - since < window) return false;
 	trailsByRow.delete(familyKey);
 	announced.delete(familyKey);
+	pinnedByRow.delete(familyKey);
+	writeRebalanceSince(db, familyKey, now());
+	recordLog(
+		"route",
+		`${familyKey}: rebalanced after ${formatDuration(window)}; checking the head of the order`,
+	);
+	return true;
 }
 
 /**
@@ -812,19 +826,24 @@ function forgetStaleTrail(db: Database, familyKey: string) {
  * describe a world that no longer exists. Dropping them makes the next request
  * re-derive its route from the order as it now stands, which is what lets a
  * picked credential actually serve instead of waiting behind the one this
- * session last answered on. The idle window restarts by construction: the next
- * trail is created with the current time.
+ * session last answered on. Every row's re-check clock is dropped too, so the
+ * next check is a full window from now rather than one inherited from the order
+ * that just stopped existing.
  *
  * The per-provider slots stay. They are what a failure is charged to, and the
  * order they name is still the right one. The recorded targets stay too: they
  * describe which model a conversation is on, which no reorder changes.
  */
-export function forgetRoutingMemory() {
+export function forgetRoutingMemory(db?: Database) {
 	trailsByRow.clear();
 	pinnedByRow.clear();
 	announced.clear();
 	boundRoutes.clear();
 	pendingAttempts.clear();
+	// A changed order starts every row's clock again; leaving the old starts
+	// would make a row re-check immediately because a previous chain's window
+	// happened to be nearly over.
+	if (db) clearRebalanceSince(db);
 	for (const key of [...bySession.keys()]) {
 		if (isRoutedSlot(key)) bySession.delete(key);
 	}
@@ -939,29 +958,21 @@ function recordHandedOver(input: {
 }
 
 /**
- * When the client's balance would next be dropped for sitting idle, in epoch
- * milliseconds, or `undefined` when nothing is counting down.
+ * When a row would next check the head of its order, in epoch milliseconds, or
+ * `undefined` when nothing is counting down.
  *
- * Routing memory is per row, so different rows go stale at different moments.
- * The soonest one is what a single note can honestly say: it is the moment the
- * next request would start from the head of the order instead of continuing.
- * A window switched off has no such moment; a row with no trail has nothing to
- * forget yet.
+ * The clock is per row, so different rows come due at different moments. The
+ * soonest one is what a single note can honestly say: it is the moment the next
+ * request would give the cheaper end of the order another chance. A window
+ * switched off has no such moment; a row that has not routed yet has no clock.
  */
 export function nextRebalanceAt(db: Database, at: number = now()) {
 	const window = rebalanceAfterMs(db);
 	if (window <= 0) return undefined;
-	let soonest: number | undefined;
-	// The served notes are the persisted record of each row's last routed
-	// request, so the countdown survives a reload that a trail in memory does not.
-	for (const entry of servedEntries(db, at)) {
-		const due = entry.at + window;
-		// A note already past its window is stale, not pending: the next request
-		// drops it rather than waiting for it.
-		if (due <= at) continue;
-		if (soonest === undefined || due < soonest) soonest = due;
-	}
-	return soonest;
+	// The clock is persisted per row, so the countdown survives a reload and does
+	// not move every time the row answers — which is what made the old idle
+	// window impossible to reach during a live conversation.
+	return nextRebalanceDue(db, window, at);
 }
 
 /**
@@ -1091,22 +1102,26 @@ function chooseStickyRoute(input: {
 	// handed to it: the provider would reject the whole request, which reads as
 	// a failure of the account when it is really the row's own target choice.
 	const minContext = sessionTokens(db, sessionID);
-	// A trail older than the idle window is void, so the balance starts again.
-	forgetStaleTrail(db, family.key);
+	// The window is periodic, not idle: a conversation that keeps talking must
+	// still check whether a cheaper target at the head has recovered. The check
+	// is lazy, so it runs on this request rather than on a timer.
+	const rebalanced = rebalanceIfDue(db, family.key);
 	const tried = triedFor(family.key);
 	// The row's own note is the same fact the map holds, written down. A reload
 	// empties the map, and a row that then restarted at the head of the order
 	// moved off a provider that was still serving it — the panel said one thing
 	// and routing did another. Reading the note keeps the row sticky across
 	// reloads, and it only moves when the pinned provider cannot serve the row.
-	const noted = servedFor(db, family.key);
+	// A row that just rebalanced skips both: checking the head is the point.
+	const noted = rebalanced ? undefined : servedFor(db, family.key);
 	const remembered:
 		| { providerID: string; alias: string; at: number }
-		| undefined =
-		pinnedByRow.get(family.key) ??
-		(noted?.alias
-			? { alias: noted.alias, at: noted.at, providerID: noted.providerID }
-			: undefined);
+		| undefined = rebalanced
+		? undefined
+		: (pinnedByRow.get(family.key) ??
+			(noted?.alias
+				? { alias: noted.alias, at: noted.at, providerID: noted.providerID }
+				: undefined));
 	const pinned =
 		remembered && fresh(remembered)
 			? {
