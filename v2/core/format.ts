@@ -5,9 +5,10 @@ import { formatRollover } from "./rollover";
 export type RouteMarker = "active" | "inUse" | "limited";
 
 /**
- * The markers a credential earns. "in use" replaces "active" because the same
- * row cannot be both the one that served and merely able to serve; a park is
- * additive, because a credential can have served and then been parked.
+ * The markers a credential earns. "last served" replaces "active" because the
+ * same row cannot be both the one that served and merely able to serve; a park
+ * is additive, because a credential can have served and then been parked — and
+ * "last served" says that it was the last, not that it is serving now.
  */
 export function routeMarkers(input: {
 	active: boolean;

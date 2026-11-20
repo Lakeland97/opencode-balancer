@@ -957,7 +957,7 @@ export default Plugin.define({
 					<div style={divider} />
 
 					<div style={row}>
-						<strong title="one row per credential, in the order routing tries them. active = the balancer can send here; in use = served the last request; limited = parked after a failure — hover a marker for the reason. Two credentials on one provider are two rows, and each is tried in turn.">
+						<strong title="one row per credential, in the order routing tries them. active = the balancer can send here; last served = served the most recent request; limited = parked after a failure — hover a marker for the reason. Two credentials on one provider are two rows, and each is tried in turn.">
 							{ctx.t("providers")}
 						</strong>
 					</div>

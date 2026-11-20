@@ -31,7 +31,7 @@ export const copy = {
 	expand: "expand all",
 	free: "free",
 	globalShare: "global",
-	inUse: "in use",
+	inUse: "last served",
 	lastTried: "last tried",
 	limit: "limit",
 	limited: "limited",

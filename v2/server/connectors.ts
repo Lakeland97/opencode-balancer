@@ -757,7 +757,17 @@ export async function loadCatalog(
 	applyAssumedWindows(db, families);
 
 	const catalog = { families, sources };
-	cached = { at: Date.now(), catalog };
+	// A target the host has not listed yet is a fact about this moment, not
+	// about the model. A fresh process can read an incomplete model list while
+	// a provider is still loading, and caching that verdict made every row call
+	// the provider "gone" for half a minute — a row with one healthy credential
+	// then refused to hand over. Only a catalogue with every target present is
+	// worth keeping; an absence is re-read on the next request.
+	const settled = catalog.families.every((family) =>
+		family.targets.every((target) => target.available !== false),
+	);
+	if (settled) cached = { at: Date.now(), catalog };
+	else cached = undefined;
 	return catalog;
 }
 

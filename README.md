@@ -187,7 +187,7 @@ the endpoint said nothing about its quota and a date carried over from an older 
 claim it never made.
 
 A credential row carries one of three markers. `active` means **the balancer can send here**: it is
-switched on and not sitting out a park. `in use` means it served the most recent request. `limited`
+switched on and not sitting out a park. `last served` means it served the most recent request. `limited`
 means it failed and has not been tried since. Two keys on one provider are two rows, so both can read
 `active` — the marker is about whether that credential can serve, not about which one is next.
 
@@ -204,7 +204,7 @@ the plumbing, kept off the name line.
 
 A `log` at the bottom records what the balancer actually did during this run: which model went to
 which provider and account, every parking with its reason, and each config change. It is folded away
-by default, and is refreshed every two seconds together with the `in use` marker, which names the
+by default, and is refreshed every two seconds together with the `last served` marker, which names the
 credential that served the most recent request.
 
 The panel lists only rows that route between providers, or that you built by hand. Rows are grouped
