@@ -479,13 +479,34 @@ async function failoverResponse(input: {
 			let response: Response;
 			try {
 				response = await fetch(request);
-			} catch {
+			} catch (error) {
 				// The request never reached this endpoint, so nothing was learned
 				// about the credential. The walk moves on; the account is not
 				// parked. Parking it made one dropped connection look like a spent
 				// account, and with a single enabled target the next request then
 				// had nowhere to go but `balancer.invalid`.
+				let host = "";
+				try {
+					host = new URL(request.url).host;
+				} catch {
+					host = "";
+				}
+				const reason = (
+					error instanceof Error ? error.message : String(error)
+				).slice(0, 160);
 				pending.tried.add(accountKey(route.providerID, route.account.alias));
+				// A walk that skips a host must say so durably: the session only
+				// sees the last refusal, and a healthy credential that could not
+				// be reached looks exactly like one that was never offered.
+				appendEvent(db, {
+					alias: route.account.alias,
+					message: `${route.providerID}/${route.account.alias} could not be reached at ${
+						host || "an unnamed host"
+					}: ${reason}`,
+					metadata: { host },
+					providerID: route.providerID,
+					type: "provider_unreachable",
+				});
 				recordLog(
 					"failover",
 					`${route.providerID}/${route.account.alias} could not be reached; not parked`,
@@ -1847,13 +1868,17 @@ export async function registerHooks({
 				)
 			: hasAlternativeAccount(db, tracked.providerID, tracked.alias);
 		if (!canContinue) {
+			const reasons =
+				routed && family
+					? describeUnroutable(db, family).join("; ").slice(0, 400)
+					: "";
 			recordLog(
 				"error",
 				`no alternative to ${from}: the session sees the error`,
 			);
 			recordHandedOver({
 				alias: tracked.alias,
-				branch: "no alternative",
+				branch: `no alternative${reasons ? ` (${reasons})` : ""}`,
 				db,
 				from,
 				providerID: tracked.providerID,

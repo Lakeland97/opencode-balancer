@@ -71,6 +71,7 @@ export type BalancerEventType =
 	| "rate_limit_detected"
 	| "failover_performed"
 	| "provider_refused"
+	| "provider_unreachable"
 	| "error_reached_session";
 
 export type BalancerEvent = {
