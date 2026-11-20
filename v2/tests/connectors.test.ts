@@ -391,14 +391,16 @@ describe("provider registration", () => {
 		await registerBalancerProvider({ ctx, db });
 
 		const row = added.find((entry) => entry.id === "deepseek-v4.1-flash");
-		// A picker offering only one target's names would hide levels the other
-		// target has and offer ones it does not; the row offers the union, and
-		// routing translates per target.
+		// A picker may carry a level over from the model the session used before,
+		// and the host refuses one the row does not declare, so the row declares
+		// the whole ladder; routing translates per target.
 		expect(row?.variants?.map((variant) => variant.id)).toEqual([
 			"none",
+			"minimal",
 			"low",
 			"medium",
 			"high",
+			"xhigh",
 			"max",
 		]);
 	});

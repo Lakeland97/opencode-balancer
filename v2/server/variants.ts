@@ -62,6 +62,15 @@ export function canonicalVariants(lists: readonly Variant[][]): Variant[] {
 			else if (rank < existing.rank) existing.rank = rank;
 		}
 	}
+	// The host refuses a session whose level is not in the row it is written
+	// for, and it does that before this plugin is asked. A level carried over
+	// from the model the session previously used would therefore fail the whole
+	// turn on a row that published no rungs of its own. The ladder is always
+	// complete, so any level resolves; `mapVariant` still decides whether the
+	// target actually receives it.
+	for (const [rank, id] of EFFORT_ORDER.entries()) {
+		if (!byID.has(id)) byID.set(id, { id, rank });
+	}
 	return [...byID.values()]
 		.sort((left, right) =>
 			left.rank === right.rank
@@ -143,7 +152,9 @@ export function rewriteVariant(
 	requested: Variant | undefined,
 	target: Variant | undefined,
 ) {
-	if (!requested || !target || requested.id === target.id) return body;
+	// A target that names no rung has agreed to none, so the row's rung is
+	// removed rather than sent to a provider that never advertised it.
+	if (!requested || requested.id === target?.id) return body;
 
 	const before = wireFields(requested);
 	const after = wireFields(target);

@@ -26,14 +26,18 @@ const opencode: Variant[] = [
 ];
 
 describe("one thinking ladder per row", () => {
-	test("a row declares every level any target offers, least to most", () => {
+	test("a row offers the whole effort ladder, not only what a target named", () => {
+		// A level carried over from the model a session used before must resolve
+		// here, or the host rejects the turn before routing ever happens.
 		const row = canonicalVariants([cline, openDesign, opencode]);
 
 		expect(row.map((variant) => variant.id)).toEqual([
 			"none",
+			"minimal",
 			"low",
 			"medium",
 			"high",
+			"xhigh",
 			"max",
 		]);
 	});
@@ -44,21 +48,44 @@ describe("one thinking ladder per row", () => {
 		expect(high?.settings).toEqual({ reasoningEffort: "high" });
 	});
 
+	test("a level no target named carries no settings of its own", () => {
+		const row = canonicalVariants([cline]);
+		expect(row.find((variant) => variant.id === "xhigh")).toEqual({
+			id: "xhigh",
+		});
+	});
+
 	test("a provider that names its rungs differently still orders them", () => {
 		// Not every connector uses the effort names. Declaration order is the
-		// only ladder such a provider gives, so it is the one used.
+		// only ladder such a provider gives, so it is the one used, after the
+		// effort names the ladder already knows.
 		const row = canonicalVariants([
 			[{ id: "default" }, { id: "thinking" }, { id: "extended" }],
 		]);
 		expect(row.map((variant) => variant.id)).toEqual([
+			"none",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
 			"default",
 			"thinking",
 			"extended",
 		]);
 	});
 
-	test("no variants means no ladder, not an empty level", () => {
-		expect(canonicalVariants([[], []])).toEqual([]);
+	test("a row whose targets publish no rungs still declares the ladder", () => {
+		expect(canonicalVariants([[], []]).map((variant) => variant.id)).toEqual([
+			"none",
+			"minimal",
+			"low",
+			"medium",
+			"high",
+			"xhigh",
+			"max",
+		]);
 	});
 });
 
@@ -144,6 +171,20 @@ describe("rewriting a body for the target's rung", () => {
 		);
 
 		expect(body.reasoning).toEqual({ effort: "high" });
+	});
+
+	test("a target that names no rung gets no level at all", () => {
+		// The provider never advertised an effort, so leaving the row's effort in
+		// the body would ask it for one it does not have.
+		const body: Record<string, unknown> = { reasoning_effort: "high" };
+
+		rewriteVariant(
+			body,
+			{ id: "high", settings: { reasoningEffort: "high" } },
+			undefined,
+		);
+
+		expect(body).toEqual({});
 	});
 
 	test("the same rung on both sides leaves the body untouched", () => {
