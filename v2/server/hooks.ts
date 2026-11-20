@@ -63,7 +63,6 @@ import {
 	describeUnroutable,
 	hasAlternativeRoute,
 	rewriteModel,
-	routedURL,
 } from "./routing";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
 import { mapVariant, rewriteVariant } from "./variants";
@@ -247,6 +246,9 @@ export function ontoTarget(input: {
 	replaceBase?: string;
 }): string {
 	const target = input.baseURL.replace(/\/+$/, "");
+	// A target with no base has no host to move to; leaving the URL alone is the
+	// only option that does not invent one, and it must not throw out of a hook.
+	if (!target) return input.url;
 	const base = (input.replaceBase ?? "").replace(/\/+$/, "");
 	if (base && input.url.startsWith(base)) {
 		return `${target}${input.url.slice(base.length)}`;
@@ -263,6 +265,15 @@ export function ontoTarget(input: {
 		path = path.slice(basePath.length);
 	} else if (basePath.endsWith("/v1") && path.startsWith("/v1/")) {
 		path = path.slice("/v1".length);
+	} else {
+		// Nothing matched, so the base the request was written against is not
+		// known here — a binding moved under a concurrent call, say. The version
+		// segment is still the boundary between base and endpoint on every
+		// connector this host speaks, so the endpoint is what follows it. Taking
+		// it from the last lookup keeps a nested base's own path (`/api/v1`)
+		// from being carried onto a host that never had it.
+		const version = path.lastIndexOf("/v1/");
+		if (version >= 0) path = path.slice(version + 3);
 	}
 	return `${target}${path}${current.search}`;
 }
@@ -278,18 +289,17 @@ async function prepareRoutedRequest(input: {
 }): Promise<Request> {
 	const { db, family, pristine, replaceBase, route, variant } = input;
 	let request = pristine;
-	let url = routedURL(request.url, route.baseURL);
-	// A request the model hook already pointed at a connector no longer names the
-	// stub, so the host is not the thing to swap: the previous target is. Sending
-	// it on with only its credential changed would deliver `p2`'s key to `p1`'s
-	// endpoint.
-	if (url === undefined && replaceBase) {
-		const base = replaceBase.replace(/\/+$/, "");
-		if (request.url.startsWith(base)) {
-			url = `${route.baseURL}${request.url.slice(base.length)}`;
-		}
-	}
-	if (url && url !== request.url) request = new Request(url, request);
+	// Whatever the request names — the stub, the target it was last sent to, or
+	// another connector the host had already bound this session to — the only
+	// host it may leave for is this target's. Leaving the URL untouched and
+	// swapping the credential is what delivered SayGM's key to Open-Design and
+	// charged the refusal to SayGM.
+	const url = ontoTarget({
+		baseURL: route.baseURL,
+		replaceBase,
+		url: request.url,
+	});
+	if (url !== request.url) request = new Request(url, request);
 	request = await rewriteModel(request, route.modelID, (body) => {
 		// The host wrote the row's thinking level into the body. The target
 		// may name that level differently, or not have it at all, so the
@@ -340,23 +350,12 @@ async function failoverResponse(input: {
 	kind: string;
 	/** The target whose refusal started this walk. */
 	original: ChosenRoute;
-	/** Where that attempt was addressed, when it was not the stub itself. */
-	originalBase: string;
 	pending: PendingAttempt;
 	sessionID: string;
 	reported: string;
 }): Promise<Response | undefined> {
-	const {
-		agent,
-		db,
-		family,
-		kind,
-		original,
-		originalBase,
-		pending,
-		sessionID,
-		reported,
-	} = input;
+	const { agent, db, family, kind, original, pending, sessionID, reported } =
+		input;
 	if (!getBalancingEnabled(db)) return undefined;
 	const minContext = sessionTokens(db, sessionID);
 
@@ -404,9 +403,11 @@ async function failoverResponse(input: {
 			headers: pending.headers,
 			method: pending.method,
 		});
-	// Each attempt is addressed to its own connector: the previous one is what
-	// the request currently names, so that is what gets replaced.
-	let base = originalBase;
+	// Each attempt is addressed to its own connector. The base the template was
+	// written against comes from the attempt itself, never from the session's
+	// binding: a concurrent call can move that binding, and a stale one is how
+	// one provider's key reached another provider's host.
+	const base = pending.base;
 
 	try {
 		for (;;) {
@@ -475,8 +476,6 @@ async function failoverResponse(input: {
 			} catch {
 				return abandon();
 			}
-			base = route.baseURL;
-
 			let response: Response;
 			try {
 				response = await fetch(request);
@@ -604,6 +603,8 @@ type PendingAttempt = {
 	headers: Headers;
 	method: string;
 	url: string;
+	/** The base `url` was written against, so a retry keeps the endpoint it named. */
+	base: string;
 	/** Whether this model request is the conversation or housekeeping beside it. */
 	side: boolean;
 	/** Accounts this model request has already been sent to. */
@@ -662,13 +663,33 @@ function pendingAttempt(
 	return entry && now() - entry.at <= BOUND_ROUTE_TTL_MS ? entry : undefined;
 }
 
+/**
+ * The base the host's own request was written against.
+ *
+ * Read here, from the request itself, and carried with the attempt. Asking the
+ * session's bound route later returned whatever the *last* request for that
+ * session had bound, so a retry could believe a request named a base it never
+ * named, keep the previous host's URL, and send this target's key to it.
+ */
+function attemptBase(url: string, route: ChosenRoute): string {
+	const target = route.baseURL.replace(/\/+$/, "");
+	if (url.startsWith(target)) return route.baseURL;
+	try {
+		if (new URL(url).hostname === new URL(BALANCER_BASE_URL).hostname)
+			return BALANCER_BASE_URL;
+	} catch {
+		// An unparseable URL names no base; `ontoTarget` still keeps its endpoint.
+	}
+	return "";
+}
+
 function rememberAttempt(
 	sessionID: string,
 	familyKey: string,
 	kind: string,
 	pristine: Awaited<ReturnType<typeof readAttempt>>,
 	tried: Set<string>,
-	input: { side: boolean; variant?: string },
+	input: { base: string; side: boolean; variant?: string },
 ) {
 	if (pendingAttempts.size >= PENDING_CAP) {
 		const cutoff = now() - BOUND_ROUTE_TTL_MS;
@@ -679,6 +700,7 @@ function rememberAttempt(
 	pendingAttempts.set(pendingKey(sessionID, familyKey, kind), {
 		...pristine,
 		at: now(),
+		base: input.base,
 		failures: 0,
 		side: input.side,
 		tried,
@@ -1465,7 +1487,7 @@ export async function registerHooks({
 				kind,
 				pristine,
 				new Set([accountKey(route.providerID, route.account.alias)]),
-				{ side, variant },
+				{ base: attemptBase(pristine.url, route), side, variant },
 			);
 			// A side call keeps its failure on its own request, so the response
 			// hook charges the right credential, but never rewrites the
@@ -1602,11 +1624,6 @@ export async function registerHooks({
 						package: family.package,
 						providerID: tracked.providerID,
 					},
-					// Where this attempt was sent, so the retry replaces that base
-					// rather than assuming the request still names the stub.
-					originalBase:
-						boundRoute(event.sessionID, tracked.familyKey, String(event.kind))
-							?.baseURL ?? BALANCER_BASE_URL,
 					pending,
 					reported,
 					sessionID: event.sessionID,

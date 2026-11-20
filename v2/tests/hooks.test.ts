@@ -1339,6 +1339,18 @@ describe("a request is always sent to the target's own host", () => {
 		).toBe("https://api.cline.bot/api/v1/chat/completions");
 	});
 
+	test("a base the request does not name is never guessed from", () => {
+		// The live shape: a walk whose binding had moved sent this request to
+		// SayGM's host while it still carried Cline's path, and `/api/v1` came
+		// along with it. The endpoint is what follows the version segment.
+		expect(
+			ontoTarget({
+				baseURL: "https://api.saygm.com/v1",
+				url: "https://api.cline.bot/api/v1/chat/completions",
+			}),
+		).toBe("https://api.saygm.com/v1/chat/completions");
+	});
+
 	test("a version path the connector already carries is not doubled", () => {
 		// This is the shape that 404'd the live session: the stub's `/v1` plus
 		// opencode's own `/inference/openai/v1` produced `/v1/v1/...`.
