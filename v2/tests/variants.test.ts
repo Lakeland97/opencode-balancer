@@ -26,101 +26,89 @@ const opencode: Variant[] = [
 ];
 
 describe("one thinking ladder per row", () => {
-	test("a row offers the whole effort ladder, not only what a target named", () => {
-		// A level carried over from the model a session used before must resolve
-		// here, or the host rejects the turn before routing ever happens.
+	test("a row offers three levels, whatever its targets publish", () => {
 		const row = canonicalVariants([cline, openDesign, opencode]);
-
-		expect(row.map((variant) => variant.id)).toEqual([
-			"none",
-			"minimal",
-			"low",
-			"medium",
-			"high",
-			"xhigh",
-			"max",
-		]);
+		expect(row.map((variant) => variant.id)).toEqual(["low", "medium", "high"]);
 	});
 
-	test("a level named by two targets keeps the first target's settings", () => {
+	test("a level named by a target keeps that target's settings", () => {
 		const row = canonicalVariants([openDesign, cline]);
 		const high = row.find((variant) => variant.id === "high");
 		expect(high?.settings).toEqual({ reasoningEffort: "high" });
 	});
 
-	test("a level no target named carries no settings of its own", () => {
+	test("a level no target named is declared without settings", () => {
+		// The host refuses a level the row does not declare, so all three are
+		// declared even when a target named only some of them.
 		const row = canonicalVariants([cline]);
-		expect(row.find((variant) => variant.id === "xhigh")).toEqual({
-			id: "xhigh",
+		expect(row.find((variant) => variant.id === "medium")).toEqual({
+			id: "medium",
 		});
 	});
 
-	test("a provider that names its rungs differently still orders them", () => {
-		// Not every connector uses the effort names. Declaration order is the
-		// only ladder such a provider gives, so it is the one used, after the
-		// effort names the ladder already knows.
-		const row = canonicalVariants([
-			[{ id: "default" }, { id: "thinking" }, { id: "extended" }],
-		]);
-		expect(row.map((variant) => variant.id)).toEqual([
-			"none",
-			"minimal",
+	test("a row whose targets publish no rungs still declares three", () => {
+		expect(canonicalVariants([[], []]).map((variant) => variant.id)).toEqual([
 			"low",
 			"medium",
 			"high",
-			"xhigh",
-			"max",
-			"default",
-			"thinking",
-			"extended",
 		]);
 	});
 
-	test("a row whose targets publish no rungs still declares the ladder", () => {
-		expect(canonicalVariants([[], []]).map((variant) => variant.id)).toEqual([
-			"none",
-			"minimal",
-			"low",
-			"medium",
-			"high",
-			"xhigh",
-			"max",
+	test("a provider's own names never leak onto the row", () => {
+		const row = canonicalVariants([
+			[{ id: "default" }, { id: "thinking" }, { id: "extended" }],
 		]);
+		expect(row.map((variant) => variant.id)).toEqual(["low", "medium", "high"]);
 	});
 });
 
 describe("sending a level to a target that named it differently", () => {
-	test("a name both sides share is used as itself", () => {
+	test("a ladder already in the row's words maps one to one", () => {
 		expect(mapVariant("high", openDesign)?.id).toBe("high");
 		expect(mapVariant("low", cline)?.id).toBe("low");
 	});
 
-	test("three rungs map onto the bottom of a five-rung target", () => {
-		// The row offers none/low/medium/high/max because cline does; open-design
-		// only has low/medium/high. Its lowest is `low`, so `none` is sent there
-		// and its highest is `high`, so `max` is sent there too.
+	test("a three-rung target maps one to one", () => {
 		expect(mapVariant("none", openDesign)?.id).toBe("low");
 		expect(mapVariant("max", openDesign)?.id).toBe("high");
 		expect(mapVariant("medium", openDesign)?.id).toBe("medium");
 	});
 
-	test("a rung missing in the middle falls to the nearer neighbour", () => {
-		// opencode has no `medium`: `low` is one rung away, `high` one the other
-		// way. Equal distance goes to the lower rung, because overshooting a
-		// thinking budget costs more than undershooting it.
-		expect(mapVariant("medium", opencode)?.id).toBe("low");
+	test("a five-rung target answers from its tail", () => {
+		// The target's last three rungs are what the row's three mean: its third
+		// rung is `low`, the fourth `medium`, the fifth `high`.
+		const five: Variant[] = [
+			{ id: "none" },
+			{ id: "minimal" },
+			{ id: "low" },
+			{ id: "medium" },
+			{ id: "high" },
+		];
+		expect(mapVariant("low", five)?.id).toBe("low");
+		expect(mapVariant("medium", five)?.id).toBe("medium");
+		expect(mapVariant("high", five)?.id).toBe("high");
 	});
 
-	test("a level the target does not have maps to the closest it does", () => {
-		expect(mapVariant("xhigh", openDesign)?.id).toBe("high");
-		// `minimal` sits between cline's `none` and `low`; the tie goes to the
-		// lower rung, so the request spends less than it asked for, never more.
-		expect(mapVariant("minimal", cline)?.id).toBe("none");
+	test("a target between the row's names maps onto its last three rungs", () => {
+		// opencode has low/high/max. The tail is the whole ladder: low is its
+		// first rung, medium its second, high its third.
+		expect(mapVariant("low", opencode)?.id).toBe("low");
+		expect(mapVariant("medium", opencode)?.id).toBe("high");
+		expect(mapVariant("high", opencode)?.id).toBe("max");
 	});
 
-	test("the target's own default is chosen when nothing was asked for", () => {
-		expect(mapVariant(undefined, openDesign)).toBeUndefined();
+	test("a target with fewer rungs never overshoots the request", () => {
+		// A two-rung target answers `low` and `medium` with its first rung and
+		// `high` with its last.
+		const two: Variant[] = [{ id: "low" }, { id: "high" }];
+		expect(mapVariant("low", two)?.id).toBe("low");
+		expect(mapVariant("medium", two)?.id).toBe("low");
+		expect(mapVariant("high", two)?.id).toBe("high");
+	});
+
+	test("a target that names no rung is sent none", () => {
 		expect(mapVariant("high", [])).toBeUndefined();
+		expect(mapVariant(undefined, openDesign)).toBeUndefined();
 	});
 });
 
@@ -128,17 +116,34 @@ describe("rewriting a body for the target's rung", () => {
 	test("the effort field is replaced with the target's own", () => {
 		const body: Record<string, unknown> = {
 			model: "deepseek-v4.1-flash",
-			reasoning_effort: "max",
+			reasoning_effort: "high",
 		};
 
 		rewriteVariant(
 			body,
-			mapVariant("max", canonicalVariants([cline])),
-			mapVariant("max", openDesign),
+			canonicalVariants([openDesign]).find((variant) => variant.id === "high"),
+			// cline's tail is `max`, which is what the row's `high` means there.
+			mapVariant("high", cline),
 		);
 
-		expect(body.reasoning_effort).toBe("high");
+		expect(body.reasoning_effort).toBe("max");
 		expect(body.model).toBe("deepseek-v4.1-flash");
+	});
+
+	test("a mapped level is written even when the row carried no settings", () => {
+		// opencode names no `medium`, so the row declares one without settings.
+		// The target that receives it does have a middle rung, and the level has
+		// to travel with the request or the mapping was only a label.
+		const body: Record<string, unknown> = { model: "deepseek-v4.1-flash" };
+		const row = canonicalVariants([opencode]);
+
+		rewriteVariant(
+			body,
+			row.find((variant) => variant.id === "medium"),
+			mapVariant("medium", openDesign),
+		);
+
+		expect(body.reasoning_effort).toBe("medium");
 	});
 
 	test("a field only the row's rung set is removed", () => {

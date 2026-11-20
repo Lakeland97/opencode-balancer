@@ -1,17 +1,16 @@
 /**
  * Thinking levels, which every provider names a little differently.
  *
- * The same model is offered with `low/medium/high` by one connector,
- * `none/low/high/max` by another, and `medium` may not exist at all. A row that
- * held one connector's list would offer a level another target cannot take, and
- * sending it through unchanged asked that provider for an effort it had never
- * advertised.
+ * The picker offers three: `low`, `medium`, `high`. Providers do not agree on
+ * that vocabulary — one has `none/low/high/max`, another `low/medium/high`,
+ * another `minimal/.../xhigh` — so a row cannot offer one connector's list
+ * without offering levels another target never advertised.
  *
- * The levels are therefore one ordered ladder from least to most, and a row
- * declares every level any of its targets offers. Sending a level a target does
- * not have maps to the nearest one it does, with a tie going to the lower rung:
- * `max` on a three-rung target is that target's top, `none` on a target that
- * starts at `low` is `low`. A name both sides share is used as itself, so
+ * Three levels are therefore the surface, and a target's own ladder is folded
+ * onto their tail: its highest rung is what `high` means, the rung below that is
+ * `medium`, and everything under it is `low`. A five-rung target reads
+ * low/low/low/medium/high, so asking for `low` there does not buy a middle
+ * effort the row never offered. A name both sides share is used as itself, so
  * `high` means `high` wherever it exists.
  */
 
@@ -41,78 +40,82 @@ function rankOf(variant: Variant, index: number): number {
 	return EFFORT_ORDER.length + index;
 }
 
+/** The three levels the picker offers, least to most. */
+const SURFACE = ["low", "medium", "high"] as const;
+
+type Surface = (typeof SURFACE)[number];
+
 /**
- * One ladder for a row: every level any target offers, ordered least to most.
+ * Which of the three a requested level means. Levels below `low` and above
+ * `high` exist on providers, and a rung is folded onto the end it belongs to:
+ * an old session asking for `max` gets the row's `high`, never a middle rung.
+ */
+function surfaceRank(id: string): number {
+	const known = id.toLowerCase() as (typeof EFFORT_ORDER)[number];
+	const index = EFFORT_ORDER.indexOf(known);
+	if (index < 0) return 1;
+	if (index <= EFFORT_ORDER.indexOf("low")) return 0;
+	if (index >= EFFORT_ORDER.indexOf("high")) return 2;
+	return 1;
+}
+
+/**
+ * One ladder for a row: the three levels, carrying a target's own settings when
+ * that target names the level itself.
  *
  * The first target that offers a name owns its settings, which is what the row
  * declares to the host; sending it to another target goes through `mapVariant`,
  * so the settings the host applied are not assumed to fit.
  */
 export function canonicalVariants(lists: readonly Variant[][]): Variant[] {
-	const byID = new Map<string, Variant & { rank: number }>();
-	let position = 0;
+	const offered = new Map<string, Variant>();
 	for (const list of lists) {
 		for (const variant of list) {
-			const rank = rankOf(variant, position);
-			position += 1;
-			const existing = byID.get(variant.id);
-			// A later spelling of the same rung can tighten the rank when an
-			// unknown id turns out to be a known name elsewhere.
-			if (!existing) byID.set(variant.id, { ...variant, rank });
-			else if (rank < existing.rank) existing.rank = rank;
+			const id = variant.id.toLowerCase();
+			if (!SURFACE.includes(id as Surface)) continue;
+			// A later spelling of the same rung adds nothing; the first target
+			// that offered it is the one whose settings the host applies.
+			if (!offered.has(id)) offered.set(id, variant);
 		}
 	}
-	// The host refuses a session whose level is not in the row it is written
-	// for, and it does that before this plugin is asked. A level carried over
-	// from the model the session previously used would therefore fail the whole
-	// turn on a row that published no rungs of its own. The ladder is always
-	// complete, so any level resolves; `mapVariant` still decides whether the
-	// target actually receives it.
-	for (const [rank, id] of EFFORT_ORDER.entries()) {
-		if (!byID.has(id)) byID.set(id, { id, rank });
-	}
-	return [...byID.values()]
-		.sort((left, right) =>
-			left.rank === right.rank
-				? left.id.localeCompare(right.id)
-				: left.rank - right.rank,
-		)
-		.map(({ id, settings, body }) => ({ body, id, settings }));
+	// Every level the surface offers is declared, even when no target named it:
+	// the host refuses a session whose level is not in the row before this plugin
+	// is asked, so a level carried from the previous model has to resolve here.
+	// A target that names no level still receives none — `mapVariant` says so.
+	return SURFACE.map((id) => offered.get(id) ?? { id });
 }
 
 /**
  * The rung of `target` that means what `requested` asked for.
  *
- * An exact name wins, because providers agree on `low`/`high` often enough that
- * translating them would be inventing work. Otherwise the nearest rung wins,
- * measured on the effort ladder, and a tie goes to the lower one: overshooting a
- * thinking budget costs more and is harder to notice than undershooting it.
+ * The mapping is positional, not name-based: a provider that calls its third
+ * rung `high` has not thereby agreed that `high` means the same effort as
+ * another provider's third rung. The target's ladder is folded onto the row's
+ * three from the top — its last rung is `high`, the one before that `medium`,
+ * and everything earlier is `low` — which is exactly the table a five-rung
+ * target follows: 1/2/3 → low, 4 → medium, 5 → high. A ladder shorter than the
+ * surface is spread across the three, rounding down, so a request never buys
+ * more effort than it asked for.
  */
 export function mapVariant(
 	requested: string | undefined,
 	target: readonly Variant[],
 ): Variant | undefined {
 	if (!requested || target.length === 0) return undefined;
-	const exact = target.find((variant) => variant.id === requested);
-	if (exact) return exact;
 
-	const wanted = rankOf({ id: requested }, 0);
-	let best: Variant | undefined;
-	let bestDistance = Number.POSITIVE_INFINITY;
-	for (const [index, variant] of target.entries()) {
-		const distance = Math.abs(rankOf(variant, index) - wanted);
-		if (
-			distance < bestDistance ||
-			// Ties go to the lower rung, and equal rungs keep declaration order.
-			(distance === bestDistance &&
-				best !== undefined &&
-				rankOf(variant, index) < rankOf(best, index))
-		) {
-			best = variant;
-			bestDistance = distance;
-		}
+	const rank = surfaceRank(requested);
+	if (target.length >= SURFACE.length) {
+		const index = Math.min(
+			target.length - 1,
+			target.length - SURFACE.length + rank,
+		);
+		return target[index];
 	}
-	return best;
+	// A ladder shorter than the surface has no rung to spare: spread the three
+	// across what exists, rounding towards the cheaper rung so a request never
+	// buys more effort than it asked for.
+	const index = Math.floor((rank * (target.length - 1)) / (SURFACE.length - 1));
+	return target[index];
 }
 
 /**
@@ -154,7 +157,7 @@ export function rewriteVariant(
 ) {
 	// A target that names no rung has agreed to none, so the row's rung is
 	// removed rather than sent to a provider that never advertised it.
-	if (!requested || requested.id === target?.id) return body;
+	if (!requested) return body;
 
 	const before = wireFields(requested);
 	const after = wireFields(target);
@@ -174,7 +177,7 @@ export function rewriteVariant(
 			const reasoning = body.reasoning;
 			if (reasoning && typeof reasoning === "object") {
 				(reasoning as Record<string, unknown>).effort = value;
-			} else if (key in body) {
+			} else {
 				body[key] = value;
 			}
 			continue;
