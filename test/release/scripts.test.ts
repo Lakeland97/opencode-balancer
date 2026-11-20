@@ -140,7 +140,7 @@ describe("release scripts", () => {
 		expect(read(outputPath)).toBe("### Minor Changes\n\n- New thing\n");
 	});
 
-	test("creates a GitHub Release only when missing", async () => {
+	test("creates a GitHub Release when missing", async () => {
 		const commands: string[][] = [];
 
 		await createGithubRelease({
@@ -167,6 +167,34 @@ describe("release scripts", () => {
 				"v1.2.3",
 				"--notes-file",
 				"release-notes.md",
+			],
+		]);
+	});
+
+	test("replaces the notes of a release that already exists", async () => {
+		// A re-cut tag must not keep the notes of an earlier attempt: the release
+		// would show text that does not describe what was shipped.
+		const commands: string[][] = [];
+
+		await createGithubRelease({
+			notesFile: "release-notes.md",
+			releaseTag: "v1.2.3",
+			run: async (command) => {
+				commands.push(command);
+				return 0;
+			},
+		});
+
+		expect(commands).toEqual([
+			["gh", "release", "view", "v1.2.3"],
+			[
+				"gh",
+				"release",
+				"edit",
+				"v1.2.3",
+				"--notes-file",
+				"release-notes.md",
+				"--latest",
 			],
 		]);
 	});

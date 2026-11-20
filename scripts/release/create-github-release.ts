@@ -22,7 +22,24 @@ export async function createGithubRelease(
 
 	const releaseExists =
 		(await run(["gh", "release", "view", releaseTag])) === 0;
-	if (releaseExists) return;
+	if (releaseExists) {
+		// A tag can be cut again — a re-run, or a release that was prepared from
+		// different notes. Skipping the existing release then leaves the old
+		// words in front of the new version, and the tag says nothing changed.
+		// Editing is idempotent, so a repeated run costs nothing.
+		const updated = await run([
+			"gh",
+			"release",
+			"edit",
+			releaseTag,
+			"--notes-file",
+			notesFile,
+			"--latest",
+		]);
+		if (updated !== 0)
+			throw new Error(`Failed to update GitHub Release ${releaseTag}`);
+		return;
+	}
 
 	const exitCode = await run([
 		"gh",
