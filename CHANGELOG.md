@@ -1,24 +1,12 @@
 # @thelioo/opencode-balancer
 
-## 0.3.2
-
-### Patch Changes
-
-- b87e76d: A fresh process no longer caches a model list in which a provider has not appeared yet. The first catalogue read after the host starts can happen while a connector is still loading, and its model looked absent for the next half minute — long enough for a row with one healthy credential to call its one working target "no longer offers it" and hand the session an error instead of trying it. A catalogue with a missing target is now treated as a fact about the moment and re-read on the next request.
-
-  The credential marker that means "served the most recent request" now reads `last served`. `in use` sounded like a claim about the present, so a row that had served once and was then parked showed `limited` and `in use` together, which read as a contradiction rather than as the history it is.
-
 ## 0.3.1
 
 ### Patch Changes
 
-- 458c350: A row now re-checks the head of its order after the configured window even while the conversation keeps talking, instead of waiting for an idleness a busy session never reaches. The countdown shows the next check in both the desktop panel and the TUI.
-
-  A billing refusal such as "insufficient credits" now fails over to another credential. The host wraps these as `AI.Error.InvalidRequest`, and the wrapper's name was read as "the request's fault", so a spent account was handed to the session while a working one sat beside it.
-
-  A row now offers three thinking levels — `low`, `medium`, `high` — instead of every name its connectors happen to publish. The host rejects a turn whose level the selected model does not declare, and it does that before routing, so the row declares all three; a target's own ladder is then folded onto their tail. Its highest rung is what `high` means, the rung below that is `medium`, and everything earlier is `low`, which is the table a five-rung target follows: 1/2/3 → low, 4 → medium, 5 → high. A target that publishes no levels receives none at all: the level is removed from the request rather than sent to a provider that never advertised it. A session saved under the previous seven-level row has to choose one of the three once, because the host validates the saved level before the balancer is consulted.
-
-  Every attempt is now addressed to its own connector. The rewrite only ran on a URL that named the balancer stub, so a request the host had already bound to one provider kept that provider's host while receiving the next target's credential — SayGM's key arrived at Cline's endpoint, and the 401 that came back was charged to SayGM, which then looked limited for a reason that belonged to another service. The rewrite now runs on every attempt, and the base it works from is carried by the request itself instead of being read from a session binding a concurrent call can move. A target the walk could not reach is now recorded instead of disappearing, and a row that ends with nothing to serve names why each target was skipped.
+- **Failover belongs to the credential and the host.** A retryable refusal is answered by the next credential of the same row before the session sees it, billing refusals such as "insufficient credits" fail over instead of ending the turn, and every attempt is addressed to its own connector so one provider's key can never reach another provider's host. A target the walk could not reach is recorded, a row that ends with nothing to serve names why each target was skipped, and a model list that is missing a provider is re-read on the next request instead of being cached as "no longer offered".
+- **Thinking is three levels on every row.** `low`, `medium` and `high` are declared even when the targets publish nothing, and a target's own ladder is folded onto their tail: its highest rung is `high`, the rung below that is `medium`, and everything earlier is `low`. A target with no levels receives none at all rather than a level it never advertised. A session saved under the previous seven-level list has to choose one of the three once, because the host validates the level before the balancer is consulted.
+- **`use` is a one-shot pick.** The picked credential shows `pending` immediately, the next request starts on it, and it hands over to whichever target actually answers; a refusal resumes at the row's true head. `in use` remains the mark of the credential that served the most recent request, so a parked credential is never described as serving.
 
 ## 0.3.0
 
