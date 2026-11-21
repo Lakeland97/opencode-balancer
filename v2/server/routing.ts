@@ -17,6 +17,7 @@ import {
 	healthyAccounts,
 	healthyAccountsInOrder,
 } from "./selection";
+import { usePinFor } from "./use-pin";
 
 export type ChosenRoute = FamilyRoute & { account: Account };
 
@@ -33,6 +34,28 @@ function freeVariantOf(route: FamilyRoute): FamilyRoute | undefined {
 		modelID: variant.modelID,
 		name: variant.name ?? variant.modelID,
 		output: variant.output,
+	};
+}
+
+/**
+ * The order a row walks, with the user's pick at its head.
+ *
+ * `use` is an instruction about where the trail starts, not a filter: the list
+ * rotates so the picked provider comes first, the rest follow in the row's own
+ * order, and the wrap lands on the true head. A pick that is not in this row
+ * (or already first) leaves the order alone; a pick that cannot serve is skipped
+ * by the health checks and the walk continues from its place.
+ */
+function withPickAtHead(db: Database, family: ModelFamily): ModelFamily {
+	const pin = usePinFor(db);
+	if (!pin) return family;
+	const chain = resolveChain(db, family);
+	const index = chain.findIndex((route) => route.providerID === pin.providerID);
+	if (index <= 0) return family;
+	return {
+		...family,
+		stored: true,
+		targets: [...chain.slice(index), ...chain.slice(0, index)],
 	};
 }
 
@@ -66,9 +89,10 @@ export function chooseRouteForRequest(
 	exclude: ReadonlySet<string> = new Set(),
 	minContext?: number,
 ): ChosenRoute | undefined {
-	return family.stored
-		? walkStoredChain(db, family, exclude, false, minContext)
-		: walkCredentialOrder(db, family, exclude, false, minContext);
+	const ordered = withPickAtHead(db, family);
+	return ordered.stored
+		? walkStoredChain(db, ordered, exclude, false, minContext)
+		: walkCredentialOrder(db, ordered, exclude, false, minContext);
 }
 
 /** The route to send for one credential, or undefined if free-only blocks it. */
@@ -353,9 +377,10 @@ export function chooseRouteAtAnyCost(
 	family: ModelFamily,
 	exclude: ReadonlySet<string> = new Set(),
 ): ChosenRoute | undefined {
-	const routes = family.stored
-		? resolveChain(db, family)
-		: sortRoutes(family.targets, db);
+	const ordered = withPickAtHead(db, family);
+	const routes = ordered.stored
+		? resolveChain(db, ordered)
+		: sortRoutes(ordered.targets, db);
 	for (const route of routes) {
 		for (const account of enabledAccounts(db, route.providerID)) {
 			if (exclude.has(accountKey(route.providerID, account.alias))) continue;

@@ -259,7 +259,10 @@ describe("account markers", () => {
 
 	test("a quota refusal that names its refill parks until then", () => {
 		const db = freshDb();
-		const reset = Date.parse("2026-11-21T03:08:07.324Z");
+		// Stated in the future by construction: a literal date makes this test
+		// pass until that minute and fail forever after, no matter the code.
+		const reset = now() + 7 * 24 * 60 * 60 * 1000;
+		const iso = new Date(reset).toISOString();
 		// A weekly limit is not a one-minute cooldown. Retrying it every minute
 		// spends a real refusal each time, and a spent provider's wide window
 		// still looks like the best place to send a long conversation, so it is
@@ -269,9 +272,9 @@ describe("account markers", () => {
 			"p1",
 			"a",
 			60_000,
-			"You've reached your weekly usage limit for your plan. Your limit resets at 2026-11-21T03:08:07.324Z.",
+			`You've reached your weekly usage limit for your plan. Your limit resets at ${iso}.`,
 		);
-		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBe(reset);
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBe(Date.parse(iso));
 	});
 
 	test("a gateway failure is not the credential's to sit out", () => {
@@ -291,13 +294,14 @@ describe("account markers", () => {
 	});
 
 	test("a refusal that names its refill only in the body parks until then", () => {
-		const reset = Date.parse("2026-11-25T01:00:40Z");
+		const iso = new Date(now() + 4 * 24 * 60 * 60 * 1000).toISOString();
+		const reset = Date.parse(iso);
 		const body = JSON.stringify({
 			error: {
 				code: "insufficient_balance",
 				details: {
 					coding_plan_exhausted: true,
-					reset_at: "2026-11-25T01:00:40Z",
+					reset_at: iso,
 				},
 				message:
 					"Coding Plan quota is exhausted and wallet balance is insufficient.",
@@ -318,8 +322,9 @@ describe("account markers", () => {
 	});
 
 	test("the header still decides when it names a wait", () => {
+		const iso = new Date(now() + 4 * 24 * 60 * 60 * 1000).toISOString();
 		const body = JSON.stringify({
-			error: { message: "resets at 2026-11-25T01:00:40Z" },
+			error: { message: `resets at ${iso}` },
 		});
 		const response = new Response(body, {
 			headers: { "retry-after": "30" },

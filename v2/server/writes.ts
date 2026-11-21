@@ -22,6 +22,7 @@ import { invalidateCatalog } from "./connectors";
 import { forgetRoutingMemory } from "./hooks";
 import { recordLog } from "./log";
 import type { WriteResult } from "./settings";
+import { writeUsePin } from "./use-pin";
 
 type Pair = { providerID: string; alias: string };
 /** A chain target is named by its provider alone; a credential pair is not its key. */
@@ -87,6 +88,7 @@ export function writeUse(db: Database, input: Pair): WriteResult {
 	// order the pick just changed. The window restarts by construction — the new
 	// trail begins at the current time.
 	forgetRoutingMemory(db);
+	writeUsePin(db, providerID, account.alias);
 	recordLog("config", `serving with ${providerID}/${account.alias}`);
 	return {
 		message: `Serving with ${providerID}/${account.alias}.`,

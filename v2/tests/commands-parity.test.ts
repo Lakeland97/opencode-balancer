@@ -261,7 +261,7 @@ describe("review parity cases", () => {
 		// Parked with no words from the endpoint: the fallback explains it.
 		markRateLimited(db, "p3", "a");
 		const out = await runCommand({ ctx: {} as never, db, raw: "errors" });
-		expect(out).toContain("[last served, limited]");
+		expect(out).toContain("[in use, limited]");
 		expect(out).toContain("[limited, disabled]");
 		expect(out).toContain("no reason was recorded for this park");
 	});

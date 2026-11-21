@@ -906,6 +906,7 @@ export function BalancerPanel(props: {
 									active: row.account.active,
 									inUse: row.account.inUse,
 									limited: row.account.limited,
+									pending: row.account.pending,
 								})
 									.map((marker) => ` · ${copy[marker]}`)
 									.join("")

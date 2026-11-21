@@ -12,6 +12,8 @@ export type Account = {
 	active: boolean;
 	/** What would authorise the next request, fallback included. */
 	inUse: boolean;
+	/** Picked with `use`; the next request starts here, then it hands over. */
+	pending?: boolean;
 	limited: boolean;
 	/** What the endpoint reported when it parked this account. */
 	limitedReason?: string;

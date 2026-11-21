@@ -2,21 +2,23 @@ import type { Account, InUseEntry } from "../types";
 import { formatRollover } from "./rollover";
 
 /** The words a credential's marker can carry, in render order. */
-export type RouteMarker = "active" | "inUse" | "limited";
+export type RouteMarker = "active" | "inUse" | "pending" | "limited";
 
 /**
- * The markers a credential earns. "last served" replaces "active" because the
- * same row cannot be both the one that served and merely able to serve; a park
- * is additive, because a credential can have served and then been parked — and
- * "last served" says that it was the last, not that it is serving now.
+ * The markers a credential earns. `pending` says the user picked this
+ * credential and the next request will start on it; `in use` says it served
+ * the most recent request. Pending replaces both because it is the newer
+ * statement, and a park is additive: a credential can be picked and limited.
  */
 export function routeMarkers(input: {
 	active: boolean;
 	inUse: boolean;
 	limited: boolean;
+	pending?: boolean;
 }): RouteMarker[] {
 	const markers: RouteMarker[] = [];
-	if (input.inUse) markers.push("inUse");
+	if (input.pending) markers.push("pending");
+	else if (input.inUse) markers.push("inUse");
 	else if (input.active) markers.push("active");
 	if (input.limited) markers.push("limited");
 	return markers;

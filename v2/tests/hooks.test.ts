@@ -4,6 +4,7 @@ import type { Context } from "@opencode/plugin/promise/plugin";
 
 import {
 	getAccount,
+	orderedAccounts,
 	readLimitedReason,
 	readLimitedUntil,
 	saveAccount,
@@ -26,6 +27,8 @@ import {
 import { markRateLimited } from "../server/request-state";
 import { noteSessionTokens } from "../server/route-memory";
 import { registerBalancerRpc } from "../server/rpc";
+import { usePinFor } from "../server/use-pin";
+import { writeUse } from "../server/writes";
 
 const PROVIDER = "anthropic";
 const MODEL = { id: "claude-test", providerID: PROVIDER };
@@ -413,6 +416,80 @@ describe("the session's target", () => {
 		return { db, registry };
 	}
 
+	async function twoTargetsSetup() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const offered = (providerID: string, baseURL: string) => ({
+			enabled: true,
+			limit: { context: 1_000_000, output: 4096 },
+			modelID: "deepseek-v4.1-flash",
+			name: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			providerID,
+			settings: { baseURL },
+			type: "chat",
+		});
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						offered("p1", "https://p1.invalid/v1"),
+						offered("p2", "https://p2.invalid/v1"),
+					],
+				}),
+			},
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		saveAccount(db, "p2", "a", apiAuth("sk-2"));
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
+	async function threeTargetsSetup() {
+		const db = freshDb();
+		const registry: Record<string, HookCallback> = {};
+		const offered = (providerID: string, baseURL: string) => ({
+			enabled: true,
+			limit: { context: 1_000_000, output: 4096 },
+			modelID: "deepseek-v4.1-flash",
+			name: "DeepSeek V4.1 Flash",
+			package: PACKAGE,
+			providerID,
+			settings: { baseURL },
+			type: "chat",
+		});
+		const ctx = {
+			model: {
+				list: async () => ({
+					data: [
+						offered("p1", "https://p1.invalid/v1"),
+						offered("p2", "https://p2.invalid/v1"),
+						offered("p3", "https://p3.invalid/v1"),
+					],
+				}),
+			},
+			session: {
+				hook: async (name: string, callback: HookCallback) => {
+					registry[name] = callback;
+					return { dispose: async () => {} };
+				},
+			},
+		};
+		saveAccount(db, "p1", "a", apiAuth("sk-1"));
+		saveAccount(db, "p2", "a", apiAuth("sk-2"));
+		saveAccount(db, "p3", "a", apiAuth("sk-3"));
+		invalidateCatalog();
+		await registerHooks({ ctx: ctx as unknown as Context, db });
+		return { db, registry };
+	}
+
 	test("a conversation larger than every window still sends somewhere", async () => {
 		const { db, registry } = await routedSetup();
 		// The only target publishes 200k and the conversation is past it. Every
@@ -454,6 +531,68 @@ describe("the session's target", () => {
 				providerID: "p1",
 			},
 		]);
+	});
+
+	test("a pick heads the row while it can serve", async () => {
+		const { db, registry } = await twoTargetsSetup();
+		const send = async (sessionID: string) => {
+			const event = {
+				agent: "build",
+				headers: {} as Record<string, string>,
+				kind: "chat",
+				model: BALANCER,
+				sessionID,
+			};
+			await registry["model.request"](event);
+			return (event as { baseURL?: string }).baseURL;
+		};
+
+		// No memory yet: the row starts where its order starts.
+		expect(await send("pick-1")).toBe("https://p1.invalid/v1");
+
+		// p1 answered last, so the sticky note now names p1. The pick says p2,
+		// and it must outrank that note.
+		expect(usePinFor(db)).toBeUndefined();
+		writeUse(db, { alias: "a", providerID: "p2" });
+		expect(await send("pick-2")).toBe("https://p2.invalid/v1");
+		// One shot: the pick was consumed by that request. The next request
+		// follows the row's own memory (the note p2 wrote when it answered).
+		expect(usePinFor(db)).toBeUndefined();
+		expect(await send("pick-3")).toBe("https://p2.invalid/v1");
+	});
+
+	test("the pick is one shot, and a refusal resumes at the true head", async () => {
+		const { db, registry } = await threeTargetsSetup();
+		const send = async (sessionID: string) => {
+			const event = {
+				agent: "build",
+				headers: {} as Record<string, string>,
+				kind: "chat",
+				model: BALANCER,
+				sessionID,
+			};
+			await registry["model.request"](event);
+			return (event as { baseURL?: string }).baseURL;
+		};
+		const refuse = async (sessionID: string) => {
+			await registry.retry({
+				agent: "build",
+				attempt: 1,
+				decision: {},
+				error: { message: "rate limited", status: 429 },
+				model: BALANCER,
+				sessionID,
+			});
+		};
+
+		writeUse(db, { alias: "a", providerID: "p2" });
+		// Starts on p2, not on the row's true head.
+		expect(await send("wrap-1")).toBe("https://p2.invalid/v1");
+
+		// p2 refuses. The pick was for that one request, so the failover walks
+		// the row's own order from its true head.
+		await refuse("wrap-1");
+		expect(await send("wrap-2")).toBe("https://p1.invalid/v1");
 	});
 
 	test("a session that never routed here has nothing to compact", async () => {
@@ -1008,13 +1147,14 @@ describe("a balance that has gone stale", () => {
 		expect(event.headers.authorization).toBe("Bearer sk-1");
 	});
 
-	test("a pick on a provider that is not first leaves the order alone", async () => {
+	test("a pick on a provider that is not first heads the walk, not the order", async () => {
 		const { ctx, db, registry } = await twoProviders();
 
 		// p1 holds the head of the order and p2 holds one credential of its own.
 		// Picking p2 selects that credential inside p2; it must not drag p2 in
-		// front of p1, because that would change which provider serves every
-		// other model too. Until the order moves, p1 still serves.
+		// front of p1 in the stored order, because that would change which
+		// provider serves every other model too. The pick is a head for this
+		// row's walk, not a reordering of the panel.
 		const rpc = (await registerBalancerRpc({ ctx, db })) as unknown as Record<
 			string,
 			(input: unknown) => Promise<unknown>
@@ -1023,10 +1163,15 @@ describe("a balance that has gone stale", () => {
 			ok: boolean;
 		};
 		expect(picked.ok).toBe(true);
+		expect(orderedAccounts(db).map((account) => account.providerID)).toEqual([
+			"p1",
+			"p2",
+		]);
 
+		// The walk starts on the pick. This is the promise the button makes.
 		const event = request("picked-second");
 		await registry["model.request"](event);
-		expect(event.headers.authorization).toBe("Bearer sk-1");
+		expect(event.headers.authorization).toBe("Bearer sk-2");
 	});
 });
 

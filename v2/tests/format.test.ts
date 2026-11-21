@@ -48,6 +48,16 @@ describe("route markers", () => {
 			"limited",
 		]);
 	});
+	test("pending wins over in use until the pick is dispatched", () => {
+		expect(
+			routeMarkers({
+				active: true,
+				inUse: true,
+				limited: false,
+				pending: true,
+			}),
+		).toEqual(["pending"]);
+	});
 	test("active is the fallback", () => {
 		expect(
 			routeMarkers({ active: true, inUse: false, limited: false }),

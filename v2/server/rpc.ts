@@ -26,6 +26,7 @@ import {
 	writeRebalance,
 	writeRebalanceAuto,
 } from "./settings";
+import { usePinFor } from "./use-pin";
 import {
 	writeChainAdd,
 	writeChainCreate,
@@ -172,6 +173,9 @@ export async function registerBalancerRpc({
 					(entry) => `${entry.providerID}\u0000${entry.alias ?? ""}`,
 				),
 			);
+			// The pick is shown from the click until a request is dispatched (and
+			// consumes it), which is the immediate feedback the button promised.
+			const pick = usePinFor(db);
 			return {
 				accounts: accounts.map((account) => {
 					// A park is cleared by the next attempt, so any park at all
@@ -209,6 +213,10 @@ export async function registerBalancerRpc({
 						limitedUntil: limited
 							? (readLimitedUntil(db, account.providerID, account.alias) ?? 0)
 							: 0,
+						pending:
+							!account.disabled &&
+							pick?.providerID === account.providerID &&
+							pick?.alias === account.alias,
 						providerID: account.providerID,
 					};
 				}),

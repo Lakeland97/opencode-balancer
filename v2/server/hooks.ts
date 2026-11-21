@@ -65,6 +65,7 @@ import {
 	rewriteModel,
 } from "./routing";
 import { hasAlternativeAccount, selectHealthyAccount } from "./selection";
+import { takeUsePin, usePinFor } from "./use-pin";
 import { mapVariant, rewriteVariant } from "./variants";
 
 /**
@@ -1148,6 +1149,9 @@ function chooseStickyRoute(input: {
 	// The window is periodic, not idle: a conversation that keeps talking must
 	// still check whether a cheaper target at the head has recovered. The check
 	// is lazy, so it runs on this request rather than on a timer.
+	// A pick made with `use` heads the row: it is the trail's start, so the
+	// note from an earlier answer must not steer the first request away from it.
+	const picked = usePinFor(db) !== undefined;
 	const rebalanced = rebalanceIfDue(db, family.key);
 	const tried = triedFor(family.key);
 	// The row's own note is the same fact the map holds, written down. A reload
@@ -1155,16 +1159,18 @@ function chooseStickyRoute(input: {
 	// moved off a provider that was still serving it — the panel said one thing
 	// and routing did another. Reading the note keeps the row sticky across
 	// reloads, and it only moves when the pinned provider cannot serve the row.
-	// A row that just rebalanced skips both: checking the head is the point.
-	const noted = rebalanced ? undefined : servedFor(db, family.key);
+	// A row that just rebalanced, or that the user has picked a head for, skips
+	// both: the pick and the head check are the point.
+	const noted = rebalanced || picked ? undefined : servedFor(db, family.key);
 	const remembered:
 		| { providerID: string; alias: string; at: number }
-		| undefined = rebalanced
-		? undefined
-		: (pinnedByRow.get(family.key) ??
-			(noted?.alias
-				? { alias: noted.alias, at: noted.at, providerID: noted.providerID }
-				: undefined));
+		| undefined =
+		rebalanced || picked
+			? undefined
+			: (pinnedByRow.get(family.key) ??
+				(noted?.alias
+					? { alias: noted.alias, at: noted.at, providerID: noted.providerID }
+					: undefined));
 	const pinned =
 		remembered && fresh(remembered)
 			? {
@@ -1290,6 +1296,10 @@ export async function registerHooks({
 					family,
 					sessionID: event.sessionID,
 				});
+		// The pick is for exactly this request. Consuming it after selection lets
+		// the first attempt start on it, while the failover retries that follow a
+		// refusal walk the row's own order from its true head.
+		if (!side) takeUsePin(db);
 		if (!chosen) {
 			// Nothing in the row is healthy. Leaving the call pointed at the stub
 			// is not a quiet failure: `balancer.invalid` does not resolve, so the

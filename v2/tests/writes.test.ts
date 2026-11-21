@@ -6,6 +6,7 @@ import { migrate } from "../core/schema";
 import { invalidateCatalog } from "../server/connectors";
 import { clearLog, readLog } from "../server/log";
 import { markRateLimited } from "../server/request-state";
+import { usePinFor } from "../server/use-pin";
 import {
 	writeChainAdd,
 	writeChainCreate,
@@ -84,6 +85,11 @@ describe("account writes", () => {
 		expect(writeUse(db, { alias: "a", providerID: "p1" }).ok).toBe(true);
 		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
 		expect(readLog().at(-1)?.text).toBe("serving with p1/a");
+		expect(usePinFor(db)).toEqual({
+			alias: "a",
+			at: expect.any(Number),
+			providerID: "p1",
+		});
 	});
 	test("use never moves the provider order", () => {
 		const db = freshDb();
