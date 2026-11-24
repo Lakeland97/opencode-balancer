@@ -1748,18 +1748,20 @@ export async function registerHooks({
 
 		// A lost connection says nothing about the credential: it may say this
 		// machine has no uplink. Ask the internet first; if it is gone, retry
-		// the same target instead of parking it or moving the row off it. Only
-		// an affirmative answer lets a connection failure be charged onward.
-		if (
-			isConnectionFailure({ error: event.error, status }) &&
-			!(await internetReachable())
-		) {
+		// the same target instead of parking it or moving the row off it. If the
+		// uplink is fine, the host really did not answer, so the row moves on —
+		// but the credential is still not the thing that failed.
+		const connection = isConnectionFailure({ error: event.error, status });
+		if (connection && !(await internetReachable())) {
 			recordLog(
 				"failover",
 				`${from} failed: ${reported.slice(0, 120)}; no internet, so it is not charged`,
 			);
 			event.decision = { ...(event.decision ?? {}), delay: 5_000, retry: true };
 			return;
+		}
+		if (connection) {
+			recordLog("failover", `${from} could not be reached; not parked`);
 		}
 
 		// Three failures arrive here, and only one of them is about the account:
@@ -1844,6 +1846,7 @@ export async function registerHooks({
 		if (
 			!refusal &&
 			!timeout &&
+			!connection &&
 			!isRetryableFailure({ error: event.error, status })
 		) {
 			recordLog(
@@ -1862,9 +1865,10 @@ export async function registerHooks({
 		}
 
 		// Park before deciding, so a failure that cannot be passed on still
-		// leaves the account out of the next selection. A timeout and a model
-		// refusal are excluded on purpose: neither says the credential is spent.
-		if (!refusal && !timeout) {
+		// leaves the account out of the next selection. A timeout, a model
+		// refusal and a lost connection are excluded on purpose: none of them
+		// says the credential is spent.
+		if (!refusal && !timeout && !connection) {
 			const park = Math.min(
 				errorRetryAfterMs(event.error) ?? 60_000,
 				MAX_PARK_MS,

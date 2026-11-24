@@ -1198,7 +1198,7 @@ describe("a balance that has gone stale", () => {
 		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
 	});
 
-	test("a dropped connection with the internet up is still charged", async () => {
+	test("a dropped connection with the internet up moves on, not parked", async () => {
 		const { db, registry } = await twoProviders();
 		setInternetProbe(async () => true);
 
@@ -1213,9 +1213,11 @@ describe("a balance that has gone stale", () => {
 		};
 		await registry.retry(failed);
 
-		// The uplink is fine, so the endpoint really is the one that could not
-		// be reached and the account sits out like any other failure.
-		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeDefined();
+		// The uplink is fine, so the host really did not answer and the row
+		// tries another target. Nothing was learned about the credential, so it
+		// is not parked either.
+		expect(failed.decision).toEqual({ delay: 0, retry: true });
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
 	});
 });
 
