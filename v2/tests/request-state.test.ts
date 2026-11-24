@@ -1,5 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { isRetryableFailure } from "../server/request-state";
+import {
+	isConnectionFailure,
+	isRetryableFailure,
+} from "../server/request-state";
 
 describe("failure classification", () => {
 	test("a timeout worded as an abort still belongs to the account", () => {
@@ -60,5 +63,30 @@ describe("failure classification", () => {
 			name: "InvalidRequest",
 		});
 		expect(isRetryableFailure({ error })).toBe(false);
+	});
+
+	test("a connection that never reached the endpoint is recognised", () => {
+		expect(isConnectionFailure({ error: new TypeError("fetch failed") })).toBe(
+			true,
+		);
+		expect(
+			isConnectionFailure({
+				error: { message: "getaddrinfo ENOTFOUND api.example.test" },
+			}),
+		).toBe(true);
+		expect(
+			isConnectionFailure({
+				error: { message: "read ECONNRESET" },
+			}),
+		).toBe(true);
+	});
+
+	test("an answer is not mistaken for a lost connection", () => {
+		expect(
+			isConnectionFailure({ error: new Error("quota exceeded"), status: 429 }),
+		).toBe(false);
+		expect(isConnectionFailure({ error: new Error("model not found") })).toBe(
+			false,
+		);
 	});
 });

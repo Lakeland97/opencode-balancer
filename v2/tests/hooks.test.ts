@@ -24,6 +24,7 @@ import {
 	ontoTarget,
 	registerHooks,
 } from "../server/hooks";
+import { setInternetProbe } from "../server/reachability";
 import { markRateLimited } from "../server/request-state";
 import { noteSessionTokens } from "../server/route-memory";
 import { registerBalancerRpc } from "../server/rpc";
@@ -49,6 +50,8 @@ const apiAuth = (key: string) => ({ key, type: "api" as const });
 // an untouched order: one case's failover must not be the next one's start.
 beforeEach(() => {
 	forgetRoutingMemory();
+	// Each case starts on the real probe's default; the offline cases replace it.
+	setInternetProbe();
 });
 
 async function setup() {
@@ -1172,6 +1175,47 @@ describe("a balance that has gone stale", () => {
 		const event = request("picked-second");
 		await registry["model.request"](event);
 		expect(event.headers.authorization).toBe("Bearer sk-2");
+	});
+
+	test("a dropped connection with no internet is not charged", async () => {
+		const { db, registry } = await twoProviders();
+		setInternetProbe(async () => false);
+
+		await registry["model.request"](request("offline-1"));
+		const failed = {
+			agent: "build",
+			attempt: 1,
+			decision: {},
+			error: { message: "fetch failed", name: "TypeError" },
+			model: BALANCER,
+			sessionID: "offline-1",
+		};
+		await registry.retry(failed);
+
+		// The endpoint was never reached, so the account keeps its health and
+		// the host is asked to try again rather than the row being walked.
+		expect(failed.decision).toEqual({ delay: 5_000, retry: true });
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeUndefined();
+	});
+
+	test("a dropped connection with the internet up is still charged", async () => {
+		const { db, registry } = await twoProviders();
+		setInternetProbe(async () => true);
+
+		await registry["model.request"](request("offline-2"));
+		const failed = {
+			agent: "build",
+			attempt: 1,
+			decision: {},
+			error: { message: "fetch failed", name: "TypeError" },
+			model: BALANCER,
+			sessionID: "offline-2",
+		};
+		await registry.retry(failed);
+
+		// The uplink is fine, so the endpoint really is the one that could not
+		// be reached and the account sits out like any other failure.
+		expect(getAccount(db, "p1", "a")?.rateLimitedUntil).toBeDefined();
 	});
 });
 

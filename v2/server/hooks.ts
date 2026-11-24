@@ -28,8 +28,10 @@ import {
 import { recordLog } from "./log";
 import { noteModelUnavailable } from "./model-availability";
 import { promptTokensFrom, summaryPromptTokensFrom } from "./prompt-size";
+import { internetReachable } from "./reachability";
 import {
 	errorRetryAfterMs,
+	isConnectionFailure,
 	isModelRefusal,
 	isOverflowFailure,
 	isRetryableFailure,
@@ -495,6 +497,17 @@ async function failoverResponse(input: {
 				const reason = (
 					error instanceof Error ? error.message : String(error)
 				).slice(0, 160);
+				// A connection that never left this machine is not this provider's
+				// answer. If the internet itself is gone, ending the walk here is
+				// the honest outcome: walking the other targets would only name
+				// every one of them unavailable for the same local reason.
+				if (isConnectionFailure({ error }) && !(await internetReachable())) {
+					recordLog(
+						"failover",
+						`no internet: ${reason}; not charging ${route.providerID}/${route.account.alias}`,
+					);
+					return abandon();
+				}
 				pending.tried.add(accountKey(route.providerID, route.account.alias));
 				// A walk that skips a host must say so durably: the session only
 				// sees the last refusal, and a healthy credential that could not
@@ -1732,6 +1745,22 @@ export async function registerHooks({
 
 		const rowKey = event.model.id;
 		const from = `${tracked.providerID}/${tracked.alias}`;
+
+		// A lost connection says nothing about the credential: it may say this
+		// machine has no uplink. Ask the internet first; if it is gone, retry
+		// the same target instead of parking it or moving the row off it. Only
+		// an affirmative answer lets a connection failure be charged onward.
+		if (
+			isConnectionFailure({ error: event.error, status }) &&
+			!(await internetReachable())
+		) {
+			recordLog(
+				"failover",
+				`${from} failed: ${reported.slice(0, 120)}; no internet, so it is not charged`,
+			);
+			event.decision = { ...(event.decision ?? {}), delay: 5_000, retry: true };
+			return;
+		}
 
 		// Three failures arrive here, and only one of them is about the account:
 		//

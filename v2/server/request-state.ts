@@ -66,6 +66,23 @@ const INVALID_REQUEST_TEXT =
 	/model_not_found|model unavailable|model not found|invalid[-_ ]?request|invalid prompt|validation ?exception|unsupported (?:model|operation|parameter)|does not support|no such model/i;
 
 /**
+ * Words that mean the request never left this machine, or never came back.
+ * A status, when one exists, already says the opposite: the endpoint answered,
+ * so the connection is fine and the failure is about the account or the request.
+ */
+const CONNECTION_TEXT =
+	/fetch failed|network|econn\w*|enotfound|eai_again|getaddrinfo|socket hang up|connection (?:reset|refused|closed|lost|aborted)|no internet|offline|unreachable|dns|tls handshake|connect(?:ion)? timed?\s*out|etimedout/i;
+
+/** Whether a failure is a lost connection rather than an answer. */
+export function isConnectionFailure(input: {
+	error?: unknown;
+	status?: number;
+}): boolean {
+	if (typeof input.status === "number" && input.status >= 400) return false;
+	return CONNECTION_TEXT.test(errorText(input.error));
+}
+
+/**
  * What a provider says when the credential is healthy but the *model* is not on
  * the plan it holds, or the request kind is not offered for it. Every other
  * model on that provider still works, so this must neither park the credential
